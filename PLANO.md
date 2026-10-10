@@ -43,7 +43,7 @@ próprio usuário (Play Store) e fica em `ux0:data/ffvii-vita/`. O build roda
 ux0:data/ffvii-vita/
 ├── base.apk                                                  ← APK original (a .so é lida de dentro dele)
 ├── main.30.com.square_enix.android_googleplay.FFVII.obb      ← OBB original, sem modificação
-├── save/                                                     ← criado pelo loader (setDataPath)
+├── Documents/                                                ← criado pelo loader: saves, ff7opt.cfg, APP.LOG do jogo
 ├── logs.txt                                                  ← log da execução atual
 └── logs_anterior.txt                                         ← log da execução anterior
 ur0:data/libshacccg.suprx                                     ← compilador de shaders (padrão vitaGL)
@@ -106,7 +106,7 @@ Plugin obrigatório: `kubridge.skprx` no `config.txt` do taiHEN (`*KERNEL`).
 - [ ] **Plano B** se o FPS não bastar: script no PC do usuário converte os `.webm` dele para H.264 e o port usa `sceAvPlayer` (decodificação por hardware)
 
 ### Fase 6 — Sistema
-- [ ] Saves em `ux0:data/ffvii-vita/save/` (`updateSaveDataFile`, `postDeleteSaveFile`)
+- [ ] Saves em `ux0:data/ffvii-vita/Documents/` (`save%02d.ff7`) (`updateSaveDataFile`, `postDeleteSaveFile`)
 - [ ] Suspend/resume (`onPause`/`onResume`), bateria (`scePowerGetBatteryLifePercent`)
 - [ ] `OpenURL`/`CloudLaunch` como no-op
 

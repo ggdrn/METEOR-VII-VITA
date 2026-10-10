@@ -79,7 +79,7 @@ void soloader_init_all() {
                     "(Android v1.0.29) files to:\n%s\n%s",
                     APK_PATH, OBB_PATH);
     }
-    sceIoMkdir(SAVE_PATH, 0777);
+    sceIoMkdir(DOCUMENTS_PATH, 0777);
 
     apk_zip = zip_open(APK_PATH);
     zip_entry * so_entry = apk_zip ? zip_find(apk_zip, SO_APK_ENTRY) : NULL;

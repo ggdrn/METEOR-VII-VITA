@@ -16,6 +16,7 @@
 #include <stdio.h>
 
 #include <psp2/apputil.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/system_param.h>
 
@@ -95,8 +96,8 @@ int main() {
     l_info("setLang(%i)", lang);
     ff7_setLang(&jni, FF7_CLASS, lang);
 
-    l_info("setDataPath(\"%s\")", SAVE_PATH);
-    ff7_setDataPath(&jni, FF7_CLASS, jni->NewStringUTF(&jni, SAVE_PATH));
+    l_info("setDataPath(\"%s\")", DOCUMENTS_PATH);
+    ff7_setDataPath(&jni, FF7_CLASS, jni->NewStringUTF(&jni, DOCUMENTS_PATH));
 
     // MainActivity.onResume()
     l_info("setAssetManager / onResume");
@@ -112,6 +113,8 @@ int main() {
 
     l_success("Entering main loop.");
     unsigned int frame = 0;
+    unsigned int heartbeat_frame = 0;
+    SceUInt64 heartbeat_us = sceKernelGetProcessTimeWide();
     while (1) {
         controls_poll();
 
@@ -123,6 +126,15 @@ int main() {
         }
 
         gl_swap();
+
+        // Heartbeat: tells a hang apart from a running game in logs.txt
+        SceUInt64 now = sceKernelGetProcessTimeWide();
+        if (now - heartbeat_us >= 5000000) {
+            l_info("heartbeat: frame %u, %.1f fps", frame,
+                   (frame - heartbeat_frame) * 1000000.0 / (double) (now - heartbeat_us));
+            heartbeat_frame = frame;
+            heartbeat_us = now;
+        }
     }
 
     sceKernelExitDeleteThread(0);

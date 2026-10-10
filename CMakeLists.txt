@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.01")
+set(PORT_VERSION "0.00.02")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -36,11 +36,13 @@ set(DATA_PATH "ux0:data/ffvii-vita/") # Path to data (with trailing /)
 set(APK_PATH "${DATA_PATH}base.apk") # Original APK (v1.0.29)
 set(SO_APK_ENTRY "lib/armeabi-v7a/libjni_ff7.so") # .so loaded straight from the APK
 set(OBB_PATH "${DATA_PATH}main.30.com.square_enix.android_googleplay.FFVII.obb")
-set(SAVE_PATH "${DATA_PATH}save") # passed to setDataPath (Android passes no trailing /)
+# Android passes getExternalFilesDir()/Documents to setDataPath; the game then
+# uses dirname(path) + "/Documents/" for saves, options and APP.LOG.
+set(DOCUMENTS_PATH "${DATA_PATH}Documents")
 set(LOG_PATH "${DATA_PATH}logs.txt")
 add_definitions(-DDATA_PATH="${DATA_PATH}" -DAPK_PATH="${APK_PATH}"
                 -DSO_APK_ENTRY="${SO_APK_ENTRY}" -DOBB_PATH="${OBB_PATH}"
-                -DSAVE_PATH="${SAVE_PATH}" -DLOG_PATH="${LOG_PATH}")
+                -DDOCUMENTS_PATH="${DOCUMENTS_PATH}" -DLOG_PATH="${LOG_PATH}")
 
 # Loader logs (info/warn/error) go to LOG_PATH even in Release builds.
 # Debug builds additionally enable l_debug() and verbose loader output.
