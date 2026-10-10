@@ -1,6 +1,7 @@
 #ifndef ANDROID_ASSET_MANAGER_H
 #define ANDROID_ASSET_MANAGER_H
 
+#include <stdint.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
 
@@ -133,6 +134,14 @@ off_t AAsset_getLength(AAsset* asset);
  * compressed).
  */
 int AAsset_openFileDescriptor(AAsset* asset, off_t* outStart, off_t* outLength);
+
+/* 64-bit variants and extras used by the game */
+AAssetManager * AAssetManager_fromJava(void * env, void * assetManager);
+int AAsset_openFileDescriptor64(AAsset* asset, int64_t* outStart, int64_t* outLength);
+int64_t AAsset_seek64(AAsset* asset, int64_t offset, int whence);
+int64_t AAsset_getLength64(AAsset* asset);
+int64_t AAsset_getRemainingLength64(AAsset* asset);
+const void * AAsset_getBuffer(AAsset* asset);
 
 #ifdef __cplusplus
 };

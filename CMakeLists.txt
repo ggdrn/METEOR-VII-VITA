@@ -17,7 +17,12 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 set(VITA_APP_NAME "FINAL FANTASY VII")
 set(VITA_TITLEID "FFSQ00007")
 set(VITA_VPKNAME "ff7_vita")
-set(VITA_VERSION "01.00")
+set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
+
+# Port version: bump the last field on every build handed out for testing
+# (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
+set(PORT_VERSION "0.00.01")
+add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
 # Optional: used for "send" and "dump" targets
@@ -27,14 +32,22 @@ set(PARSECOREPATH "$ENV{PARSECOREPATH}" CACHE STRING "vita-parse-core main.py")
 # Game-specific definitions
 # No game data is ever shipped in the VPK: the user copies the original files
 # from their own Play Store install into DATA_PATH (see docs/DADOS.md).
-set(DATA_PATH "ux0:data/ff7/") # Path to data (with trailing /)
+set(DATA_PATH "ux0:data/ffvii-vita/") # Path to data (with trailing /)
 set(APK_PATH "${DATA_PATH}base.apk") # Original APK (v1.0.29)
 set(SO_APK_ENTRY "lib/armeabi-v7a/libjni_ff7.so") # .so loaded straight from the APK
 set(OBB_PATH "${DATA_PATH}main.30.com.square_enix.android_googleplay.FFVII.obb")
-set(SAVE_PATH "${DATA_PATH}save/")
+set(SAVE_PATH "${DATA_PATH}save") # passed to setDataPath (Android passes no trailing /)
+set(LOG_PATH "${DATA_PATH}logs.txt")
 add_definitions(-DDATA_PATH="${DATA_PATH}" -DAPK_PATH="${APK_PATH}"
                 -DSO_APK_ENTRY="${SO_APK_ENTRY}" -DOBB_PATH="${OBB_PATH}"
-                -DSAVE_PATH="${SAVE_PATH}")
+                -DSAVE_PATH="${SAVE_PATH}" -DLOG_PATH="${LOG_PATH}")
+
+# Loader logs (info/warn/error) go to LOG_PATH even in Release builds.
+# Debug builds additionally enable l_debug() and verbose loader output.
+option(ENABLE_LOGGING "Write loader logs to ${LOG_PATH}" ON)
+if (ENABLE_LOGGING)
+  add_definitions(-DENABLE_LOGGING)
+endif()
 
 # Port type
 option(NDK_PORT "This should be on if the game is done with Android NDK (has an android_main entry point)" OFF)
@@ -126,6 +139,9 @@ set(SOURCES
     lib/falso_jni/FalsoJNI.c
     lib/falso_jni/FalsoJNI_ImplBridge.c
     lib/falso_jni/FalsoJNI_Logger.c
+    lib/stb/stb_image.c
+    source/reimpl/asset_manager.c
+    source/reimpl/egl_extra.c
     lib/falso_jni/converter.c
     lib/sha1/sha1.c
     lib/fios/fios.c
@@ -133,12 +149,13 @@ set(SOURCES
 
 if(NOT NDK_PORT)
 list(APPEND SOURCES
-  source/reimpl/asset_manager.cpp
   source/reimpl/controls.c
   source/reimpl/controls.h)
 endif()
 
 add_executable(${CMAKE_PROJECT_NAME} ${SOURCES})
+# vitaShaRK/SceShaccCgExt are C++: link with g++ so libstdc++ resolves properly
+set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
 
 add_subdirectory(lib/libc_bridge)
 add_dependencies(${CMAKE_PROJECT_NAME} SceLibcBridge)
@@ -185,6 +202,12 @@ set_target_properties(vitaGL PROPERTIES
                       IMPORTED_LOCATION ${VITAGL_LIB}
                       INTERFACE_INCLUDE_DIRECTORIES ${VITAGL_DIR}/source)
 add_dependencies(${CMAKE_PROJECT_NAME} vitaGL_build)
+
+# so_util and FalsoJNI print with sceClibPrintf directly; redirect it into
+# the logger so their messages (unresolved imports, JNI lookups) reach logs.txt
+set_source_files_properties(lib/so_util/so_util.c lib/falso_jni/FalsoJNI.c
+                            lib/falso_jni/FalsoJNI_Logger.c lib/falso_jni/FalsoJNI_ImplBridge.c
+                            PROPERTIES COMPILE_OPTIONS "-include;${CMAKE_SOURCE_DIR}/source/utils/log_redirect.h")
 
 target_include_directories(${CMAKE_PROJECT_NAME} SYSTEM
                            PUBLIC ${CMAKE_SOURCE_DIR}/lib
@@ -272,17 +295,19 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/param.sfo
                            ${VITA_APP_NAME} ${CMAKE_BINARY_DIR}/param.sfo
                    DEPENDS eboot.bin-self
                    VERBATIM)
-add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/${VITA_VPKNAME}.vpk
+set(VPK_OUT ${CMAKE_BINARY_DIR}/VPK/${VITA_VPKNAME}_v${PORT_VERSION}.vpk)
+add_custom_command(OUTPUT ${VPK_OUT}
+                   COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/VPK
                    COMMAND ${VITASDK}/bin/vita-pack-vpk ${VPK_ARGS}
                            -s ${CMAKE_BINARY_DIR}/param.sfo
                            -b ${CMAKE_BINARY_DIR}/eboot.bin
-                           ${CMAKE_BINARY_DIR}/${VITA_VPKNAME}.vpk
-                   DEPENDS ${CMAKE_BINARY_DIR}/param.sfo eboot.bin-self ${VPK_DEPS}
-                   COMMENT "Building vpk ${VITA_VPKNAME}.vpk"
+                           ${VPK_OUT}
+                   DEPENDS ${CMAKE_BINARY_DIR}/param.sfo ${CMAKE_BINARY_DIR}/eboot.bin eboot.bin-self ${VPK_DEPS}
+                   COMMENT "Building VPK/${VITA_VPKNAME}_v${PORT_VERSION}.vpk"
                    VERBATIM)
 add_custom_target(${VITA_VPKNAME}.vpk-vpk ALL
-                  COMMAND ${CMAKE_SOURCE_DIR}/scripts/check-vpk.sh ${CMAKE_BINARY_DIR}/${VITA_VPKNAME}.vpk
-                  DEPENDS ${CMAKE_BINARY_DIR}/${VITA_VPKNAME}.vpk
+                  COMMAND ${CMAKE_SOURCE_DIR}/scripts/check-vpk.sh ${VPK_OUT}
+                  DEPENDS ${VPK_OUT}
                   VERBATIM)
 
 add_custom_target(send

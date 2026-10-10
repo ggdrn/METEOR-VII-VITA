@@ -54,6 +54,14 @@ EGLBoolean eglTerminate(EGLDisplay dpy);
 
 EGLContext eglGetCurrentContext (void);
 
+/* Implemented by vitaGL but missing from vitaGL.h */
+EGLSurface eglGetCurrentSurface (EGLint readdraw);
+
+/* Not provided by vitaGL (see egl_extra.c) */
+EGLDisplay eglGetCurrentDisplay (void);
+EGLBoolean eglSurfaceAttrib (EGLDisplay dpy, EGLSurface surface,
+                             EGLint attribute, EGLint value);
+
 EGLBoolean eglGetConfigs(EGLDisplay display, EGLConfig * configs,
                          EGLint config_size, EGLint * num_config);
 

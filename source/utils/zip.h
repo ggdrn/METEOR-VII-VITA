@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <psp2/kernel/threadmgr.h>
+
 typedef struct zip_entry {
     char * name;
     uint16_t method;          // 0 = stored, 8 = deflate
@@ -25,7 +27,8 @@ typedef struct zip_entry {
 } zip_entry;
 
 typedef struct zip_archive {
-    int fd;                   // SceUID
+    int fd;                   // SceUID, shared: every seek+read holds `lock`
+    SceKernelLwMutexWork lock;
     zip_entry * entries;
     int num_entries;
 } zip_archive;
@@ -37,6 +40,12 @@ void zip_close(zip_archive * zip);
 
 /** Exact-name lookup. Returns NULL if not found. */
 zip_entry * zip_find(zip_archive * zip, const char * name);
+
+/**
+ * Reads `len` bytes at absolute offset `off` of the archive file.
+ * Thread-safe. Returns 0 on success, -1 on error.
+ */
+int zip_read_raw(zip_archive * zip, int64_t off, void * buf, size_t len);
 
 /** Absolute file offset of the entry's (possibly compressed) data, or -1. */
 int64_t zip_entry_data_offset(zip_archive * zip, zip_entry * entry);

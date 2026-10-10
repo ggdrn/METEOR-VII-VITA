@@ -44,7 +44,7 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
 #endif
 
     if (ret)
-        l_debug("fopen(%s, %s): %p", filename, mode, ret);
+        l_info("fopen(%s, %s): %p", filename, mode, ret);
     else
         l_warn("fopen(%s, %s): %p", filename, mode, ret);
 
@@ -72,7 +72,7 @@ int open_soloader(const char * path, int oflag, ...) {
     oflag = oflags_bionic_to_newlib(oflag);
     int ret = open(path, oflag, mode);
     if (ret >= 0)
-        l_debug("open(%s, %x): %i", path, oflag, ret);
+        l_info("open(%s, %x): %i", path, oflag, ret);
     else
         l_warn("open(%s, %x): %i", path, oflag, ret);
     return ret;
@@ -101,7 +101,7 @@ int stat_soloader(const char * path, stat64_bionic * buf) {
     if (res == 0)
         stat_newlib_to_bionic(&st, buf);
 
-    l_debug("stat(%s): %i", path, res);
+    l_info("stat(%s): %i", path, res);
     return res;
 }
 
@@ -181,5 +181,16 @@ int ioctl_soloader(int fd, int request, ...) {
 int fsync_soloader(int fd) {
     int ret = fsync(fd);
     l_debug("fsync(%i): %i", fd, ret);
+    return ret;
+}
+
+int64_t lseek64_soloader(int fd, int64_t offset, int whence) {
+    // newlib's off_t is 32-bit; the OBB (~1.98 GB) still fits below 2 GB
+    if (offset > INT32_MAX || offset < INT32_MIN) {
+        l_error("lseek64(%i, %lld, %i): offset out of 32-bit range", fd, offset, whence);
+        return -1;
+    }
+    off_t ret = lseek(fd, (off_t) offset, whence);
+    l_debug("lseek64(%i, %lld, %i): %li", fd, offset, whence, ret);
     return ret;
 }

@@ -3,7 +3,7 @@
 Plano de ação e registro de progresso do port via *so-loader* (so_util + FalsoJNI + vitaGL).
 
 **Regra inviolável:** o VPK não contém nenhum dado do jogo. Tudo vem da cópia do
-próprio usuário (Play Store) e fica em `ux0:data/ff7/`. O build roda
+próprio usuário (Play Store) e fica em `ux0:data/ffvii-vita/`. O build roda
 `scripts/check-vpk.sh`, que falha se qualquer arquivo fora da allow-list entrar no VPK.
 
 ---
@@ -40,13 +40,20 @@ próprio usuário (Play Store) e fica em `ux0:data/ff7/`. O build roda
 ## 2. Layout dos dados no Vita
 
 ```
-ux0:data/ff7/
+ux0:data/ffvii-vita/
 ├── base.apk                                                  ← APK original (a .so é lida de dentro dele)
 ├── main.30.com.square_enix.android_googleplay.FFVII.obb      ← OBB original, sem modificação
-└── save/                                                     ← criado pelo loader (setDataPath)
+├── save/                                                     ← criado pelo loader (setDataPath)
+├── logs.txt                                                  ← log da execução atual
+└── logs_anterior.txt                                         ← log da execução anterior
 ux0:data/external/libshacccg.suprx                            ← compilador de shaders (padrão vitaGL)
 ```
 Plugin obrigatório: `kubridge.skprx` no `config.txt` do taiHEN (`*KERNEL`).
+
+## Versões e logs
+
+- Cada build entregue para teste sai em `build/VPK/ff7_vita_vX.XX.YY.vpk`; a versão fica em `PORT_VERSION` no `CMakeLists.txt` e sobe a cada build (v0.00.01, v0.00.02, … pode passar de 100).
+- O loader grava `logs.txt` sem buffer (sobrevive a crash), com tempo e thread em cada linha. Mensagens do so_util, do FalsoJNI, `printf` e `__android_log_print` do jogo também vão para lá.
 
 ---
 
@@ -57,17 +64,21 @@ Plugin obrigatório: `kubridge.skprx` no `config.txt` do taiHEN (`*KERNEL`).
 - [x] Base: [soloader-boilerplate](https://github.com/v-atamanenko/soloader-boilerplate) (MIT)
 - [x] Submódulos: `lib/so_util`, `lib/falso_jni`, `lib/vitagl` (vitaGL compilado com `SOFTFP_ABI=1` pelo CMake)
 - [x] VitaSDK-softfp em `~/vitasdk-softfp` via `scripts/setup-softfp-sdk.sh`
-- [x] Configuração FF7: `ux0:data/ff7/`, Title ID `FFSQ00007`
+- [x] Configuração FF7: `ux0:data/ffvii-vita/`, Title ID `FFSQ00007`
 - [x] `utils/zip.c`: leitor ZIP próprio (stored + deflate, offsets 64-bit via sceIo)
 - [x] Loader valida APK + OBB e carrega a `.so` **direto do APK** (`so_mem_load`)
 - [x] `scripts/check-vpk.sh` ligado ao build: VPK só pode ter eboot, LiveArea e shaders
 - [x] Build verificado: `ff7_vita.vpk` (1,9 MB, 10 arquivos, binário softfp)
 
-### ⏳ Fase 1 — Boot até a primeira imagem
-- [ ] `dynlib.c`: resolver os 225 imports (libc/pthread/math nativos, GL → vitaGL, EGL stubs, `__android_log_print`, `syscall`, `__google_potentially_blocking_region_*`)
-- [ ] AAssetManager lendo `assets/` do `base.apk` (reaproveitar `apk_zip`)
-- [ ] `java.c`: stubs de todos os métodos da seção 1, com log
-- [ ] Sequência de boot em `main.c`: `JNI_OnLoad` → `setDataPath(save/)` → `setLang` → `setAssetManager` → `onSurfaceCreated` → `onSurfaceChanged(960,544)` → loop `onDrawFrame` + `vglSwapBuffers`
+### ⏳ Fase 1 — Boot até a primeira imagem (código pronto em v0.00.01, aguardando teste no Vita)
+- [x] Logger em `ux0:data/ffvii-vita/logs.txt` (+ `logs_anterior.txt`)
+- [x] `dynlib.c`: todos os 224 imports mapeados (verificado offline); `lseek64` real; IIDs OpenSL; `eglGetCurrentDisplay`/`eglSurfaceAttrib`
+- [x] AAssetManager lendo `assets/` direto do `base.apk` (+ `openFileDescriptor64` com offset no APK)
+- [x] `java.c`: `ExpansionFile` servindo fd/offset/tamanho do OBB original; `ImageGet*` com stb_image; vídeo/som como stubs com log
+- [x] Shaders: remoção de `GL_OES_EGL_image_external` / `samplerExternalOES` → `sampler2D`
+- [x] Boot igual ao Android (decompilado): `JNI_OnLoad` → `setLang` → `setDataPath` → `setAssetManager` → `onResume` → `onSurfaceChanged(960,544)` → `onSurfaceCreated(false,false)` → `onDrawFrame` a partir do 3º frame
+- [x] Controles ligados (IDs de `MainActivity.getKeyId`), analógico esquerdo como direcional, touch frontal
+- [ ] Teste no Vita e correções a partir do `logs.txt`
 - [ ] **Spike de risco:** medir decodificação VP8 640×448 com libvpx no Vita (sample isolado)
 - **Meta:** tela-título renderizando
 
@@ -95,7 +106,7 @@ Plugin obrigatório: `kubridge.skprx` no `config.txt` do taiHEN (`*KERNEL`).
 - [ ] **Plano B** se o FPS não bastar: script no PC do usuário converte os `.webm` dele para H.264 e o port usa `sceAvPlayer` (decodificação por hardware)
 
 ### Fase 6 — Sistema
-- [ ] Saves em `ux0:data/ff7/save/` (`updateSaveDataFile`, `postDeleteSaveFile`)
+- [ ] Saves em `ux0:data/ffvii-vita/save/` (`updateSaveDataFile`, `postDeleteSaveFile`)
 - [ ] Suspend/resume (`onPause`/`onResume`), bateria (`scePowerGetBatteryLifePercent`)
 - [ ] `OpenURL`/`CloudLaunch` como no-op
 

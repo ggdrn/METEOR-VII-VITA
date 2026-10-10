@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Fails if a VPK contains anything other than the port's own files.
-# Game data (APK, OBB, .so, assets) must only ever live in ux0:data/ff7/.
+# Game data (APK, OBB, .so, assets) must only ever live in ux0:data/ffvii-vita/.
 #
 # Usage: scripts/check-vpk.sh build/ff7_vita.vpk
 #

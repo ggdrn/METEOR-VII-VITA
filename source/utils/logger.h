@@ -8,6 +8,10 @@
 /**
  * @file  logger.h
  * @brief Logging utilities.
+ *
+ * Every message goes to the debug console (sceClibPrintf) and, with
+ * ENABLE_LOGGING, to LOG_PATH (ux0:data/ffvii-vita/logs.txt). The previous
+ * session's log is kept as logs_anterior.txt.
  */
 
 #ifndef SOLOADER_LOGGER_H
@@ -27,12 +31,16 @@ extern "C" {
 
 #ifdef DEBUG_SOLOADER
 #define l_debug(...)   _log_print(LT_DEBUG,   __VA_ARGS__)
+#else
+#define l_debug(...)
+#endif
+
+#if defined(DEBUG_SOLOADER) || defined(ENABLE_LOGGING)
 #define l_info(...)    _log_print(LT_INFO,    __VA_ARGS__)
 #define l_warn(...)    _log_print(LT_WARN,    __VA_ARGS__)
 #define l_success(...) _log_print(LT_SUCCESS, __VA_ARGS__)
 #define l_wait(...)    _log_print(LT_WAIT,    __VA_ARGS__)
 #else
-#define l_debug(...)
 #define l_info(...)
 #define l_warn(...)
 #define l_success(...)
@@ -44,6 +52,10 @@ extern "C" {
 
 void _log_print(int t, const char* fmt, ...)
                 __attribute__ ((format (printf, 2, 3)));
+
+/** Raw printf-like output (no prefix), used for redirected third-party logs. */
+int soloader_printf(const char *fmt, ...)
+                    __attribute__ ((format (printf, 1, 2)));
 
 #ifdef __cplusplus
 };

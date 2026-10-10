@@ -38,8 +38,12 @@ extern so_module so_mod;
 
 // Original APK, kept open for the AAssetManager reimplementation
 zip_archive * apk_zip = NULL;
+// Original OBB, served to the game through ExpansionFile (java.c)
+zip_archive * obb_zip = NULL;
 
 void soloader_init_all() {
+    l_info("FINAL FANTASY VII (PS Vita) %s", PORT_VERSION);
+    l_info("Data: %s", DATA_PATH);
 	// Launch `app0:configurator.bin` on `-config` init param
     sceAppUtilInit(&(SceAppUtilInitParam){}, &(SceAppUtilBootParam){});
     SceAppUtilAppEventParam eventParam;
@@ -92,6 +96,11 @@ void soloader_init_all() {
     }
     free(so_data);
     l_success("SO loaded from APK (%u bytes).", so_size);
+
+    obb_zip = zip_open(OBB_PATH);
+    if (!obb_zip) {
+        fatal_error("Error: %s is not a valid FINAL FANTASY VII OBB file.", OBB_PATH);
+    }
 
     settings_load();
     l_success("Settings loaded.");

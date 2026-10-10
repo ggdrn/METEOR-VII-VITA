@@ -35,6 +35,13 @@ static int read_at(int fd, int64_t off, void * buf, size_t len) {
     return 0;
 }
 
+int zip_read_raw(zip_archive * zip, int64_t off, void * buf, size_t len) {
+    sceKernelLockLwMutex(&zip->lock, 1, NULL);
+    int ret = read_at(zip->fd, off, buf, len);
+    sceKernelUnlockLwMutex(&zip->lock, 1);
+    return ret;
+}
+
 zip_archive * zip_open(const char * path) {
     int fd = sceIoOpen(path, SCE_O_RDONLY, 0);
     if (fd < 0) {
@@ -72,6 +79,7 @@ zip_archive * zip_open(const char * path) {
 
     zip = calloc(1, sizeof(zip_archive));
     zip->fd = fd;
+    sceKernelCreateLwMutex(&zip->lock, "zip_lock", 0, 0, NULL);
     zip->entries = calloc(num, sizeof(zip_entry));
 
     const uint8_t * p = cdir;
@@ -120,8 +128,10 @@ void zip_close(zip_archive * zip) {
     for (int i = 0; i < zip->num_entries; i++)
         free(zip->entries[i].name);
     free(zip->entries);
-    if (zip->fd >= 0)
+    if (zip->fd >= 0) {
         sceIoClose(zip->fd);
+        sceKernelDeleteLwMutex(&zip->lock);
+    }
     free(zip);
 }
 
@@ -139,7 +149,7 @@ int64_t zip_entry_data_offset(zip_archive * zip, zip_entry * entry) {
 
     // Name/extra lengths in the local header may differ from the central one
     uint8_t hdr[30];
-    if (read_at(zip->fd, entry->local_header_offset, hdr, sizeof(hdr)) < 0 || rd32(hdr) != LOCAL_SIG)
+    if (zip_read_raw(zip, entry->local_header_offset, hdr, sizeof(hdr)) < 0 || rd32(hdr) != LOCAL_SIG)
         return -1;
 
     entry->data_offset = (int64_t)entry->local_header_offset + 30 + rd16(hdr + 26) + rd16(hdr + 28);
@@ -154,11 +164,11 @@ void * zip_read_entry(zip_archive * zip, zip_entry * entry, size_t * out_size) {
     if (!out) return NULL;
 
     if (entry->method == 0) {
-        if (read_at(zip->fd, off, out, entry->uncomp_size) < 0)
+        if (zip_read_raw(zip, off, out, entry->uncomp_size) < 0)
             goto fail;
     } else if (entry->method == 8) {
         uint8_t * comp = malloc(entry->comp_size);
-        if (!comp || read_at(zip->fd, off, comp, entry->comp_size) < 0) {
+        if (!comp || zip_read_raw(zip, off, comp, entry->comp_size) < 0) {
             free(comp);
             goto fail;
         }

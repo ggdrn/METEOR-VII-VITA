@@ -17,8 +17,8 @@ Com o jogo instalado e aberto ao menos uma vez (para baixar os dados adicionais)
 ## 2. Copiar para o PS Vita
 
 ```
-ux0:data/ff7/base.apk
-ux0:data/ff7/main.30.com.square_enix.android_googleplay.FFVII.obb
+ux0:data/ffvii-vita/base.apk
+ux0:data/ffvii-vita/main.30.com.square_enix.android_googleplay.FFVII.obb
 ```
 
 Não extraia nem renomeie o OBB: o port lê o arquivo original diretamente.
@@ -30,3 +30,9 @@ Não extraia nem renomeie o OBB: o port lê o arquivo original diretamente.
 - ~2,1 GB livres em `ux0:`
 
 Se faltar algum arquivo, o port mostra uma mensagem de erro com o caminho esperado.
+
+## 4. Logs
+
+A cada execução o port grava `ux0:data/ffvii-vita/logs.txt`. A execução
+anterior fica em `logs_anterior.txt` (útil quando o jogo travou e foi reaberto).
+Ao reportar um problema, envie os dois arquivos.

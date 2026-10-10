@@ -7,9 +7,13 @@
 
 #include "utils/logger.h"
 
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
 #include <psp2/kernel/clib.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 
@@ -25,14 +29,19 @@
 static SceKernelLwMutexWork _log_mutex;
 static atomic_bool _log_mutex_ready = ATOMIC_VAR_INIT(false);
 
-// Buffer A is used to adjust the format string.
-static char buffer_a[2048];
-// Buffer B is used to compile the final log using the updated format string.
+// Formatted message.
 static char buffer_b[2048];
+// Plain-text line written to the log file.
+static char buffer_file[2304];
 
-void _log_print(int t, const char* fmt, ...) {
+#ifdef ENABLE_LOGGING
+static SceUID _log_fd = -1;
+static bool _log_file_tried = false;
+#endif
+
+static void _log_lock() {
     if (!atomic_load_explicit(&_log_mutex_ready, memory_order_relaxed)) {
-        int ret = sceKernelCreateLwMutex(&_log_mutex, "log_lock", 0, 0, NULL);
+        int ret = sceKernelCreateLwMutex(&_log_mutex, "log_lock", 2 /* recursive */, 0, NULL);
         if (ret < 0) {
             sceClibPrintf("Error: failed to create log mutex: 0x%x\n", ret);
             return;
@@ -40,43 +49,90 @@ void _log_print(int t, const char* fmt, ...) {
         atomic_store_explicit(&_log_mutex_ready, true, memory_order_relaxed);
     }
     sceKernelLockLwMutex(&_log_mutex, 1, NULL);
+}
 
-    switch (t) {
-        case LT_DEBUG:
-            sceClibSnprintf(buffer_a, sizeof(buffer_a), " %s• debug%s    %s\n",
-                            COLOR_PINK, COLOR_END, fmt); break;
-        case LT_INFO:
-            sceClibSnprintf(buffer_a, sizeof(buffer_a), " %sℹ info%s     %s\n",
-                            COLOR_BLUE, COLOR_END, fmt); break;
-        case LT_WARN:
-            sceClibSnprintf(buffer_a, sizeof(buffer_a), " %s⚠ warning%s  %s\n",
-                            COLOR_ORANGE, COLOR_END, fmt); break;
-        case LT_ERROR:
-            sceClibSnprintf(buffer_a, sizeof(buffer_a), " %s⨯ error%s    %s\n",
-                            COLOR_RED, COLOR_END, fmt); break;
-        case LT_FATAL:
-            sceClibSnprintf(buffer_a, sizeof(buffer_a), " %s! fatal%s    %s\n",
-                            COLOR_RED, COLOR_END, fmt); break;
-        case LT_SUCCESS:
-            sceClibSnprintf(buffer_a, sizeof(buffer_a), " %s! success%s  %s\n",
-                            COLOR_GREEN, COLOR_END, fmt); break;
-        case LT_WAIT:
-            sceClibSnprintf(buffer_a, sizeof(buffer_a), " %s… waiting%s  %s\n",
-                            COLOR_CYAN, COLOR_END, fmt); break;
-        default:
-            if (atomic_load_explicit(&_log_mutex_ready, memory_order_relaxed)) {
-                sceKernelUnlockLwMutex(&_log_mutex, 1);
-            }
-            return;
-    }
-
-    va_list list;
-    va_start(list, fmt);
-    sceClibVsnprintf(buffer_b, sizeof(buffer_b), buffer_a, list);
-    va_end(list);
-    sceClibPrintf(buffer_b);
-
+static void _log_unlock() {
     if (atomic_load_explicit(&_log_mutex_ready, memory_order_relaxed)) {
         sceKernelUnlockLwMutex(&_log_mutex, 1);
     }
+}
+
+// Must be called with the log mutex held.
+static void _log_file_write(const char * text, int len) {
+#ifdef ENABLE_LOGGING
+    if (!_log_file_tried) {
+        _log_file_tried = true;
+        sceIoMkdir(DATA_PATH, 0777);
+        // Keep the previous session around: the one that crashed is usually
+        // the interesting one, and the next launch would overwrite it.
+        sceIoRemove(DATA_PATH "logs_anterior.txt");
+        sceIoRename(LOG_PATH, DATA_PATH "logs_anterior.txt");
+        _log_fd = sceIoOpen(LOG_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+        if (_log_fd >= 0) {
+            char header[160];
+            int n = sceClibSnprintf(header, sizeof(header),
+                                    "FINAL FANTASY VII (PS Vita) %s - build %s %s\n"
+                                    "------------------------------------------------\n",
+                                    PORT_VERSION, __DATE__, __TIME__);
+            sceIoWrite(_log_fd, header, n);
+        }
+    }
+    // Unbuffered on purpose: whatever was logged survives a crash.
+    if (_log_fd >= 0 && len > 0)
+        sceIoWrite(_log_fd, text, len);
+#else
+    (void)text; (void)len;
+#endif
+}
+
+void _log_print(int t, const char* fmt, ...) {
+    const char * label;
+    const char * color;
+
+    switch (t) {
+        case LT_DEBUG:   label = "debug";   color = COLOR_PINK;   break;
+        case LT_INFO:    label = "info";    color = COLOR_BLUE;   break;
+        case LT_WARN:    label = "warning"; color = COLOR_ORANGE; break;
+        case LT_ERROR:   label = "error";   color = COLOR_RED;    break;
+        case LT_FATAL:   label = "fatal";   color = COLOR_RED;    break;
+        case LT_SUCCESS: label = "success"; color = COLOR_GREEN;  break;
+        case LT_WAIT:    label = "waiting"; color = COLOR_CYAN;   break;
+        default: return;
+    }
+
+    _log_lock();
+
+    va_list list;
+    va_start(list, fmt);
+    sceClibVsnprintf(buffer_b, sizeof(buffer_b), fmt, list);
+    va_end(list);
+
+    sceClibPrintf(" %s%-8s%s %s\n", color, label, COLOR_END, buffer_b);
+
+    // [  12.345s][thread] level   message
+    SceUInt64 us = sceKernelGetProcessTimeWide();
+    int n = sceClibSnprintf(buffer_file, sizeof(buffer_file), "[%5u.%03us][%08x] %-8s %s\n",
+                            (unsigned)(us / 1000000), (unsigned)((us / 1000) % 1000),
+                            sceKernelGetThreadId(), label, buffer_b);
+    if (n > (int)sizeof(buffer_file) - 1) n = sizeof(buffer_file) - 1;
+    _log_file_write(buffer_file, n);
+
+    _log_unlock();
+}
+
+int soloader_printf(const char *fmt, ...) {
+    _log_lock();
+
+    va_list list;
+    va_start(list, fmt);
+    int n = sceClibVsnprintf(buffer_b, sizeof(buffer_b), fmt, list);
+    va_end(list);
+    if (n > (int)sizeof(buffer_b) - 1) n = sizeof(buffer_b) - 1;
+
+    // Not through the macro: this file isn't force-included with log_redirect.h
+    sceClibPrintf("%s", buffer_b);
+    _log_file_write(buffer_b, n);
+
+    _log_unlock();
+    return n;
 }

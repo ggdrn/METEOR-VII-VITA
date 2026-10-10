@@ -85,6 +85,14 @@ void glShaderSource_soloader(GLuint shader, GLsizei count,
     }
     str[total_length] = '\0';
 
+    // The game's shaders target Android's external (OES) textures, which
+    // vitaGL's GLSL translator doesn't know: drop the extension and use
+    // plain 2D samplers. Video frames will be uploaded as GL_TEXTURE_2D.
+    str_remove(str, "#extension GL_OES_EGL_image_external:require");
+    str_replace(&str, "samplerExternalOES", "sampler2D");
+    total_length = strlen(str);
+
+    l_info("glShaderSource(%u): %u bytes", shader, total_length);
     load_shader(shader, str, total_length);
 
     free(str);
