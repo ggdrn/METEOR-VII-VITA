@@ -46,7 +46,7 @@ ux0:data/ffvii-vita/
 ├── save/                                                     ← criado pelo loader (setDataPath)
 ├── logs.txt                                                  ← log da execução atual
 └── logs_anterior.txt                                         ← log da execução anterior
-ux0:data/external/libshacccg.suprx                            ← compilador de shaders (padrão vitaGL)
+ur0:data/libshacccg.suprx                                     ← compilador de shaders (padrão vitaGL)
 ```
 Plugin obrigatório: `kubridge.skprx` no `config.txt` do taiHEN (`*KERNEL`).
 
