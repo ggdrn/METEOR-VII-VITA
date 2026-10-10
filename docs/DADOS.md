@@ -26,7 +26,7 @@ Não extraia nem renomeie o OBB: o port lê o arquivo original diretamente.
 ## 3. Requisitos no Vita
 
 - **kubridge.skprx** na seção `*KERNEL` do `ux0:tai/config.txt` (ou `ur0:tai/config.txt`)
-- **libshacccg.suprx** em `ux0:data/external/` ([como extrair](https://samilops2.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx))
+- **libshacccg.suprx** em `ur0:data/` ou `ur0:data/external/` ([como extrair](https://samilops2.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx))
 - ~2,1 GB livres em `ux0:`
 
 Se faltar algum arquivo, o port mostra uma mensagem de erro com o caminho esperado.
