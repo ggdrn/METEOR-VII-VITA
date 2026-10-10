@@ -1,0 +1,20 @@
+build/*
+.DS_Store
+.idea/
+.vscode/
+cmake-build-*/
+lib/libc_bridge/out/
+
+# Copyrighted game data must never enter the repository or the VPK.
+# Users supply these from their own Play Store copy (see docs/DADOS.md).
+apk/
+data/
+*.apk
+*.obb
+*.so
+*.lgp
+*.akb
+*.webm
+*.exe
+*.dex
+libjni_ff7*
