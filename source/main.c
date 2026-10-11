@@ -12,6 +12,7 @@
 #include "utils/glutil.h"
 #include "utils/glstats.h"
 #include "utils/profiler.h"
+#include "ff7_texture.h"
 #include "utils/logger.h"
 
 #include <malloc.h>
@@ -190,6 +191,7 @@ int main() {
                    frames * 1000000.0 / (double) (now - heartbeat_us),
                    frames ? draw_us / 1000.0 / frames : 0, frames ? swap_us / 1000.0 / frames : 0);
             glstats_report((now - heartbeat_us) / 1000000.0);
+            ff7_texture_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
             heartbeat_frame = frame;
             heartbeat_us = now;

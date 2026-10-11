@@ -41,10 +41,13 @@ def main():
     ap.add_argument("so")
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--tid", type=lambda s: int(s, 0), default=None)
+    ap.add_argument("--from-frac", type=float, default=0.0,
+                    help="skip the first fraction of the samples (they are in time order)")
     args = ap.parse_args()
 
     data = open(args.profile, "rb").read()
     samples = [struct.unpack_from("<III", data, i) for i in range(0, len(data) - 11, 12)]
+    samples = samples[int(len(samples) * args.from_frac):]
     addrs, names = load_symbols(args.so)
 
     by_tid = collections.Counter(t for _, _, t in samples)
