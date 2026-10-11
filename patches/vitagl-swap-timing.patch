@@ -1,0 +1,43 @@
+diff --git a/source/gxm.c b/source/gxm.c
+index 3894e19..b9cb6f4 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -761,8 +761,12 @@ void vglSetDisplayBufferCount(int count) {
+ 	gxm_display_buffer_count = count;
+ }
+ 
++// FF7 port: time spent in each stage of the last vglSwapBuffers (us)
++uint32_t vgl_swap_stage_us[3]; // scene end, display queue, garbage collector wait
++
+ void vglSwapBuffers(GLboolean has_commondialog) {
+ 	THREAD_SAFE()
++	uint32_t vgl_t0 = sceKernelGetProcessTimeLow();
+ 
+ #ifndef SKIP_SPLASHSCREEN
+ 	// Ignore display swaps during splashscreen since we handle them in the splashscreen thread
+@@ -827,6 +831,8 @@ void vglSwapBuffers(GLboolean has_commondialog) {
+ 
+ 	if (!needs_scene_reset)
+ 		scene_end();
++	uint32_t vgl_t1 = sceKernelGetProcessTimeLow();
++	vgl_swap_stage_us[0] = vgl_t1 - vgl_t0;
+ 
+ 	if (vgl_has_cdlg_support && has_commondialog) {
+ 		// Performing commondialog update
+@@ -955,6 +961,8 @@ void vglSwapBuffers(GLboolean has_commondialog) {
+ 		gxm_back_buffer_index = (gxm_back_buffer_index + 1) % gxm_display_buffer_count;
+ 	}
+ 	needs_scene_reset = GL_TRUE;
++	uint32_t vgl_t2 = sceKernelGetProcessTimeLow();
++	vgl_swap_stage_us[1] = vgl_t2 - vgl_t1;
+ 	
+ 	// Perform resolution change if there's one pending
+ 	if (NEW_DISPLAY_WIDTH) {
+@@ -984,6 +992,7 @@ void vglSwapBuffers(GLboolean has_commondialog) {
+ 	sceKernelWaitSema(gc_mutex[1], 1, NULL);
+ 	sceKernelSignalSema(gc_mutex[0], 1);
+ #endif
++	vgl_swap_stage_us[2] = sceKernelGetProcessTimeLow() - vgl_t2;
+ }
+ 
+ void glFinish(void) {
