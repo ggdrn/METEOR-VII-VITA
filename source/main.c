@@ -17,6 +17,7 @@
 #include "ff7_anim.h"
 #include "ff7_lzss.h"
 #include "ff7_swirl.h"
+#include "ff7_light.h"
 #include "reimpl/gl_variants.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
@@ -237,6 +238,7 @@ int main() {
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
             ff7_lzss_report((now - heartbeat_us) / 1000000.0);
             ff7_swirl_report((now - heartbeat_us) / 1000000.0);
+            ff7_light_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
