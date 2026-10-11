@@ -37,6 +37,7 @@
 #include <utime.h>
 
 #include "utils/glutil.h"
+#include "utils/glstats.h"
 #include "utils/utils.h"
 #include "utils/logger.h"
 
@@ -581,7 +582,7 @@ so_default_dynlib default_dynlib[] = {
         { "glAttachShader", (uintptr_t)&glAttachShader },
         { "glBindAttribLocation", (uintptr_t)&glBindAttribLocation },
         { "glBindBuffer", (uintptr_t)&glBindBuffer },
-        { "glBindFramebuffer", (uintptr_t)&glBindFramebuffer },
+        { "glBindFramebuffer", (uintptr_t)&glBindFramebuffer_stat },
         { "glBindFramebufferOES", (uintptr_t)&glBindFramebuffer },
         { "glBindRenderbuffer", (uintptr_t)&glBindRenderbuffer },
         { "glBindRenderbufferOES", (uintptr_t)&glBindRenderbuffer },
@@ -598,7 +599,7 @@ so_default_dynlib default_dynlib[] = {
         { "glBufferSubData", (uintptr_t)&glBufferSubData },
         { "glCheckFramebufferStatus", (uintptr_t)&glCheckFramebufferStatus },
         { "glCheckFramebufferStatusOES", (uintptr_t)&glCheckFramebufferStatus },
-        { "glClear", (uintptr_t)&glClear },
+        { "glClear", (uintptr_t)&glClear_stat },
         { "glClearColor", (uintptr_t)&glClearColor },
         { "glClearColorx", (uintptr_t)&glClearColorx },
         { "glClearDepthf", (uintptr_t)&glClearDepthf },
@@ -637,7 +638,7 @@ so_default_dynlib default_dynlib[] = {
         { "glDisable", (uintptr_t)&glDisable },
         { "glDisableClientState", (uintptr_t)&glDisableClientState },
         { "glDisableVertexAttribArray", (uintptr_t)&glDisableVertexAttribArray },
-        { "glDrawArrays", (uintptr_t)&glDrawArrays },
+        { "glDrawArrays", (uintptr_t)&glDrawArrays_stat },
         { "glDrawElements", (uintptr_t)&glDrawElements },
         { "glDrawTexfOES", (uintptr_t)&ret0 },
         { "glDrawTexfvOES", (uintptr_t)&ret0 },
@@ -653,7 +654,7 @@ so_default_dynlib default_dynlib[] = {
         { "glEnableClientState", (uintptr_t)&glEnableClientState },
         { "glEnableVertexAttribArray", (uintptr_t)&glEnableVertexAttribArray },
         { "glFinish", (uintptr_t)&glFinish },
-        { "glFlush", (uintptr_t)&glFlush },
+        { "glFlush", (uintptr_t)&glFlush_stat },
         { "glFogf", (uintptr_t)&glFogf },
         { "glFogfv", (uintptr_t)&glFogfv },
         { "glFogx", (uintptr_t)&glFogx },
@@ -761,7 +762,7 @@ so_default_dynlib default_dynlib[] = {
         { "glPopMatrix", (uintptr_t)&glPopMatrix },
         { "glPushMatrix", (uintptr_t)&glPushMatrix },
         { "glQueryMatrixxOES", (uintptr_t)&ret0 },
-        { "glReadPixels", (uintptr_t)&glReadPixels },
+        { "glReadPixels", (uintptr_t)&glReadPixels_stat },
         { "glRenderbufferStorage", (uintptr_t)&glRenderbufferStorage },
         { "glRenderbufferStorageOES", (uintptr_t)&glRenderbufferStorage },
         { "glRotatef", (uintptr_t)&glRotatef },
@@ -791,7 +792,7 @@ so_default_dynlib default_dynlib[] = {
         { "glTexGenivOES", (uintptr_t)&ret0 },
         { "glTexGenxOES", (uintptr_t)&ret0 },
         { "glTexGenxvOES", (uintptr_t)&ret0 },
-        { "glTexImage2D", (uintptr_t)&glTexImage2D },
+        { "glTexImage2D", (uintptr_t)&glTexImage2D_stat },
         { "glTexParameterf", (uintptr_t)&glTexParameterf },
         { "glTexParameterfv", (uintptr_t)&ret0 },
         { "glTexParameteri", (uintptr_t)&glTexParameteri },

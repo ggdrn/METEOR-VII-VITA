@@ -10,6 +10,7 @@
 
 #include "utils/init.h"
 #include "utils/glutil.h"
+#include "utils/glstats.h"
 #include "utils/logger.h"
 
 #include <malloc.h>
@@ -156,6 +157,7 @@ int main() {
     l_success("Entering main loop.");
     unsigned int frame = 0;
     unsigned int heartbeat_frame = 0;
+    SceUInt64 draw_us = 0, swap_us = 0;
     SceUInt64 heartbeat_us = sceKernelGetProcessTimeWide();
     while (1) {
         controls_poll();
@@ -166,17 +168,24 @@ int main() {
             frame_number = frame;
             frame_start_us = sceKernelGetProcessTimeWide();
             ff7_onDrawFrame(&jni, FF7_CLASS);
+            draw_us += sceKernelGetProcessTimeWide() - frame_start_us;
             frame_start_us = 0;
             if (frame == 3) l_info("First onDrawFrame() returned");
         }
 
+        SceUInt64 swap_start = sceKernelGetProcessTimeWide();
         gl_swap();
+        swap_us += sceKernelGetProcessTimeWide() - swap_start;
 
         // Heartbeat: tells a hang apart from a running game in logs.txt
         SceUInt64 now = sceKernelGetProcessTimeWide();
         if (now - heartbeat_us >= 5000000) {
-            l_info("heartbeat: frame %u, %.1f fps", frame,
-                   (frame - heartbeat_frame) * 1000000.0 / (double) (now - heartbeat_us));
+            unsigned int frames = frame - heartbeat_frame;
+            l_info("heartbeat: frame %u, %.1f fps, per frame: onDrawFrame %.1f ms, swap %.1f ms", frame,
+                   frames * 1000000.0 / (double) (now - heartbeat_us),
+                   frames ? draw_us / 1000.0 / frames : 0, frames ? swap_us / 1000.0 / frames : 0);
+            glstats_report((now - heartbeat_us) / 1000000.0);
+            draw_us = swap_us = 0;
             heartbeat_frame = frame;
             heartbeat_us = now;
             log_memory();

@@ -37,7 +37,8 @@ void gl_preload() {
 }
 
 void gl_init() {
-    vglInitExtended(0, 960, 544, 6 * 1024 * 1024, SCE_GXM_MULTISAMPLE_4X);
+    // No MSAA: costly on the Vita GPU and of little use for FF7's low-poly scenes
+    vglInitExtended(0, 960, 544, 6 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
 }
 
 void gl_swap() {
