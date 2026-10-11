@@ -94,11 +94,14 @@ static GLuint movie_texture = 0;
 /*
  * nestegg IO over the OBB entry
  */
-static int io_read(void * buffer, size_t length, void * userdata) {
-    if (mv.pos + (int64_t) length > mv.size) return 0;
-    if (zip_read_raw(obb_zip, mv.base + mv.pos, buffer, length) < 0) return -1;
-    mv.pos += length;
-    return 1;
+// nestegg: returns the number of bytes read (may be short), 0 at the end, -1 on error
+static int64_t io_read(void * buffer, size_t length, void * userdata) {
+    int64_t avail = mv.size - mv.pos;
+    if (avail <= 0) return 0;
+    size_t n = (int64_t) length < avail ? length : (size_t) avail;
+    if (zip_read_raw(obb_zip, mv.base + mv.pos, buffer, n) < 0) return -1;
+    mv.pos += n;
+    return (int64_t) n;
 }
 
 static int io_seek(int64_t offset, int whence, void * userdata) {
