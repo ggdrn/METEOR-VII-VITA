@@ -37,6 +37,19 @@ static char buffer_file[2304];
 #ifdef ENABLE_LOGGING
 static SceUID _log_fd = -1;
 static bool _log_file_tried = false;
+
+// Lines are collected in RAM and written by a low-priority thread about once
+// a second: writing every line straight to the card competed with the game's
+// own reads. Fatal messages flush immediately (see log_flush).
+#define LOG_BUF_SIZE   (64 * 1024)
+#define LOG_FLUSH_AT   (48 * 1024)
+#define LOG_FLUSH_US   1000000
+static char _log_buf[LOG_BUF_SIZE];
+static char _log_out[LOG_BUF_SIZE];
+static int _log_len;
+static SceKernelLwMutexWork _flush_mutex;
+static void _log_flush_locked_buffer(void);
+static void _log_start_writer(void);
 #endif
 
 static void _log_lock() {
@@ -47,6 +60,9 @@ static void _log_lock() {
             return;
         }
         atomic_store_explicit(&_log_mutex_ready, true, memory_order_relaxed);
+#ifdef ENABLE_LOGGING
+        _log_start_writer();
+#endif
     }
     sceKernelLockLwMutex(&_log_mutex, 1, NULL);
 }
@@ -77,11 +93,57 @@ static void _log_file_write(const char * text, int len) {
             sceIoWrite(_log_fd, header, n);
         }
     }
-    // Unbuffered on purpose: whatever was logged survives a crash.
-    if (_log_fd >= 0 && len > 0)
-        sceIoWrite(_log_fd, text, len);
+    if (_log_fd < 0 || len <= 0) return;
+    if (len > LOG_BUF_SIZE - _log_len) _log_flush_locked_buffer();
+    if (len > LOG_BUF_SIZE) len = LOG_BUF_SIZE;
+    sceClibMemcpy(_log_buf + _log_len, text, len);
+    _log_len += len;
+    if (_log_len >= LOG_FLUSH_AT) _log_flush_locked_buffer();
 #else
     (void)text; (void)len;
+#endif
+}
+
+#ifdef ENABLE_LOGGING
+// Called with the log mutex held: hands the buffer to the card writer.
+static void _log_flush_locked_buffer(void) {
+    if (_log_len == 0 || _log_fd < 0) return;
+    sceKernelLockLwMutex(&_flush_mutex, 1, NULL);
+    int n = _log_len;
+    sceClibMemcpy(_log_out, _log_buf, n);
+    _log_len = 0;
+    sceIoWrite(_log_fd, _log_out, n);
+    sceKernelUnlockLwMutex(&_flush_mutex, 1);
+}
+
+static int _log_writer_thread(SceSize args, void * argp) {
+    while (1) {
+        sceKernelDelayThread(LOG_FLUSH_US);
+        log_flush();
+    }
+    return 0;
+}
+
+static void _log_start_writer(void) {
+    sceKernelCreateLwMutex(&_flush_mutex, "log_flush", 0, 0, NULL);
+    SceUID thid = sceKernelCreateThread("log_writer", _log_writer_thread, 0x10000100 + 0x10, 0x2000, 0, 0, NULL);
+    if (thid >= 0) sceKernelStartThread(thid, 0, NULL);
+}
+#endif
+
+void log_flush(void) {
+#ifdef ENABLE_LOGGING
+    // Copy under the log lock, write to the card without it, so threads that
+    // log meanwhile don't wait for the card
+    static char out[LOG_BUF_SIZE];
+    sceKernelLockLwMutex(&_flush_mutex, 1, NULL);
+    _log_lock();
+    int n = _log_len;
+    if (n) sceClibMemcpy(out, _log_buf, n);
+    _log_len = 0;
+    _log_unlock();
+    if (n && _log_fd >= 0) sceIoWrite(_log_fd, out, n);
+    sceKernelUnlockLwMutex(&_flush_mutex, 1);
 #endif
 }
 
@@ -116,6 +178,9 @@ void _log_print(int t, const char* fmt, ...) {
                             sceKernelGetThreadId(), label, buffer_b);
     if (n > (int)sizeof(buffer_file) - 1) n = sizeof(buffer_file) - 1;
     _log_file_write(buffer_file, n);
+#ifdef ENABLE_LOGGING
+    if (t == LT_FATAL) _log_flush_locked_buffer(); // the process may be about to die
+#endif
 
     _log_unlock();
 }

@@ -53,6 +53,9 @@ extern "C" {
 void _log_print(int t, const char* fmt, ...)
                 __attribute__ ((format (printf, 2, 3)));
 
+/** Writes buffered log lines to the card now (they are otherwise flushed ~1/s). */
+void log_flush(void);
+
 /** Raw printf-like output (no prefix), used for redirected third-party logs. */
 int soloader_printf(const char *fmt, ...)
                     __attribute__ ((format (printf, 1, 2)));

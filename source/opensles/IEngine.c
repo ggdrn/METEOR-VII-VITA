@@ -254,7 +254,7 @@ static SLresult IEngine_CreateAudioPlayer(SLEngineItf self, SLObjectItf *pPlayer
                     {
                         COutputMix *sinkMix = (COutputMix *) ((SLDataLocator_OutputMix *)
                             this->mDataSink.u.mSink.pLocator)->outputMix;
-                        SL_LOGI("CreateAudioPlayer %p: track %p, output mix %p (engine mixes %p)",
+                        SL_LOGD("CreateAudioPlayer %p: track %p, output mix %p (engine mixes %p)",
                             this, this->mTrack, sinkMix, this->mObject.mEngine->mOutputMix);
                     }
 #endif

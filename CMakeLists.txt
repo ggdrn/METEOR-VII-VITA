@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.18")
+set(PORT_VERSION "0.00.19")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -49,7 +49,7 @@ add_definitions(-DDATA_PATH="${DATA_PATH}" -DAPK_PATH="${APK_PATH}"
 option(ENABLE_LOGGING "Write loader logs to ${LOG_PATH}" ON)
 
 # Sampling profiler of the .so (writes ${DATA_PATH}profile.bin; see scripts/profile-report.py)
-option(ENABLE_PROFILER "Sample the game's .so for performance analysis" ON)
+option(ENABLE_PROFILER "Sample the game's .so for performance analysis (slows the game down)" OFF)
 if (ENABLE_PROFILER)
   add_definitions(-DENABLE_PROFILER)
 endif()

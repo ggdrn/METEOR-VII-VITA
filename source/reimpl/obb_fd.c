@@ -55,7 +55,7 @@ static obb_fd_t fds[OBB_FD_MAX];
 
 // Totals for the heartbeat (all descriptors)
 static volatile uint64_t total_io_us, total_bytes;
-#define SLOW_READ_US 30000
+#define SLOW_READ_US 100000
 
 typedef struct {
     int64_t off;
