@@ -13,6 +13,7 @@
 #include "utils/dialog.h"
 #include "utils/logger.h"
 #include "reimpl/readpixels.h"
+#include "reimpl/gl_variants.h"
 
 #include <stdio.h>
 #include <malloc.h>
@@ -96,6 +97,7 @@ void glShaderSource_soloader(GLuint shader, GLsizei count,
     total_length = strlen(str);
 
     l_info("glShaderSource(%u): %u bytes", shader, total_length);
+    gl_variants_shader_source(shader, str);
     load_shader(shader, str, total_length);
 
     free(str);

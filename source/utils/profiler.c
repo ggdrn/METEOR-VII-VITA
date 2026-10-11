@@ -44,6 +44,15 @@ static volatile uint32_t ring_head; // written by the handler
 static uint32_t ring_tail;          // read by the sampler thread
 static uintptr_t text_lo, text_hi;
 static volatile int armed;
+static volatile SceUInt64 * spike_frame_start;
+static SceUInt64 spike_threshold_us;
+
+// Spike mode: only sample frames that are already slow
+static int should_sample(void) {
+    if (!spike_frame_start) return 1;
+    SceUInt64 start = *spike_frame_start;
+    return start && sceKernelGetProcessTimeWide() - start > spike_threshold_us;
+}
 
 static void abort_handler(KuKernelExceptionContext * ctx) {
     uintptr_t addr = ctx->exceptionType == KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT ? ctx->FAR : ctx->pc;
@@ -89,7 +98,7 @@ static int sampler_thread(SceSize args, void * argp) {
     SceUInt32 since_flush = 0;
     while (1) {
         sceKernelDelayThread(SAMPLE_PERIOD_US);
-        if (!armed) {
+        if (!armed && should_sample()) {
             armed = 1;
             kuKernelMemProtect((void *) text_lo, text_hi - text_lo, PROT_RW);
         }
@@ -102,7 +111,9 @@ static int sampler_thread(SceSize args, void * argp) {
     return 0;
 }
 
-void profiler_start(void) {
+void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us) {
+    spike_frame_start = frame_start;
+    spike_threshold_us = threshold_us;
     text_lo = so_mod.text_base;
     text_hi = so_mod.text_base + so_mod.text_size;
 
@@ -119,6 +130,7 @@ void profiler_start(void) {
 
     SceUID thid = sceKernelCreateThread("profiler", sampler_thread, 0x10000100 - 0x20, 0x4000, 0, 0, NULL);
     if (thid >= 0) sceKernelStartThread(thid, 0, NULL);
-    l_info("profiler: sampling .so text 0x%08x-0x%08x every %d us into %s",
-           text_lo, text_hi, SAMPLE_PERIOD_US, PROFILE_PATH);
+    l_info("profiler: sampling .so text 0x%08x-0x%08x every %d us into %s%s",
+           text_lo, text_hi, SAMPLE_PERIOD_US, PROFILE_PATH,
+           frame_start ? " (only frames slower than the spike threshold)" : "");
 }

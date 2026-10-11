@@ -10,6 +10,7 @@
 
 #include "reimpl/pthr.h"
 #include "reimpl/readpixels.h"
+#include "reimpl/gl_variants.h"
 
 #include <unistd.h>
 #include <psp2/kernel/processmgr.h>
@@ -39,6 +40,7 @@ void glDrawArrays_stat(GLenum mode, GLint first, GLsizei count) {
     st.verts += count;
     readpixels_invalidate();
     SceUInt64 t0 = now_us();
+    gl_variants_before_draw();
     glDrawArrays(mode, first, count);
     st.draw_us += now_us() - t0;
 }
@@ -69,10 +71,12 @@ void glReadPixels_stat(GLint x, GLint y, GLsizei width, GLsizei height, GLenum f
     if (!st.readpixels++) l_info("glReadPixels(%i, %i, %i, %i)", x, y, width, height);
 }
 
+// The game calls glFlush after almost every batch (~28 times per frame). In
+// vitaGL each one ends the GXM scene: on the Vita's tile-based GPU that means
+// storing the whole render target to memory and loading it back for the next
+// scene, which kept the GPU near 100%. Nothing needs it here: vitaGL syncs on
+// its own for glReadPixels, framebuffer switches and textures still in use.
 void glFlush_stat(void) {
-    SceUInt64 t0 = now_us();
-    glFlush();
-    st.flush_us += now_us() - t0;
     st.flushes++;
 }
 

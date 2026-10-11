@@ -8,7 +8,14 @@
 #ifndef SOLOADER_PROFILER_H
 #define SOLOADER_PROFILER_H
 
-/** Starts sampling the .so into DATA_PATH "profile.bin" (see profiler.c). */
-void profiler_start(void);
+#include <psp2/types.h>
+
+/**
+ * Starts sampling the .so into DATA_PATH "profile.bin" (see profiler.c).
+ * With `frame_start` (0 between frames) and `threshold_us`, samples are only
+ * taken while the current frame has been running for longer than the
+ * threshold: stutters get profiled, normal frames cost nothing.
+ */
+void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us);
 
 #endif // SOLOADER_PROFILER_H

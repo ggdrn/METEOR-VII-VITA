@@ -38,6 +38,7 @@
 
 #include "utils/glutil.h"
 #include "utils/glstats.h"
+#include "reimpl/gl_variants.h"
 
 void glBindTexture_oes(GLenum target, GLuint texture);
 void glTexParameteri_oes(GLenum target, GLenum pname, GLint param);
@@ -582,7 +583,7 @@ so_default_dynlib default_dynlib[] = {
         { "glActiveTexture", (uintptr_t)&glActiveTexture },
         { "glAlphaFunc", (uintptr_t)&glAlphaFunc },
         { "glAlphaFuncx", (uintptr_t)&glAlphaFuncx },
-        { "glAttachShader", (uintptr_t)&glAttachShader },
+        { "glAttachShader", (uintptr_t)&glAttachShader_variants },
         { "glBindAttribLocation", (uintptr_t)&glBindAttribLocation },
         { "glBindBuffer", (uintptr_t)&glBindBuffer },
         { "glBindFramebuffer", (uintptr_t)&glBindFramebuffer_stat },
@@ -711,7 +712,7 @@ so_default_dynlib default_dynlib[] = {
         { "glGetTexParameterfv", (uintptr_t)&ret0 },
         { "glGetTexParameteriv", (uintptr_t)&ret0 },
         { "glGetTexParameterxv", (uintptr_t)&ret0 },
-        { "glGetUniformLocation", (uintptr_t)&glGetUniformLocation },
+        { "glGetUniformLocation", (uintptr_t)&glGetUniformLocation_variants },
         { "glHint", (uintptr_t)&glHint },
         { "glIsBuffer", (uintptr_t)&ret0 },
         { "glIsRenderbuffer", (uintptr_t)&glIsRenderbuffer },
@@ -807,7 +808,7 @@ so_default_dynlib default_dynlib[] = {
         { "glTranslatex", (uintptr_t)&glTranslatex },
         { "glUniform1f", (uintptr_t)&glUniform1f },
         { "glUniform1fv", (uintptr_t)&glUniform1fv },
-        { "glUniform1i", (uintptr_t)&glUniform1i },
+        { "glUniform1i", (uintptr_t)&glUniform1i_variants },
         { "glUniform1iv", (uintptr_t)&glUniform1iv },
         { "glUniform2i", (uintptr_t)&glUniform2i },
         { "glUniform2f", (uintptr_t)&glUniform2f },
@@ -823,10 +824,10 @@ so_default_dynlib default_dynlib[] = {
         { "glUniform4iv", (uintptr_t)&glUniform4iv },
         { "glUniformMatrix2fv", (uintptr_t)&glUniformMatrix2fv },
         { "glUniformMatrix3fv", (uintptr_t)&glUniformMatrix3fv },
-        { "glUniformMatrix4fv", (uintptr_t)&glUniformMatrix4fv },
+        { "glUniformMatrix4fv", (uintptr_t)&glUniformMatrix4fv_variants },
         { "glUnmapBuffer", (uintptr_t)&glUnmapBuffer },
         { "glUnmapBufferOES", (uintptr_t)&glUnmapBuffer },
-        { "glUseProgram", (uintptr_t)&glUseProgram },
+        { "glUseProgram", (uintptr_t)&glUseProgram_variants },
         { "glValidateProgram", (uintptr_t)&ret0 },
         { "glVertexAttrib4f", (uintptr_t)&glVertexAttrib4f },
         { "glVertexAttrib4fv", (uintptr_t)&glVertexAttrib4fv },

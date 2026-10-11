@@ -14,6 +14,7 @@
 #include "utils/profiler.h"
 #include "ff7_texture.h"
 #include "ff7_anim.h"
+#include "reimpl/gl_variants.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
 
@@ -157,8 +158,10 @@ int main() {
     SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100, 0x4000, 0, 0, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
 
-#ifdef ENABLE_PROFILER
-    profiler_start();
+#if defined(ENABLE_PROFILER)
+    profiler_start(NULL, 0);
+#elif defined(ENABLE_SPIKE_PROFILER)
+    profiler_start(&frame_start_us, 100000);
 #endif
 
     log_memory();
@@ -212,6 +215,7 @@ int main() {
             glstats_report((now - heartbeat_us) / 1000000.0);
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
+            gl_variants_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
             heartbeat_frame = frame;
