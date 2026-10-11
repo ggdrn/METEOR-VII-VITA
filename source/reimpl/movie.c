@@ -33,6 +33,7 @@
 #include <vpx/vpx_decoder.h>
 #include <vitaGL.h>
 
+#include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
@@ -90,6 +91,15 @@ static struct {
 } mv;
 
 static GLuint movie_texture = 0;
+
+// Texture memory of the current movie (allocated once, then written in place)
+static uint8_t * tex_data;
+static GLuint tex_data_name;
+
+static struct {
+    unsigned decoded, dropped;
+    SceUInt64 decode_us, decode_max_us, upload_us, upload_max_us;
+} ms;
 
 /*
  * nestegg IO over the OBB entry
@@ -206,10 +216,16 @@ void movie_mix_audio(int16_t * stream, int frames) {
  * Video: VP8 -> queue of contiguous I420 frames
  */
 static void video_decode(unsigned char * data, size_t len, uint32_t pts_ms) {
+    SceUInt64 t0 = now_us();
     if (vpx_codec_decode(&mv.vpx, data, (unsigned int) len, NULL, 0) != VPX_CODEC_OK) {
         l_warn("movie: VP8 decode error: %s", vpx_codec_error(&mv.vpx));
         return;
     }
+    SceUInt64 dt = now_us() - t0;
+    ms.decode_us += dt;
+    if (dt > ms.decode_max_us) ms.decode_max_us = dt;
+    ms.decoded++;
+
     vpx_codec_iter_t iter = NULL;
     vpx_image_t * img;
     while ((img = vpx_codec_get_frame(&mv.vpx, &iter)) != NULL) {
@@ -298,7 +314,15 @@ static void close_container(void) {
 }
 
 void movie_stop(void) {
-    if (mv.playing) l_info("MyDecoder: stop %s at %d ms (%d frames shown)", mv.name, position_ms(), mv.shown);
+    if (mv.playing) {
+        l_info("MyDecoder: stop %s at %d ms (%d frames shown, %u dropped)", mv.name, position_ms(), mv.shown, ms.dropped);
+        if (ms.decoded)
+            l_info("MyDecoder: VP8 decode avg %.1f ms (max %.1f), upload avg %.2f ms (max %.2f)",
+                   ms.decode_us / 1000.0 / ms.decoded, ms.decode_max_us / 1000.0,
+                   mv.shown ? ms.upload_us / 1000.0 / mv.shown : 0.0, ms.upload_max_us / 1000.0);
+    }
+    memset(&ms, 0, sizeof(ms));
+    tex_data = NULL;
     mv.playing = 0;
     mv.paused = 0;
     close_container();
@@ -394,17 +418,45 @@ void movie_set_texture(unsigned int tex) {
     movie_texture = tex;
 }
 
+// Same plane layout vitaGL uses for YUV420P3 textures (gpu_alloc_planar_texture)
+static uint32_t po2(uint32_t v) { uint32_t p = 1; while (p < v) p <<= 1; return p; }
+
 static void upload(video_frame_t * f) {
     if (!movie_texture) return;
+    SceUInt64 t0 = now_us();
     GLint previous = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
     glBindTexture(GL_TEXTURE_2D, movie_texture);
-    glCompressedTexImage2D(GL_TEXTURE_2D, 0, VGL_YUV420P_BT601, mv.width, mv.height, 0,
-                           mv.width * mv.height * 3 / 2, f->yuv);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    int w = mv.width, h = mv.height;
+    uint8_t * current = vglGetTexDataPointer(GL_TEXTURE_2D);
+    if (!tex_data || tex_data_name != movie_texture || current != tex_data || (w % 16) || (h % 2)) {
+        // First frame (or the game replaced the texture): allocate it
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, VGL_YUV420P_BT601, w, h, 0, w * h * 3 / 2, f->yuv);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        tex_data = (w % 16 || h % 2) ? NULL : vglGetTexDataPointer(GL_TEXTURE_2D);
+        tex_data_name = movie_texture;
+    } else {
+        // Later frames: copy the planes straight into the texture memory
+        uint32_t plane_w = po2(w) < 8 ? 8 : po2(w), plane_h = po2(h);
+        uint32_t half_plane_w = po2(w / 2) < 8 ? 8 : po2(w / 2), half_plane_h = po2(h / 2) < 8 ? 8 : po2(h / 2);
+        const uint8_t * y = f->yuv;
+        const uint8_t * u = y + w * h;
+        const uint8_t * v = u + (w / 2) * (h / 2);
+        uint8_t * dy = tex_data;
+        uint8_t * du = dy + plane_w * plane_h;
+        uint8_t * dv = du + half_plane_w * half_plane_h;
+        sceClibMemcpy(dy, y, w * h);
+        sceClibMemcpy(du, u, (w / 2) * (h / 2));
+        sceClibMemcpy(dv, v, (w / 2) * (h / 2));
+    }
     glBindTexture(GL_TEXTURE_2D, (GLuint) previous);
     mv.shown++;
+
+    SceUInt64 dt = now_us() - t0;
+    ms.upload_us += dt;
+    if (dt > ms.upload_max_us) ms.upload_max_us = dt;
 }
 
 bool movie_frame(void) {
@@ -418,8 +470,10 @@ bool movie_frame(void) {
         uint32_t head = mv.vq_head; // decoder may append meanwhile; use a snapshot
 
         // Drop frames that are late, keeping the newest one already due
-        while (head - mv.vq_tail >= 2 && mv.frames[(mv.vq_tail + 1) % VIDEO_QUEUE].pts_ms <= now)
+        while (head - mv.vq_tail >= 2 && mv.frames[(mv.vq_tail + 1) % VIDEO_QUEUE].pts_ms <= now) {
             mv.vq_tail++;
+            ms.dropped++;
+        }
 
         if (mv.vq_tail != head && mv.frames[mv.vq_tail % VIDEO_QUEUE].pts_ms <= now) {
             upload(&mv.frames[mv.vq_tail % VIDEO_QUEUE]);
