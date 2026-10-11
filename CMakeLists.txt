@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.05")
+set(PORT_VERSION "0.00.06")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -161,6 +161,21 @@ add_executable(${CMAKE_PROJECT_NAME} ${SOURCES})
 # vitaShaRK/SceShaccCgExt are C++: link with g++ so libstdc++ resolves properly
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
 
+# OpenSL ES built from source (lib/opensles), with its logs routed to logs.txt
+set(OPENSLES_DIR ${CMAKE_SOURCE_DIR}/lib/opensles/libopensles)
+set(OPENSLES_OBJS OpenSLESUT MPH_to OpenSLES_IID classes devices trace locks sles sllog
+    SndFile Vita IOutputMix IOutputMixExt sync IID_to_MPH ThreadPool C3DGroup
+    CAudioPlayer CAudioRecorder CEngine COutputMix IBassBoost IBufferQueue IEffectSend
+    IEngine IDynamicInterfaceManagement IEnvironmentalReverb IEqualizer IMuteSolo IObject
+    IPlay IPlaybackRate IPrefetchStatus IPresetReverb IRecord ISeek IVirtualizer IVolume)
+list(TRANSFORM OPENSLES_OBJS PREPEND ${OPENSLES_DIR}/)
+list(TRANSFORM OPENSLES_OBJS APPEND .c)
+add_library(OpenSLES_src STATIC ${OPENSLES_OBJS})
+target_compile_definitions(OpenSLES_src PRIVATE USE_OUTPUTMIXEXT USE_SDL USE_SNDFILE)
+target_include_directories(OpenSLES_src PRIVATE ${OPENSLES_DIR} ${CMAKE_SOURCE_DIR}/lib/opensles/include)
+target_compile_options(OpenSLES_src PRIVATE -std=gnu17 -O2 -w
+                       -include ${CMAKE_SOURCE_DIR}/source/utils/log_redirect_stdio.h)
+
 add_subdirectory(lib/libc_bridge)
 add_dependencies(${CMAKE_PROJECT_NAME} SceLibcBridge)
 
@@ -229,7 +244,7 @@ endif()
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
                       -Wl,--whole-archive pthread -Wl,--no-whole-archive
-                      OpenSLES
+                      OpenSLES_src
                       sndfile
                       mp3lame
                       mpg123

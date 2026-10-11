@@ -8,3 +8,6 @@
 	path = lib/vitagl
 	url = https://github.com/Rinnegatamante/vitaGL
 	ignore = dirty
+[submodule "lib/opensles"]
+	path = lib/opensles
+	url = https://github.com/frangarcj/opensles
