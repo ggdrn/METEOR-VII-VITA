@@ -52,6 +52,10 @@ typedef struct {
 
 static obb_fd_t fds[OBB_FD_MAX];
 
+// Totals for the heartbeat (all descriptors)
+static volatile uint64_t total_io_us, total_bytes;
+#define SLOW_READ_US 30000
+
 typedef struct {
     int64_t off;
     size_t len;
@@ -187,6 +191,9 @@ ssize_t obb_fd_read(int fd, void * buf, size_t count) {
     if (!f) { errno = EBADF; return -1; }
 
     sceKernelLockLwMutex(&f->lock, 1, NULL);
+    SceUInt64 io_before = f->io_us;
+    SceUInt64 t_call = sceKernelGetProcessTimeWide();
+    int64_t pos_call = f->pos;
     uint8_t * dst = buf;
     size_t done = 0;
 
@@ -233,6 +240,13 @@ ssize_t obb_fd_read(int fd, void * buf, size_t count) {
     f->pos += done;
     f->bytes += done;
     f->calls++;
+
+    SceUInt64 call_us = sceKernelGetProcessTimeWide() - t_call;
+    total_io_us += f->io_us - io_before;
+    total_bytes += done;
+    if (call_us > SLOW_READ_US)
+        l_warn("OBB slow read [%s]: %u bytes at file+%lld took %llu ms (%llu ms in IO)",
+               f->tag, done, pos_call, call_us / 1000, (f->io_us - io_before) / 1000);
     if (f->bytes >= f->next_report) {
         report(f, "progress");
         f->next_report += OBB_STATS_STEP;
@@ -255,6 +269,12 @@ int64_t obb_fd_lseek(int fd, int64_t offset, int whence) {
     if (base + offset < 0) { errno = EINVAL; return -1; }
     f->pos = base + offset;
     return f->pos;
+}
+
+void obb_fd_report(double seconds) {
+    if (seconds <= 0) return;
+    l_info("obb/s: %.0f KB read, %.1f ms in IO", total_bytes / 1024.0 / seconds, total_io_us / 1000.0 / seconds);
+    total_io_us = total_bytes = 0;
 }
 
 int obb_fd_close(int fd) {

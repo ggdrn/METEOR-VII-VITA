@@ -13,6 +13,7 @@
 #include "utils/glstats.h"
 #include "utils/profiler.h"
 #include "ff7_texture.h"
+#include "reimpl/obb_fd.h"
 #include "utils/logger.h"
 
 #include <malloc.h>
@@ -190,6 +191,7 @@ int main() {
         if (last_frame_end) {
             SceUInt64 ft = swap_end - last_frame_end;
             if (ft > worst_us) worst_us = ft;
+            if (ft > 250000) l_warn("slow frame #%u: %llu ms", frame, ft / 1000);
             if (ft > 100000) slow100++;
             else if (ft > 50000) slow50++;
         }
@@ -208,6 +210,7 @@ int main() {
             worst_us = 0;
             glstats_report((now - heartbeat_us) / 1000000.0);
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
+            obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
             heartbeat_frame = frame;
             heartbeat_us = now;

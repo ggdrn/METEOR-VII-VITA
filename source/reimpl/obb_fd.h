@@ -32,4 +32,7 @@ int64_t obb_fd_lseek(int fd, int64_t offset, int whence);
 
 int obb_fd_close(int fd);
 
+/** Logs OBB read totals accumulated over `seconds`, then resets them. */
+void obb_fd_report(double seconds);
+
 #endif // SOLOADER_OBB_FD_H
