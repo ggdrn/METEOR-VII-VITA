@@ -18,6 +18,7 @@
 
 #include "utils/utils.h"
 #include "utils/logger.h"
+#include <so_util/so_util.h>
 
 #define PTHR_MAX_OBJECTS 1024
 
@@ -182,6 +183,11 @@ int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr
         ret = pthread_create(thread, attr->real_ptr, start, param);
     }
 
+    // Offsets are relative to the .so text base, for matching with crash dumps
+    extern so_module so_mod;
+    l_info("pthread_create: start %p (so+0x%x), param %p, caller so+0x%x: %i",
+           start, (uintptr_t) start - so_mod.text_base, param,
+           (uintptr_t) __builtin_return_address(0) - so_mod.text_base, ret);
     return ret;
 }
 

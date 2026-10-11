@@ -65,6 +65,13 @@ static int watchdog_thread(SceSize args, void * argp) {
         SceUInt64 start = frame_start_us;
         if (!start) continue;
         SceUInt64 stuck = sceKernelGetProcessTimeWide() - start;
+        // Development aid: a hang this long gets a core dump (ux0:data/*.psp2dmp)
+        // with every thread's registers, to find where the game is stuck
+        if (stuck >= 15000000) {
+            l_fatal("watchdog: onDrawFrame() #%u hung for %llu s, forcing a core dump",
+                    frame_number, stuck / 1000000);
+            *(volatile int *) 0xDEAD0000 = 0;
+        }
         if (stuck >= 3000000 && reported_frame != frame_number) {
             reported_frame = frame_number;
             l_warn("watchdog: onDrawFrame() #%u running for %llu s", frame_number, stuck / 1000000);

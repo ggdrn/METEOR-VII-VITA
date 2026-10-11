@@ -107,6 +107,8 @@ void soloader_init_all() {
 
     so_relocate(&so_mod);
     l_success("SO relocated.");
+    l_info("SO text base 0x%08x (size 0x%x), data base 0x%08x (size 0x%x)",
+           so_mod.text_base, so_mod.text_size, so_mod.data_base[0], so_mod.data_size[0]);
 
     resolve_imports(&so_mod);
     l_success("SO imports resolved.");
