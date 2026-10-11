@@ -898,7 +898,7 @@ so_default_dynlib default_dynlib[] = {
         { "pthread_cond_init", (uintptr_t) &pthread_cond_init_soloader },
         { "pthread_cond_signal", (uintptr_t) &pthread_cond_signal_soloader },
         { "pthread_cond_timedwait", (uintptr_t) &pthread_cond_timedwait_soloader },
-        { "pthread_cond_wait", (uintptr_t) &pthread_cond_wait_soloader },
+        { "pthread_cond_wait", (uintptr_t) &pthread_cond_wait_stat },
 
         { "pthread_create", (uintptr_t) &pthread_create_soloader },
         { "pthread_detach", (uintptr_t) &pthread_detach_soloader },
@@ -913,7 +913,7 @@ so_default_dynlib default_dynlib[] = {
 
         { "pthread_mutex_destroy", (uintptr_t) &pthread_mutex_destroy_soloader },
         { "pthread_mutex_init", (uintptr_t) &pthread_mutex_init_soloader },
-        { "pthread_mutex_lock", (uintptr_t) &pthread_mutex_lock_soloader },
+        { "pthread_mutex_lock", (uintptr_t) &pthread_mutex_lock_stat },
         { "pthread_mutex_trylock", (uintptr_t) &pthread_mutex_trylock_soloader },
         { "pthread_mutex_unlock", (uintptr_t) &pthread_mutex_unlock_soloader },
         { "pthread_mutexattr_destroy", (uintptr_t) &pthread_mutexattr_destroy_soloader },
@@ -934,7 +934,7 @@ so_default_dynlib default_dynlib[] = {
         { "sem_post", (uintptr_t) &sem_post_soloader },
         { "sem_timedwait", (uintptr_t) &sem_timedwait_soloader },
         { "sem_trywait", (uintptr_t) &sem_trywait_soloader },
-        { "sem_wait", (uintptr_t) &sem_wait_soloader },
+        { "sem_wait", (uintptr_t) &sem_wait_stat },
 
         { "sched_get_priority_max", (uintptr_t)&sched_get_priority_max },
         { "sched_get_priority_min", (uintptr_t)&sched_get_priority_min },
@@ -1095,7 +1095,7 @@ so_default_dynlib default_dynlib[] = {
         { "strtoul", (uintptr_t)&strtoul },
         { "strtoull", (uintptr_t)&strtoull },
         { "strtoumax", (uintptr_t)&strtoumax },
-        { "usleep", (uintptr_t)&usleep },
+        { "usleep", (uintptr_t)&usleep_stat },
 
         #ifdef USE_SCELIBC_IO
             { "qsort", (uintptr_t)&sceLibcBridge_qsort },

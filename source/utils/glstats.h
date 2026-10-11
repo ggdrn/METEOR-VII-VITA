@@ -19,6 +19,12 @@ void glFlush_stat(void);
 void glBindFramebuffer_stat(GLenum target, GLuint framebuffer);
 void glClear_stat(GLbitfield mask);
 
+/* Wait/sleep wrappers: time is accounted only for the game (GL) thread */
+int usleep_stat(unsigned int usec);
+int pthread_mutex_lock_stat(void * mutex);
+int pthread_cond_wait_stat(void * cond, void * mutex);
+int sem_wait_stat(int * sem);
+
 /** Logs the counters accumulated since the last call over `seconds`, then resets them. */
 void glstats_report(double seconds);
 

@@ -8,7 +8,16 @@
 #include "utils/glstats.h"
 #include "utils/logger.h"
 
+#include "reimpl/pthr.h"
+
+#include <unistd.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
+
+// Thread that issues the GL calls (the game's own render/logic thread)
+static SceUID gl_thread = -1;
+static SceUID main_thread = -1;
+static SceKernelSysClock last_gl_clocks, last_main_clocks;
 
 static struct {
     unsigned draws, verts;
@@ -16,11 +25,15 @@ static struct {
     unsigned readpixels; unsigned long long readpixels_us;
     unsigned flushes; unsigned long long flush_us;
     unsigned fbo_binds, clears;
+    unsigned sleeps; unsigned long long sleep_req_us, sleep_us;
+    unsigned locks; unsigned long long lock_us;
+    unsigned waits; unsigned long long wait_us;
 } st;
 
 static inline SceUInt64 now_us(void) { return sceKernelGetProcessTimeWide(); }
 
 void glDrawArrays_stat(GLenum mode, GLint first, GLsizei count) {
+    if (gl_thread < 0) gl_thread = sceKernelGetThreadId();
     st.draws++;
     st.verts += count;
     glDrawArrays(mode, first, count);
@@ -69,8 +82,70 @@ void glClear_stat(GLbitfield mask) {
     glClear(mask);
 }
 
+static inline int on_gl_thread(void) {
+    return sceKernelGetThreadId() == gl_thread;
+}
+
+int usleep_stat(unsigned int usec) {
+    if (!on_gl_thread()) return usleep(usec);
+    SceUInt64 t0 = now_us();
+    int r = usleep(usec);
+    st.sleep_us += now_us() - t0;
+    st.sleep_req_us += usec;
+    st.sleeps++;
+    return r;
+}
+
+int pthread_mutex_lock_stat(void * mutex) {
+    if (!on_gl_thread()) return pthread_mutex_lock_soloader(mutex);
+    SceUInt64 t0 = now_us();
+    int r = pthread_mutex_lock_soloader(mutex);
+    st.lock_us += now_us() - t0;
+    st.locks++;
+    return r;
+}
+
+int pthread_cond_wait_stat(void * cond, void * mutex) {
+    if (!on_gl_thread()) return pthread_cond_wait_soloader(cond, mutex);
+    SceUInt64 t0 = now_us();
+    int r = pthread_cond_wait_soloader(cond, mutex);
+    st.wait_us += now_us() - t0;
+    st.waits++;
+    return r;
+}
+
+int sem_wait_stat(int * sem) {
+    if (!on_gl_thread()) return sem_wait_soloader(sem);
+    SceUInt64 t0 = now_us();
+    int r = sem_wait_soloader(sem);
+    st.wait_us += now_us() - t0;
+    st.waits++;
+    return r;
+}
+
+// CPU time used by `thid` since the previous call, in percent of `seconds`
+static double thread_cpu(SceUID thid, SceKernelSysClock * last, double seconds, SceKernelThreadInfo * info) {
+    info->size = sizeof(*info);
+    if (thid < 0 || sceKernelGetThreadInfo(thid, info) < 0) return -1;
+    double pct = (info->runClocks - *last) / 10000.0 / seconds;
+    *last = info->runClocks;
+    return pct;
+}
+
 void glstats_report(double seconds) {
     if (seconds <= 0) return;
+    if (main_thread < 0) main_thread = sceKernelGetThreadId(); // called from the main loop
+    SceKernelThreadInfo gi, mi;
+    double gcpu = thread_cpu(gl_thread, &last_gl_clocks, seconds, &gi);
+    double mcpu = thread_cpu(main_thread, &last_main_clocks, seconds, &mi);
+    l_info("cpu: game thread %.0f%% (core %d, prio %d, mask 0x%x), main thread %.0f%% (core %d) | "
+           "game thread blocked/s: sleep %u calls %.0f ms (asked %.0f ms), mutex %u %.0f ms, wait %u %.0f ms",
+           gcpu, gi.currentCpuId, gi.currentPriority, gi.currentCpuAffinityMask, mcpu, mi.currentCpuId,
+           (unsigned) (st.sleeps / seconds), st.sleep_us / 1000.0 / seconds, st.sleep_req_us / 1000.0 / seconds,
+           (unsigned) (st.locks / seconds), st.lock_us / 1000.0 / seconds,
+           (unsigned) (st.waits / seconds), st.wait_us / 1000.0 / seconds);
+    st.sleeps = st.locks = st.waits = 0;
+    st.sleep_req_us = st.sleep_us = st.lock_us = st.wait_us = 0;
     l_info("gl/s: %.0f draws, %.0f verts, %.1f clears, %.1f fbo binds | tex %.1f uploads (%.0f KB, %.1f ms) | "
            "readpixels %.1f (%.1f ms) | flush %.1f (%.1f ms)",
            st.draws / seconds, st.verts / seconds, st.clears / seconds, st.fbo_binds / seconds,
