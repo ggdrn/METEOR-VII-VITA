@@ -165,7 +165,7 @@ static void copy16_native(void) {
 typedef int (* grab_fn)(int, int, int, int, int, int, int, int, void *);
 static so_hook grab_hook;
 static uint8_t * grab_rowbuf, * grab_flag;
-static uint32_t ** grab_got;
+static uint32_t * grab_frameskip; // variable the GOT slot points to
 static unsigned grabs;
 static unsigned long long grab_us;
 
@@ -195,7 +195,7 @@ static int grab_native(int x, int y, int w, int h, int screen_h, int x_scale, in
         *grab_flag = 0;
         return 0;
     }
-    if (**grab_got) {
+    if (*grab_frameskip) {
         uint32_t n = ++*(uint32_t *) (grab_flag + 4);
         if (n & 3) return 0;
     }
@@ -223,9 +223,14 @@ void ff7_swirl_patch(void) {
     if (grab && *(uint32_t *) (grab & ~1) == GRAB_PROLOGUE) {
         grab_rowbuf = (uint8_t *) (so_mod.text_base + GRAB_ROWBUF);
         grab_flag = (uint8_t *) (so_mod.text_base + GRAB_FLAG);
-        grab_got = *(uint32_t ***) (so_mod.text_base + GRAB_GOT_FRAMES);
-        grab_hook = hook_addr(grab, (uintptr_t) &grab_native);
-        l_info("ff7_swirl: native screen grab installed");
+        grab_frameskip = *(uint32_t **) (so_mod.text_base + GRAB_GOT_FRAMES);
+        uintptr_t v = (uintptr_t) grab_frameskip;
+        if (v < so_mod.text_base || v >= so_mod.text_base + 0x1498e40) { // end of .bss
+            l_warn("ff7_swirl: unexpected frame-skip pointer %p, screen grab left as is", grab_frameskip);
+        } else {
+            grab_hook = hook_addr(grab, (uintptr_t) &grab_native);
+            l_info("ff7_swirl: native screen grab installed (frame-skip switch at %p)", grab_frameskip);
+        }
     } else {
         l_warn("ff7_swirl: screen grab not found, left as is");
     }
