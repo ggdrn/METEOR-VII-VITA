@@ -4,7 +4,9 @@
  * A sampler thread periodically removes execute permission from the .so's
  * text. The next instruction fetched there raises a prefetch abort; the
  * kubridge exception handler records PC/LR, restores the permission and
- * resumes. Samples go to DATA_PATH "profile.bin" as {pc, lr, tid} records
+ * resumes. Literal-pool loads from the text can also fault while the
+ * permission is being changed (data abort with FAR inside the text): those
+ * are handled the same way. Samples go to DATA_PATH "profile.bin" as {pc, lr, tid} records
  * with addresses relative to the .so text base; scripts/profile-report.py
  * turns them into a per-function ranking.
  *
@@ -41,10 +43,12 @@ static uint32_t ring_tail;          // read by the sampler thread
 static uintptr_t text_lo, text_hi;
 static volatile int armed;
 
-static void prefetch_abort_handler(KuKernelExceptionContext * ctx) {
-    if (ctx->pc < text_lo || ctx->pc >= text_hi) {
-        // Not ours: drop the handler so the fault is reported normally
-        kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT);
+static void abort_handler(KuKernelExceptionContext * ctx) {
+    uintptr_t addr = ctx->exceptionType == KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT ? ctx->FAR : ctx->pc;
+    if (addr < text_lo || addr >= text_hi) {
+        // Not caused by the profiler: drop the handler so the fault crashes
+        // (and dumps) normally when the instruction is re-executed
+        kuKernelReleaseExceptionHandler(ctx->exceptionType);
         return;
     }
 
@@ -101,7 +105,10 @@ void profiler_start(void) {
 
     KuKernelExceptionHandlerOpt opt = { .size = sizeof(opt) };
     int ret = kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT,
-                                               prefetch_abort_handler, NULL, &opt);
+                                               abort_handler, NULL, &opt);
+    if (ret >= 0)
+        ret = kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT,
+                                               abort_handler, NULL, &opt);
     if (ret < 0) {
         l_error("profiler: kuKernelRegisterExceptionHandler failed: 0x%08x (kubridge too old?)", ret);
         return;
