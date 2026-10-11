@@ -32,6 +32,7 @@ extern "C"
 #include "utils/dialog.h"
 #include "reimpl/sys.h"
 #include "ff7_texture.h"
+#include "ff7_anim.h"
 #include <stdbool.h>
 
 void __kuser_memory_barrier(void) {
@@ -70,6 +71,7 @@ void kuser_patch(void) {
 void so_patch(void) {
 	kuser_patch();
 	ff7_texture_patch();
+	ff7_anim_patch();
 	// Sample hook with symbol name
 	// hook_addr((uintptr_t)so_symbol(&so_mod, "_ZN6glitch2os7Printer5printEPKcz"), (uintptr_t)&hookedFunction);
 	// Or with offset

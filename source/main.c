@@ -13,6 +13,7 @@
 #include "utils/glstats.h"
 #include "utils/profiler.h"
 #include "ff7_texture.h"
+#include "ff7_anim.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
 
@@ -210,6 +211,7 @@ int main() {
             worst_us = 0;
             glstats_report((now - heartbeat_us) / 1000000.0);
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
+            ff7_anim_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
             heartbeat_frame = frame;
