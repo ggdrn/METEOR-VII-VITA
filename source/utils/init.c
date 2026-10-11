@@ -15,6 +15,7 @@
 #include "utils/utils.h"
 #include "utils/settings.h"
 #include "utils/zip.h"
+#include "reimpl/obb_fd.h"
 
 #include <reimpl/controls.h>
 
@@ -23,6 +24,7 @@
 
 #include <psp2/appmgr.h>
 #include <psp2/apputil.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/power.h>
@@ -100,6 +102,13 @@ void soloader_init_all() {
     obb_zip = zip_open(OBB_PATH);
     if (!obb_zip) {
         fatal_error("Error: %s is not a valid FINAL FANTASY VII OBB file.", OBB_PATH);
+    }
+
+    // One-off card speed check per port version (diagnostic, ~1-5 s)
+    if (!file_exists(DATA_PATH "benchmark_" PORT_VERSION ".txt")) {
+        obb_benchmark();
+        SceUID m = sceIoOpen(DATA_PATH "benchmark_" PORT_VERSION ".txt", SCE_O_WRONLY | SCE_O_CREAT, 0777);
+        if (m >= 0) sceIoClose(m);
     }
 
     settings_load();
