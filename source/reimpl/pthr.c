@@ -10,6 +10,7 @@
 
 #include "reimpl/pthr.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <psp2/kernel/clib.h>
@@ -183,6 +184,12 @@ static void *thread_trampoline(void *arg) {
     thread_tramp t = *(thread_tramp *) arg;
     free(arg);
     cpu_set_self(t.mask);
+    extern so_module so_mod;
+    char name[20];
+    if (t.mask == CPU_MASK_GAME) snprintf(name, sizeof(name), "game");
+    else snprintf(name, sizeof(name), "so+%x/%x", (unsigned) ((uintptr_t) t.start - so_mod.text_base),
+                  (unsigned) sceKernelGetThreadId() & 0xfff);
+    cpu_register_thread(name, sceKernelGetThreadId());
     return t.start(t.param);
 }
 

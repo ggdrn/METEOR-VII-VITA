@@ -18,4 +18,7 @@
  */
 void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us);
 
+/** Logs sampler counters (diagnostics). */
+void profiler_report(void);
+
 #endif // SOLOADER_PROFILER_H

@@ -134,7 +134,9 @@ int pthread_cond_wait_stat(void * cond, void * mutex) {
     if (!on_gl_thread()) return pthread_cond_wait_soloader(cond, mutex);
     SceUInt64 t0 = now_us();
     int r = pthread_cond_wait_soloader(cond, mutex);
-    st.wait_us += now_us() - t0;
+    SceUInt64 waited = now_us() - t0;
+    st.wait_us += waited;
+    if (waited > 100000) l_warn("game thread waited %llu ms (pthread_cond_wait)", waited / 1000);
     st.waits++;
     return r;
 }

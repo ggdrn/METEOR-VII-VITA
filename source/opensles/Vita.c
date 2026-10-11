@@ -144,6 +144,7 @@ void SDL_open(IEngine *thisEngine)
 	if (audio_thread < 0) {
 		audio_shutdown_requested = 0;
 		audio_thread = sceKernelCreateThread("OpenSLES Playback", audioThread, 0x10000100, 0x10000, 0, SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2, NULL) /* off the game thread's core 0 */;
+		{ extern void cpu_register_thread(const char *, int); if (audio_thread >= 0) cpu_register_thread("sl_mixer", audio_thread); }
 		if (audio_thread < 0) {
 			SL_LOGE("Unable to create OpenSLES playback thread: 0x%x", audio_thread);
 			return;

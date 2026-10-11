@@ -20,6 +20,12 @@
 #define CPU_MASK_GAME      SCE_KERNEL_CPU_MASK_USER_0
 #define CPU_MASK_SECONDARY (SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2)
 
+/** Adds a thread to the per-thread CPU report. */
+void cpu_register_thread(const char * name, SceUID thid);
+
+/** Logs the CPU usage of every registered thread over `seconds`. */
+void cpu_report(double seconds);
+
 /** Moves the calling thread to `mask`. */
 static inline void cpu_set_self(int mask) {
     sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask);

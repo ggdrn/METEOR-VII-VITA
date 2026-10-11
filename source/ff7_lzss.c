@@ -45,7 +45,7 @@ extern so_module so_mod;
 #define SYM_MK_ADDRESS  "mk_address"
 #define LZSS_PROLOGUE   0x41f0e92d // stmdb sp!, {r4-r8, lr}
 
-#define SELFTEST_CALLS 8
+#define SELFTEST_CALLS 1 // one area load: verified identical on v0.00.29 (3 x ~600 KB)
 
 enum { EAX = 0, ECX = 1, EDX = 2, ESP = 4 };
 

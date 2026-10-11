@@ -45,6 +45,7 @@ static volatile uint32_t ring_head; // written by the handler
 static uint32_t ring_tail;          // read by the sampler thread
 static uintptr_t text_lo, text_hi;
 static volatile int armed;
+static unsigned arms, flushed;
 static volatile SceUInt64 * spike_frame_start;
 static SceUInt64 spike_threshold_us;
 
@@ -86,6 +87,7 @@ static void flush_samples(SceUID fd) {
         if (i + n > RING_SIZE) n = RING_SIZE - i;
         sceIoWrite(fd, &ring[i], n * sizeof(sample_t));
         ring_tail += n;
+        flushed += n;
     }
 }
 
@@ -100,6 +102,7 @@ static int sampler_thread(SceSize args, void * argp) {
     while (1) {
         sceKernelDelayThread(SAMPLE_PERIOD_US);
         if (!armed && should_sample()) {
+            arms++;
             armed = 1;
             kuKernelMemProtect((void *) text_lo, text_hi - text_lo, PROT_RW);
         }
@@ -110,6 +113,11 @@ static int sampler_thread(SceSize args, void * argp) {
         }
     }
     return 0;
+}
+
+void profiler_report(void) {
+    if (!text_lo) return;
+    l_info("profiler: %u arms, %u samples taken, %u written, armed now %d", arms, ring_head, flushed, armed);
 }
 
 void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us) {
@@ -131,6 +139,7 @@ void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us) {
 
     SceUID thid = sceKernelCreateThread("profiler", sampler_thread, 0x10000100 - 0x20, 0x4000, 0, CPU_MASK_SECONDARY, NULL);
     if (thid >= 0) sceKernelStartThread(thid, 0, NULL);
+    if (thid >= 0) cpu_register_thread("profiler", thid);
     l_info("profiler: sampling .so text 0x%08x-0x%08x every %d us into %s%s",
            text_lo, text_hi, SAMPLE_PERIOD_US, PROFILE_PATH,
            frame_start ? " (only frames slower than the spike threshold)" : "");

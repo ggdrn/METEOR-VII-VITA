@@ -14,6 +14,7 @@
 #include "utils/logger.h"
 #include "reimpl/readpixels.h"
 #include "reimpl/gl_variants.h"
+#include "utils/cpu.h"
 
 #include <stdio.h>
 #include <malloc.h>
@@ -40,7 +41,12 @@ void gl_preload() {
 
 void gl_init() {
     // No MSAA: costly on the Vita GPU and of little use for FF7's low-poly scenes
+    // vglSwapBuffers waits for the previous garbage collector pass: keep it
+    // off the game thread's core and ahead of the other background threads
+    vglSetupGarbageCollector(0x10000100 - 0x10, CPU_MASK_SECONDARY);
     vglInitExtended(0, 960, 544, 6 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
+    extern SceUID gc_thread;
+    cpu_register_thread("vgl_gc", gc_thread);
 }
 
 void gl_swap() {

@@ -15,6 +15,7 @@
 #include "ff7_texture.h"
 #include "ff7_anim.h"
 #include "ff7_lzss.h"
+#include "ff7_swirl.h"
 #include "reimpl/gl_variants.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
@@ -159,6 +160,7 @@ int main() {
 
     SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100, 0x4000, 0, CPU_MASK_SECONDARY, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
+    if (wd >= 0) cpu_register_thread("watchdog", wd);
 
 #if defined(ENABLE_PROFILER)
     profiler_start(NULL, 0);
@@ -168,6 +170,7 @@ int main() {
 
     log_memory();
     cpu_set_self(CPU_MASK_SECONDARY); // core 0 is the game thread's
+    cpu_register_thread("main", sceKernelGetThreadId());
     l_success("Entering main loop.");
     unsigned int frame = 0;
     unsigned int heartbeat_frame = 0;
@@ -192,6 +195,12 @@ int main() {
         gl_swap();
         SceUInt64 swap_end = sceKernelGetProcessTimeWide();
         swap_us += swap_end - swap_start;
+        if (swap_end - swap_start > 30000) {
+            extern uint32_t vgl_swap_stage_us[3];
+            l_warn("slow swap #%u: %llu ms (scene end %u ms, display queue %u ms, garbage collector wait %u ms)",
+                   frame, (swap_end - swap_start) / 1000, vgl_swap_stage_us[0] / 1000,
+                   vgl_swap_stage_us[1] / 1000, vgl_swap_stage_us[2] / 1000);
+        }
 
         // Frame-to-frame time, to count stutters
         static SceUInt64 last_frame_end;
@@ -216,9 +225,14 @@ int main() {
             slow50 = slow100 = 0;
             worst_us = 0;
             glstats_report((now - heartbeat_us) / 1000000.0);
+            cpu_report((now - heartbeat_us) / 1000000.0);
+#if defined(ENABLE_PROFILER) || defined(ENABLE_SPIKE_PROFILER)
+            profiler_report();
+#endif
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
             ff7_lzss_report((now - heartbeat_us) / 1000000.0);
+            ff7_swirl_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
