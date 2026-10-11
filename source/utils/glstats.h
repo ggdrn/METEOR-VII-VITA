@@ -25,6 +25,10 @@ int pthread_mutex_lock_stat(void * mutex);
 int pthread_cond_wait_stat(void * cond, void * mutex);
 int sem_wait_stat(int * sem);
 
+/** Game thread time shares (percent) measured by the last glstats_report:
+ *  sleep (all of it, spin included), spin-wait part, blocked waits, GL calls. */
+void glstats_game_breakdown(double * sleep_pct, double * spin_pct, double * wait_pct, double * gl_pct);
+
 /** Logs the counters accumulated since the last call over `seconds`, then resets them. */
 void glstats_report(double seconds);
 

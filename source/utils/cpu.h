@@ -26,6 +26,9 @@ void cpu_register_thread(const char * name, SceUID thid);
 /** Logs the CPU usage of every registered thread over `seconds`. */
 void cpu_report(double seconds);
 
+/** CPU usage of the named thread in the last cpu_report(). */
+double cpu_last_pct(const char * name);
+
 /** Moves the calling thread to `mask`. */
 static inline void cpu_set_self(int mask) {
     sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask);

@@ -17,6 +17,7 @@ static struct {
     char name[20];
     SceUID thid;
     SceKernelSysClock last;
+    double pct; // from the last report
 } threads[MAX_THREADS];
 static int num_threads;
 static SceKernelLwMutexWork lock;
@@ -39,6 +40,12 @@ void cpu_register_thread(const char * name, SceUID thid) {
     sceKernelUnlockLwMutex(&lock, 1);
 }
 
+double cpu_last_pct(const char * name) {
+    for (int i = 0; i < num_threads; i++)
+        if (!strcmp(threads[i].name, name)) return threads[i].pct;
+    return 0;
+}
+
 void cpu_report(double seconds) {
     if (seconds <= 0 || !num_threads) return;
     char line[512];
@@ -50,6 +57,7 @@ void cpu_report(double seconds) {
         if (sceKernelGetThreadInfo(threads[i].thid, &info) < 0) continue; // exited
         double pct = (info.runClocks - threads[i].last) / 10000.0 / seconds;
         threads[i].last = info.runClocks;
+        threads[i].pct = pct;
         if (pct < 0.5) continue;
         len += snprintf(line + len, sizeof(line) - len, "%s%s %.0f%% (p%d m%x)", len ? ", " : "",
                         threads[i].name, pct, info.currentPriority, info.currentCpuAffinityMask >> 16);

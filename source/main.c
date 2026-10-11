@@ -12,6 +12,7 @@
 #include "utils/glutil.h"
 #include "utils/glstats.h"
 #include "utils/profiler.h"
+#include "utils/perf.h"
 #include "ff7_texture.h"
 #include "ff7_anim.h"
 #include "ff7_lzss.h"
@@ -155,6 +156,7 @@ int main() {
     gl_init();
     l_info("onSurfaceChanged(960, 544)");
     ff7_onSurfaceChanged(&jni, FF7_CLASS, 960, 544);
+    perf_init();
     l_info("onSurfaceCreated(false, false)");
     ff7_onSurfaceCreated(&jni, FF7_CLASS, JNI_FALSE, JNI_FALSE);
 
@@ -193,6 +195,7 @@ int main() {
 
         SceUInt64 swap_start = sceKernelGetProcessTimeWide();
         gl_swap();
+        perf_frame_submitted();
         SceUInt64 swap_end = sceKernelGetProcessTimeWide();
         swap_us += swap_end - swap_start;
         if (swap_end - swap_start > 30000) {
@@ -226,6 +229,7 @@ int main() {
             worst_us = 0;
             glstats_report((now - heartbeat_us) / 1000000.0);
             cpu_report((now - heartbeat_us) / 1000000.0);
+            perf_report(frames * 1000000.0 / (double) (now - heartbeat_us), cpu_last_pct("game"));
 #if defined(ENABLE_PROFILER) || defined(ENABLE_SPIKE_PROFILER)
             profiler_report();
 #endif

@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.33")
+set(PORT_VERSION "0.00.34")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -161,6 +161,7 @@ set(SOURCES
     source/utils/zip.c
     source/utils/glstats.c
     source/utils/cpu.c
+    source/utils/perf.c
     source/utils/profiler.c
     lib/falso_jni/FalsoJNI.c
     lib/falso_jni/FalsoJNI_ImplBridge.c

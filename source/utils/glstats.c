@@ -30,7 +30,14 @@ static struct {
     unsigned sleeps; unsigned long long sleep_req_us, sleep_us;
     unsigned locks; unsigned long long lock_us;
     unsigned waits; unsigned long long wait_us;
+    unsigned long long spin_us;      // part of sleep_us spent spinning
+    unsigned long long gl_misc_us;   // clears, FBO binds, readpixels, tex uploads
 } st;
+
+// Snapshot of the last report, for the perf summary
+static struct {
+    double sleep_pct, spin_pct, wait_pct, gl_pct;
+} last;
 
 static inline SceUInt64 now_us(void) { return sceKernelGetProcessTimeWide(); }
 
@@ -83,13 +90,17 @@ void glFlush_stat(void) {
 void glBindFramebuffer_stat(GLenum target, GLuint framebuffer) {
     st.fbo_binds++;
     readpixels_invalidate();
+    SceUInt64 t0 = now_us();
     glBindFramebuffer(target, framebuffer);
+    st.gl_misc_us += now_us() - t0;
 }
 
 void glClear_stat(GLbitfield mask) {
     st.clears++;
     readpixels_invalidate();
+    SceUInt64 t0 = now_us();
     glClear(mask);
+    st.gl_misc_us += now_us() - t0;
 }
 
 // Last time the game thread gave up the CPU (sleep or wait), for the profiler
@@ -109,8 +120,10 @@ static int precise_usleep(unsigned int usec) {
     SceUInt64 deadline = now_us() + usec;
     if (usec > PRECISE_SLEEP_MARGIN_US)
         sceKernelDelayThread(usec - PRECISE_SLEEP_MARGIN_US);
+    SceUInt64 spin0 = now_us();
     while (now_us() < deadline)
         ;
+    st.spin_us += now_us() - spin0;
     return 0;
 }
 
@@ -164,6 +177,13 @@ static double thread_cpu(SceUID thid, SceKernelSysClock * last, double seconds, 
     return pct;
 }
 
+void glstats_game_breakdown(double * sleep_pct, double * spin_pct, double * wait_pct, double * gl_pct) {
+    *sleep_pct = last.sleep_pct;
+    *spin_pct = last.spin_pct;
+    *wait_pct = last.wait_pct;
+    *gl_pct = last.gl_pct;
+}
+
 void glstats_report(double seconds) {
     if (seconds <= 0) return;
     if (main_thread < 0) main_thread = sceKernelGetThreadId(); // called from the main loop
@@ -176,8 +196,12 @@ void glstats_report(double seconds) {
            (unsigned) (st.sleeps / seconds), st.sleep_us / 1000.0 / seconds, st.sleep_req_us / 1000.0 / seconds,
            (unsigned) (st.locks / seconds), st.lock_us / 1000.0 / seconds,
            (unsigned) (st.waits / seconds), st.wait_us / 1000.0 / seconds);
+    last.sleep_pct = st.sleep_us / 10000.0 / seconds;
+    last.spin_pct = st.spin_us / 10000.0 / seconds;
+    last.wait_pct = (st.wait_us + st.lock_us) / 10000.0 / seconds;
+    last.gl_pct = (st.draw_us + st.gl_misc_us + st.tex_us + st.readpixels_us) / 10000.0 / seconds;
     st.sleeps = st.locks = st.waits = 0;
-    st.sleep_req_us = st.sleep_us = st.lock_us = st.wait_us = 0;
+    st.sleep_req_us = st.sleep_us = st.lock_us = st.wait_us = st.spin_us = st.gl_misc_us = 0;
     l_info("gl/s: %.0f draws (%.1f ms), %.0f verts, %.1f clears, %.1f fbo binds | tex %.1f uploads (%.0f KB, %.1f ms) | "
            "readpixels %.1f (%.1f ms) | flush %.1f (%.1f ms)",
            st.draws / seconds, st.draw_us / 1000.0 / seconds, st.verts / seconds, st.clears / seconds, st.fbo_binds / seconds,
