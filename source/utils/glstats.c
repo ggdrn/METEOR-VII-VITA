@@ -92,6 +92,9 @@ void glClear_stat(GLbitfield mask) {
     glClear(mask);
 }
 
+// Last time the game thread gave up the CPU (sleep or wait), for the profiler
+volatile SceUInt64 game_last_idle_us;
+
 static inline int on_gl_thread(void) {
     return sceKernelGetThreadId() == gl_thread;
 }
@@ -115,6 +118,7 @@ int usleep_stat(unsigned int usec) {
     if (!on_gl_thread()) return usleep(usec);
     SceUInt64 t0 = now_us();
     int r = precise_usleep(usec);
+    game_last_idle_us = now_us();
     st.sleep_us += now_us() - t0;
     st.sleep_req_us += usec;
     st.sleeps++;
@@ -135,6 +139,7 @@ int pthread_cond_wait_stat(void * cond, void * mutex) {
     SceUInt64 t0 = now_us();
     int r = pthread_cond_wait_soloader(cond, mutex);
     SceUInt64 waited = now_us() - t0;
+    game_last_idle_us = now_us();
     st.wait_us += waited;
     if (waited > 100000) l_warn("game thread waited %llu ms (pthread_cond_wait)", waited / 1000);
     st.waits++;

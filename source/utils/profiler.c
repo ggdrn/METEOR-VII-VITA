@@ -49,11 +49,19 @@ static unsigned arms, flushed;
 static volatile SceUInt64 * spike_frame_start;
 static SceUInt64 spike_threshold_us;
 
-// Spike mode: only sample frames that are already slow
+// Spike mode: only sample frames that are already slow, or while the game
+// thread is CPU-bound (has not slept or waited for 50 ms: frames dropping
+// below the game's own rate)
+#define CPU_BOUND_US 50000
+extern volatile SceUInt64 game_last_idle_us;
+
 static int should_sample(void) {
     if (!spike_frame_start) return 1;
+    SceUInt64 now = sceKernelGetProcessTimeWide();
     SceUInt64 start = *spike_frame_start;
-    return start && sceKernelGetProcessTimeWide() - start > spike_threshold_us;
+    if (start && now - start > spike_threshold_us) return 1;
+    SceUInt64 idle = game_last_idle_us;
+    return idle && now - idle > CPU_BOUND_US;
 }
 
 static void abort_handler(KuKernelExceptionContext * ctx) {
