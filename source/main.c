@@ -11,6 +11,7 @@
 #include "utils/init.h"
 #include "utils/glutil.h"
 #include "utils/glstats.h"
+#include "utils/profiler.h"
 #include "utils/logger.h"
 
 #include <malloc.h>
@@ -152,6 +153,10 @@ int main() {
 
     SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100, 0x4000, 0, 0, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
+
+#ifdef ENABLE_PROFILER
+    profiler_start();
+#endif
 
     log_memory();
     l_success("Entering main loop.");
