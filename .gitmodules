@@ -11,3 +11,6 @@
 [submodule "lib/opensles"]
 	path = lib/opensles
 	url = https://github.com/frangarcj/opensles
+[submodule "lib/nestegg"]
+	path = lib/nestegg
+	url = https://github.com/kinetiknz/nestegg

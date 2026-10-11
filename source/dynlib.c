@@ -38,6 +38,9 @@
 
 #include "utils/glutil.h"
 #include "utils/glstats.h"
+
+void glBindTexture_oes(GLenum target, GLuint texture);
+void glTexParameteri_oes(GLenum target, GLenum pname, GLint param);
 #include "utils/utils.h"
 #include "utils/logger.h"
 
@@ -586,7 +589,7 @@ so_default_dynlib default_dynlib[] = {
         { "glBindFramebufferOES", (uintptr_t)&glBindFramebuffer },
         { "glBindRenderbuffer", (uintptr_t)&glBindRenderbuffer },
         { "glBindRenderbufferOES", (uintptr_t)&glBindRenderbuffer },
-        { "glBindTexture", (uintptr_t)&glBindTexture },
+        { "glBindTexture", (uintptr_t)&glBindTexture_oes },
         { "glBlendColor", (uintptr_t)&ret0 },
         { "glBlendEquation", (uintptr_t)&glBlendEquation },
         { "glBlendEquationOES", (uintptr_t)&glBlendEquation },
@@ -795,7 +798,7 @@ so_default_dynlib default_dynlib[] = {
         { "glTexImage2D", (uintptr_t)&glTexImage2D_stat },
         { "glTexParameterf", (uintptr_t)&glTexParameterf },
         { "glTexParameterfv", (uintptr_t)&ret0 },
-        { "glTexParameteri", (uintptr_t)&glTexParameteri },
+        { "glTexParameteri", (uintptr_t)&glTexParameteri_oes },
         { "glTexParameteriv", (uintptr_t)&glTexParameteriv },
         { "glTexParameterx", (uintptr_t)&glTexParameterx },
         { "glTexParameterxv", (uintptr_t)&ret0 },

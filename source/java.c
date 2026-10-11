@@ -240,6 +240,7 @@ jint MyDecoder_START(jmethodID id, va_list args) {
 void MyDecoder_SET_TEXTURE(jmethodID id, va_list args) {
     jint tex = va_arg(args, jint);
     l_info("MyDecoder.SET_TEXTURE(%i)", tex);
+    movie_set_texture((unsigned int) tex);
 }
 
 jint MyDecoder_FRAME(jmethodID id, va_list args) {
@@ -255,7 +256,7 @@ void MyDecoder_RESET(jmethodID id, va_list args) {
 
 void MyDecoder_SET_VOLUME(jmethodID id, va_list args) {
     double vol = va_arg(args, double); // floats are promoted through varargs
-    l_debug("MyDecoder.SET_VOLUME(%f)", vol);
+    movie_set_volume((float) vol);
 }
 
 jint MyDecoder_GET_TOTALTIME(jmethodID id, va_list args) {

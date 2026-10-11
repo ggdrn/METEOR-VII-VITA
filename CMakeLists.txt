@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.21")
+set(PORT_VERSION "0.00.22")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -49,6 +49,12 @@ add_definitions(-DDATA_PATH="${DATA_PATH}" -DAPK_PATH="${APK_PATH}"
 option(ENABLE_LOGGING "Write loader logs to ${LOG_PATH}" ON)
 
 # Sampling profiler of the .so (writes ${DATA_PATH}profile.bin; see scripts/profile-report.py)
+# Native replacements also run the original code and compare (slower; validation only)
+option(ENABLE_SELFTESTS "Compare native replacements with the original .so code" OFF)
+if (ENABLE_SELFTESTS)
+  add_definitions(-DENABLE_SELFTESTS)
+endif()
+
 option(ENABLE_PROFILER "Sample the game's .so for performance analysis (slows the game down)" OFF)
 if (ENABLE_PROFILER)
   add_definitions(-DENABLE_PROFILER)
@@ -156,7 +162,9 @@ set(SOURCES
     source/reimpl/egl_extra.c
     source/reimpl/obb_fd.c
     source/reimpl/movie.c
+    lib/nestegg/src/nestegg.c
     source/reimpl/readpixels.c
+    source/reimpl/gl_oes.c
     lib/falso_jni/converter.c
     lib/sha1/sha1.c
     lib/fios/fios.c
@@ -247,6 +255,7 @@ set_source_files_properties(lib/so_util/so_util.c lib/falso_jni/FalsoJNI.c
 
 target_include_directories(${CMAKE_PROJECT_NAME} SYSTEM
                            PUBLIC ${CMAKE_SOURCE_DIR}/lib
+                           PUBLIC ${CMAKE_SOURCE_DIR}/lib/nestegg/include
                            )
 
 target_include_directories(${CMAKE_PROJECT_NAME}
@@ -266,6 +275,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       mp3lame
                       mpg123
                       opus
+                      vpx
                       vorbis
                       ogg
                       vorbisenc

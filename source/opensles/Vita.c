@@ -31,6 +31,9 @@
 #include <vitasdk.h>
 
 #define MAX_ENGINES 4
+
+// FMV audio (source/reimpl/movie.c) is mixed into the same output
+void movie_mix_audio(int16_t *stream, int frames);
 #define FRAMES (SndFile_BUFSIZE / 4) // stereo 16-bit frames per output buffer
 
 static IEngine *engines[MAX_ENGINES];
@@ -84,6 +87,8 @@ static void fill_output_buffer(int16_t *stream) {
 		}
 	}
 	unlock_engines();
+
+	movie_mix_audio(stream, FRAMES);
 }
 
 static int audioThread(SceSize args, void *argp) {

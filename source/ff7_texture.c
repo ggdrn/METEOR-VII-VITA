@@ -153,7 +153,11 @@ static inline void store(uint8_t * d, int dst_bpp, uint32_t conv, uint32_t raw) 
 
 // Development self-test: the first conversions of each kind also run the
 // original into a scratch buffer and the outputs are compared byte by byte.
+#ifdef ENABLE_SELFTESTS
 #define SELFTEST_RUNS 12
+#else
+#define SELFTEST_RUNS 0
+#endif
 static int selftest_left[5] = {0, SELFTEST_RUNS, SELFTEST_RUNS, SELFTEST_RUNS, SELFTEST_RUNS};
 
 static void selftest(int invert, int raw_index, void * th, void * tf, uint8_t * dst, int src_bpp) {

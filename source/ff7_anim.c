@@ -54,7 +54,11 @@ static check_event_fn check_event;
 static volatile uint32_t * regs;
 static so_hook read_bits_hook;
 
+#ifdef ENABLE_SELFTESTS
 #define SELFTEST_CALLS 2000
+#else
+#define SELFTEST_CALLS 0
+#endif
 static int selftest_left = SELFTEST_CALLS;
 static unsigned long long calls;
 
