@@ -4,6 +4,10 @@ Turns ux0:data/ffvii-vita/profile.bin (written by source/utils/profiler.c)
 into a ranking of the hottest functions of libjni_ff7.so.
 
 Usage: scripts/profile-report.py profile.bin libjni_ff7.so [--top N] [--tid 0x...]
+                                 [--from SECONDS] [--to SECONDS]
+
+Records are {pc, lr, tid, ms} (v0.00.15+); --from/--to match the timestamps
+of logs.txt. Older 12-byte profiles work with --legacy.
 
 Symbols come from the .so's dynamic symbol table (arm-vita-eabi-nm must be on
 PATH: `source scripts/env.sh`).
@@ -43,14 +47,24 @@ def main():
     ap.add_argument("--tid", type=lambda s: int(s, 0), default=None)
     ap.add_argument("--from-frac", type=float, default=0.0,
                     help="skip the first fraction of the samples (they are in time order)")
+    ap.add_argument("--from", dest="t_from", type=float, default=None, help="start time (s)")
+    ap.add_argument("--to", dest="t_to", type=float, default=None, help="end time (s)")
+    ap.add_argument("--legacy", action="store_true", help="12-byte records without timestamps")
     args = ap.parse_args()
 
     data = open(args.profile, "rb").read()
-    samples = [struct.unpack_from("<III", data, i) for i in range(0, len(data) - 11, 12)]
+    if args.legacy:
+        samples = [struct.unpack_from("<III", data, i) + (0,) for i in range(0, len(data) - 11, 12)]
+    else:
+        samples = [struct.unpack_from("<IIII", data, i) for i in range(0, len(data) - 15, 16)]
     samples = samples[int(len(samples) * args.from_frac):]
+    if args.t_from is not None:
+        samples = [s for s in samples if s[3] >= args.t_from * 1000]
+    if args.t_to is not None:
+        samples = [s for s in samples if s[3] <= args.t_to * 1000]
     addrs, names = load_symbols(args.so)
 
-    by_tid = collections.Counter(t for _, _, t in samples)
+    by_tid = collections.Counter(s[2] for s in samples)
     print(f"{len(samples)} samples")
     for tid, n in by_tid.most_common():
         print(f"  thread 0x{tid:08x}: {n} ({100.0 * n / len(samples):.1f}%)")
@@ -59,10 +73,12 @@ def main():
     samples = [s for s in samples if s[2] == args.tid]
     total = len(samples)
     print(f"\nthread 0x{args.tid:08x}: {total} samples\n")
+    if not total:
+        return
 
-    funcs = collections.Counter(lookup(addrs, names, pc) for pc, _, _ in samples)
+    funcs = collections.Counter(lookup(addrs, names, s[0]) for s in samples)
     callers = collections.defaultdict(collections.Counter)
-    for pc, lr, _ in samples:
+    for pc, lr, _, _ in samples:
         callers[lookup(addrs, names, pc)][lookup(addrs, names, lr)] += 1
 
     print(f"{'%':>6} {'samples':>8}  function (top callers by LR)")

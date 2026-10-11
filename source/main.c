@@ -163,7 +163,8 @@ int main() {
     l_success("Entering main loop.");
     unsigned int frame = 0;
     unsigned int heartbeat_frame = 0;
-    SceUInt64 draw_us = 0, swap_us = 0;
+    SceUInt64 draw_us = 0, swap_us = 0, worst_us = 0;
+    unsigned int slow50 = 0, slow100 = 0;
     SceUInt64 heartbeat_us = sceKernelGetProcessTimeWide();
     while (1) {
         controls_poll();
@@ -181,15 +182,30 @@ int main() {
 
         SceUInt64 swap_start = sceKernelGetProcessTimeWide();
         gl_swap();
-        swap_us += sceKernelGetProcessTimeWide() - swap_start;
+        SceUInt64 swap_end = sceKernelGetProcessTimeWide();
+        swap_us += swap_end - swap_start;
+
+        // Frame-to-frame time, to count stutters
+        static SceUInt64 last_frame_end;
+        if (last_frame_end) {
+            SceUInt64 ft = swap_end - last_frame_end;
+            if (ft > worst_us) worst_us = ft;
+            if (ft > 100000) slow100++;
+            else if (ft > 50000) slow50++;
+        }
+        last_frame_end = swap_end;
 
         // Heartbeat: tells a hang apart from a running game in logs.txt
         SceUInt64 now = sceKernelGetProcessTimeWide();
         if (now - heartbeat_us >= 5000000) {
             unsigned int frames = frame - heartbeat_frame;
-            l_info("heartbeat: frame %u, %.1f fps, per frame: onDrawFrame %.1f ms, swap %.1f ms", frame,
+            l_info("heartbeat: frame %u, %.1f fps, per frame: onDrawFrame %.1f ms, swap %.1f ms | "
+                   "stutters: %u >50 ms, %u >100 ms, worst %.0f ms", frame,
                    frames * 1000000.0 / (double) (now - heartbeat_us),
-                   frames ? draw_us / 1000.0 / frames : 0, frames ? swap_us / 1000.0 / frames : 0);
+                   frames ? draw_us / 1000.0 / frames : 0, frames ? swap_us / 1000.0 / frames : 0,
+                   slow50, slow100, worst_us / 1000.0);
+            slow50 = slow100 = 0;
+            worst_us = 0;
             glstats_report((now - heartbeat_us) / 1000000.0);
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;

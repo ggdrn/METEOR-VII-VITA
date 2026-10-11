@@ -21,7 +21,7 @@ static SceUID main_thread = -1;
 static SceKernelSysClock last_gl_clocks, last_main_clocks;
 
 static struct {
-    unsigned draws, verts;
+    unsigned draws, verts; unsigned long long draw_us;
     unsigned tex_uploads; unsigned long long tex_bytes, tex_us;
     unsigned readpixels; unsigned long long readpixels_us;
     unsigned flushes; unsigned long long flush_us;
@@ -38,7 +38,9 @@ void glDrawArrays_stat(GLenum mode, GLint first, GLsizei count) {
     st.draws++;
     st.verts += count;
     readpixels_invalidate();
+    SceUInt64 t0 = now_us();
     glDrawArrays(mode, first, count);
+    st.draw_us += now_us() - t0;
 }
 
 static unsigned bytes_per_pixel(GLenum format, GLenum type) {
@@ -150,12 +152,13 @@ void glstats_report(double seconds) {
            (unsigned) (st.waits / seconds), st.wait_us / 1000.0 / seconds);
     st.sleeps = st.locks = st.waits = 0;
     st.sleep_req_us = st.sleep_us = st.lock_us = st.wait_us = 0;
-    l_info("gl/s: %.0f draws, %.0f verts, %.1f clears, %.1f fbo binds | tex %.1f uploads (%.0f KB, %.1f ms) | "
+    l_info("gl/s: %.0f draws (%.1f ms), %.0f verts, %.1f clears, %.1f fbo binds | tex %.1f uploads (%.0f KB, %.1f ms) | "
            "readpixels %.1f (%.1f ms) | flush %.1f (%.1f ms)",
-           st.draws / seconds, st.verts / seconds, st.clears / seconds, st.fbo_binds / seconds,
+           st.draws / seconds, st.draw_us / 1000.0 / seconds, st.verts / seconds, st.clears / seconds, st.fbo_binds / seconds,
            st.tex_uploads / seconds, st.tex_bytes / 1024.0 / seconds, st.tex_us / 1000.0 / seconds,
            st.readpixels / seconds, st.readpixels_us / 1000.0 / seconds,
            st.flushes / seconds, st.flush_us / 1000.0 / seconds);
+    st.draw_us = 0;
     st.draws = st.verts = st.tex_uploads = st.readpixels = st.flushes = st.fbo_binds = st.clears = 0;
     st.tex_bytes = st.tex_us = st.readpixels_us = st.flush_us = 0;
 }

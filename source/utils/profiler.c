@@ -6,7 +6,7 @@
  * kubridge exception handler records PC/LR, restores the permission and
  * resumes. Literal-pool loads from the text can also fault while the
  * permission is being changed (data abort with FAR inside the text): those
- * are handled the same way. Samples go to DATA_PATH "profile.bin" as {pc, lr, tid} records
+ * are handled the same way. Samples go to DATA_PATH "profile.bin" as {pc, lr, tid, ms} records
  * with addresses relative to the .so text base; scripts/profile-report.py
  * turns them into a per-function ranking.
  *
@@ -21,6 +21,7 @@
 #include <so_util/so_util.h>
 
 #include <psp2/io/fcntl.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
 #define PROFILE_PATH DATA_PATH "profile.bin"
@@ -35,6 +36,7 @@ extern so_module so_mod;
 
 typedef struct {
     uint32_t pc, lr, tid;
+    uint32_t ms; // process time, matches the [   x.xxxs] stamps in logs.txt
 } sample_t;
 
 static sample_t ring[RING_SIZE];
@@ -61,6 +63,7 @@ static void abort_handler(KuKernelExceptionContext * ctx) {
     ring[i].pc = ctx->pc - text_lo;
     ring[i].lr = ctx->lr - text_lo;
     ring[i].tid = sceKernelGetThreadId();
+    ring[i].ms = (uint32_t) (sceKernelGetProcessTimeWide() / 1000);
     // Returning resumes at ctx->pc, now executable again
 }
 
