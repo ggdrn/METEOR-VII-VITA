@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.07")
+set(PORT_VERSION "0.00.08")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -169,7 +169,7 @@ set(OPENSLES_OBJS OpenSLESUT MPH_to OpenSLES_IID classes devices trace locks sle
     IEngine IDynamicInterfaceManagement IEnvironmentalReverb IEqualizer IMuteSolo IObject
     IPlay IPlaybackRate IPrefetchStatus IPresetReverb IRecord ISeek IVirtualizer IVolume)
 # Files patched for the port live in source/opensles/ and replace the originals
-set(OPENSLES_OVERRIDES IPlay IEngine)
+set(OPENSLES_OVERRIDES IPlay IEngine CEngine Vita)
 list(REMOVE_ITEM OPENSLES_OBJS ${OPENSLES_OVERRIDES})
 list(TRANSFORM OPENSLES_OBJS PREPEND ${OPENSLES_DIR}/)
 list(TRANSFORM OPENSLES_OBJS APPEND .c)
