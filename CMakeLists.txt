@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.06")
+set(PORT_VERSION "0.00.07")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -168,8 +168,14 @@ set(OPENSLES_OBJS OpenSLESUT MPH_to OpenSLES_IID classes devices trace locks sle
     CAudioPlayer CAudioRecorder CEngine COutputMix IBassBoost IBufferQueue IEffectSend
     IEngine IDynamicInterfaceManagement IEnvironmentalReverb IEqualizer IMuteSolo IObject
     IPlay IPlaybackRate IPrefetchStatus IPresetReverb IRecord ISeek IVirtualizer IVolume)
+# Files patched for the port live in source/opensles/ and replace the originals
+set(OPENSLES_OVERRIDES IPlay IEngine)
+list(REMOVE_ITEM OPENSLES_OBJS ${OPENSLES_OVERRIDES})
 list(TRANSFORM OPENSLES_OBJS PREPEND ${OPENSLES_DIR}/)
 list(TRANSFORM OPENSLES_OBJS APPEND .c)
+foreach(f ${OPENSLES_OVERRIDES})
+  list(APPEND OPENSLES_OBJS ${CMAKE_SOURCE_DIR}/source/opensles/${f}.c)
+endforeach()
 add_library(OpenSLES_src STATIC ${OPENSLES_OBJS})
 target_compile_definitions(OpenSLES_src PRIVATE USE_OUTPUTMIXEXT USE_SDL USE_SNDFILE)
 target_include_directories(OpenSLES_src PRIVATE ${OPENSLES_DIR} ${CMAKE_SOURCE_DIR}/lib/opensles/include)
