@@ -523,7 +523,7 @@ so_default_dynlib default_dynlib[] = {
         { "truncate", (uintptr_t)&truncate },
         { "unlink", (uintptr_t)&unlink },
 #ifndef NDK_PORT
-        { "write", (uintptr_t)&write },
+        { "write", (uintptr_t)&write_soloader },
 #else
         { "write", (uintptr_t)&fndk_write },
 #endif

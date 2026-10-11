@@ -22,6 +22,7 @@
 #endif
 
 #include "reimpl/obb_fd.h"
+#include "reimpl/memfile.h"
 #include "utils/logger.h"
 #include "utils/utils.h"
 
@@ -61,6 +62,11 @@ int open_soloader(const char * path, int oflag, ...) {
         return open_soloader("app0:/urandom", oflag);
     }
 
+    if (memfile_handles(path)) {
+        int fd = memfile_open(path, oflag);
+        if (fd != -2) return fd;
+    }
+
     mode_t mode = 0666;
     if (((oflag & BIONIC_O_CREAT) == BIONIC_O_CREAT) ||
         ((oflag & BIONIC_O_TMPFILE) == BIONIC_O_TMPFILE)) {
@@ -80,6 +86,14 @@ int open_soloader(const char * path, int oflag, ...) {
 }
 
 int fstat_soloader(int fd, stat64_bionic * buf) {
+    if (memfile_is(fd)) {
+        memset(buf, 0, sizeof(*buf));
+        buf->st_mode = S_IFREG | 0666;
+        buf->st_nlink = 1;
+        buf->st_size = memfile_size(fd);
+        buf->st_blksize = 512;
+        return 0;
+    }
     struct stat st;
     int res = fstat(fd, &st);
 
@@ -119,6 +133,7 @@ int fclose_soloader(FILE * f) {
 
 int close_soloader(int fd) {
     if (obb_fd_is(fd)) return obb_fd_close(fd);
+    if (memfile_is(fd)) return memfile_close(fd);
     int ret = close(fd);
     l_debug("close(%i): %i", fd, ret);
     return ret;
@@ -181,6 +196,7 @@ int ioctl_soloader(int fd, int request, ...) {
 }
 
 int fsync_soloader(int fd) {
+    if (memfile_is(fd)) return 0;
     int ret = fsync(fd);
     l_debug("fsync(%i): %i", fd, ret);
     return ret;
@@ -188,16 +204,24 @@ int fsync_soloader(int fd) {
 
 ssize_t read_soloader(int fd, void * buf, size_t count) {
     if (obb_fd_is(fd)) return obb_fd_read(fd, buf, count);
+    if (memfile_is(fd)) return memfile_read(fd, buf, count);
     return read(fd, buf, count);
+}
+
+ssize_t write_soloader(int fd, const void * buf, size_t count) {
+    if (memfile_is(fd)) return memfile_write(fd, buf, count);
+    return write(fd, buf, count);
 }
 
 off_t lseek_soloader(int fd, off_t offset, int whence) {
     if (obb_fd_is(fd)) return (off_t) obb_fd_lseek(fd, offset, whence);
+    if (memfile_is(fd)) return (off_t) memfile_lseek(fd, offset, whence);
     return lseek(fd, offset, whence);
 }
 
 int64_t lseek64_soloader(int fd, int64_t offset, int whence) {
     if (obb_fd_is(fd)) return obb_fd_lseek(fd, offset, whence);
+    if (memfile_is(fd)) return memfile_lseek(fd, offset, whence);
     // newlib's off_t is 32-bit; the OBB (~1.98 GB) still fits below 2 GB
     if (offset > INT32_MAX || offset < INT32_MIN) {
         l_error("lseek64(%i, %lld, %i): offset out of 32-bit range", fd, offset, whence);

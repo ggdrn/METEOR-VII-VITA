@@ -74,6 +74,7 @@ FILE * fopen_soloader(const char * filename, const char * mode);
 DIR *opendir_soloader(char *name);
 
 int stat_soloader(const char * path, stat64_bionic * buf);
+ssize_t write_soloader(int fd, const void * buf, size_t count);
 
 int fstat_soloader(int fd, stat64_bionic * buf);
 

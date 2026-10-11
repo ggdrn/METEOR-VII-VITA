@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.30")
+set(PORT_VERSION "0.00.31")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -173,6 +173,7 @@ set(SOURCES
     lib/nestegg/src/nestegg.c
     source/reimpl/readpixels.c
     source/reimpl/gl_variants.c
+    source/reimpl/memfile.c
     source/reimpl/gl_oes.c
     lib/falso_jni/converter.c
     lib/sha1/sha1.c

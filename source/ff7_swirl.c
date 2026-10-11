@@ -29,11 +29,15 @@
 #include "ff7_anim.h"
 
 #include "utils/logger.h"
+#include "utils/glstats.h"
 
 #include <stdint.h>
 
 #include <psp2/kernel/processmgr.h>
 #include <so_util/so_util.h>
+#include <kubridge.h>
+#include <psp2/kernel/clib.h>
+#include <vitaGL.h>
 
 extern so_module so_mod;
 
@@ -144,7 +148,88 @@ static void copy16_native(void) {
     calls++;
 }
 
+/*
+ * C_006A7BF2(x, y, w, h, screen_h, x_scale, y_scale, read_buffer, dst):
+ * the porters' screen grab. Without scaling it reads the screen row by row
+ * (glReadPixels(x, row, 640, 1) into a static buffer) and converts each
+ * pixel to RGB565 into dst, picking source pixel (i * 640) / w: a software
+ * division per pixel on the Cortex-A9. The native version uses a per-call
+ * index table; every other case (scaling, no dst) runs the original.
+ */
+#define GRAB_SYM        "_Z10C_006A7BF2iiiiiiiiPv"
+#define GRAB_PROLOGUE   0x4ff0e92d // stmdb sp!, {r4-r11, lr}
+#define GRAB_ROWBUF     0x141fad8  // u32 header + 640 RGBA pixels
+#define GRAB_FLAG       0xf4f484   // u8 "skip next grab", u32 counter at +4
+#define GRAB_GOT_FRAMES 0xf4c820   // GOT slot: pointer to a frame-skip switch
+
+typedef int (* grab_fn)(int, int, int, int, int, int, int, int, void *);
+static so_hook grab_hook;
+static uint8_t * grab_rowbuf, * grab_flag;
+static uint32_t ** grab_got;
+static unsigned grabs;
+static unsigned long long grab_us;
+
+static int grab_native(int x, int y, int w, int h, int screen_h, int x_scale, int y_scale, int read_buffer,
+                       void * dst) {
+    if (x_scale > 1 || y_scale > 1 || !dst || w <= 0 || w > 640) {
+        sceClibMemcpy((void *) grab_hook.addr, grab_hook.orig_instr, sizeof(grab_hook.orig_instr));
+        kuKernelFlushCaches((void *) grab_hook.addr, sizeof(grab_hook.orig_instr));
+        int r = ((grab_fn) (grab_hook.thumb_addr ? grab_hook.thumb_addr : grab_hook.addr))(
+            x, y, w, h, screen_h, x_scale, y_scale, read_buffer, dst);
+        sceClibMemcpy((void *) grab_hook.addr, grab_hook.patch_instr, sizeof(grab_hook.patch_instr));
+        kuKernelFlushCaches((void *) grab_hook.addr, sizeof(grab_hook.patch_instr));
+        return r;
+    }
+    (void) read_buffer; // glReadBuffer is a no-op in the .so
+
+    SceUInt64 t0 = sceKernelGetProcessTimeWide();
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    int skip = screen_h - (y + h); // rows below the grab, in GL coordinates
+    uint16_t * out = dst;
+    if (skip < 0) {
+        out = (uint16_t *) ((uint8_t *) dst + (-skip) * w * 4); // sic
+        h += skip;
+        skip = 0;
+    }
+    if (*grab_flag) { // first grab after a reset is skipped
+        *grab_flag = 0;
+        return 0;
+    }
+    if (**grab_got) {
+        uint32_t n = ++*(uint32_t *) (grab_flag + 4);
+        if (n & 3) return 0;
+    }
+    if (h <= 0) return 0;
+
+    uint16_t idx[640];
+    for (int i = 0; i < w; i++) idx[i] = (uint16_t) ((i * 640) / w);
+
+    const uint32_t * row = (const uint32_t *) (grab_rowbuf + 4);
+    int top = 480 - skip, end = 480 - (skip + h);
+    for (int r = top; r != end; r--) {
+        glReadPixels_stat(x, r, 640, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void *) row);
+        for (int i = 0; i < w; i++) {
+            uint32_t p = row[idx[i]];
+            *out++ = (uint16_t) (((p >> 19) & 0x1f) | (((p >> 3) & 0x1f) << 11) | (((p >> 10) & 0x3f) << 5));
+        }
+    }
+    grab_us += sceKernelGetProcessTimeWide() - t0;
+    grabs++;
+    return 0;
+}
+
 void ff7_swirl_patch(void) {
+    uintptr_t grab = so_symbol(&so_mod, GRAB_SYM);
+    if (grab && *(uint32_t *) (grab & ~1) == GRAB_PROLOGUE) {
+        grab_rowbuf = (uint8_t *) (so_mod.text_base + GRAB_ROWBUF);
+        grab_flag = (uint8_t *) (so_mod.text_base + GRAB_FLAG);
+        grab_got = *(uint32_t ***) (so_mod.text_base + GRAB_GOT_FRAMES);
+        grab_hook = hook_addr(grab, (uintptr_t) &grab_native);
+        l_info("ff7_swirl: native screen grab installed");
+    } else {
+        l_warn("ff7_swirl: screen grab not found, left as is");
+    }
+
     uintptr_t fn = so_symbol(&so_mod, SYM_COPY16);
     check_event = (check_event_fn) so_symbol(&so_mod, SYM_CHECK_EVENT);
     mk_address = (mk_address_fn) so_symbol(&so_mod, SYM_MK_ADDRESS);
@@ -159,6 +244,9 @@ void ff7_swirl_patch(void) {
 }
 
 void ff7_swirl_report(double seconds) {
+    if (grabs) l_info("screen grab: %u calls, %.1f ms", grabs, grab_us / 1000.0);
+    grabs = 0;
+    grab_us = 0;
     if (seconds <= 0 || !calls) return;
     l_info("swirl copy: %u calls, %llu K pixels, %.1f ms", calls, pixels / 1000, time_us / 1000.0);
     calls = 0;
