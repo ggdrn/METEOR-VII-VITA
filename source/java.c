@@ -18,6 +18,7 @@
 #include <stb/stb_image.h>
 
 #include "reimpl/asset_manager.h"
+#include "reimpl/movie.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
 #include "utils/zip.h"
@@ -225,50 +226,49 @@ void SEPlayer_SETVOLUME(jmethodID id, va_list args) {
 }
 
 /*
- * jp.co.d4e.materialg.MyDecoder (WebM FMV player) — Fase 5.
- * START() reports failure for now so the game skips the movies.
+ * jp.co.d4e.materialg.MyDecoder (WebM FMV player): see reimpl/movie.c
  */
 
 jint MyDecoder_START(jmethodID id, va_list args) {
     jstring _fname = va_arg(args, jstring);
     const char * fname = jstr_get(_fname);
-    l_warn("MyDecoder.START(\"%s\"): video not implemented yet", fname);
+    jint ret = fname && movie_start(fname);
     jstr_release(_fname, fname);
-    return 0;
+    return ret;
 }
 
 void MyDecoder_SET_TEXTURE(jmethodID id, va_list args) {
     jint tex = va_arg(args, jint);
-    l_debug("MyDecoder.SET_TEXTURE(%i)", tex);
+    l_info("MyDecoder.SET_TEXTURE(%i)", tex);
 }
 
 jint MyDecoder_FRAME(jmethodID id, va_list args) {
-    return 0;
+    return movie_frame();
 }
 
 void MyDecoder_AFTER_FRAME(jmethodID id, va_list args) {
 }
 
 void MyDecoder_RESET(jmethodID id, va_list args) {
-    l_debug("MyDecoder.RESET()");
+    movie_stop();
 }
 
 void MyDecoder_SET_VOLUME(jmethodID id, va_list args) {
-    double vol = va_arg(args, double);
+    double vol = va_arg(args, double); // floats are promoted through varargs
     l_debug("MyDecoder.SET_VOLUME(%f)", vol);
 }
 
 jint MyDecoder_GET_TOTALTIME(jmethodID id, va_list args) {
-    return 0;
+    return movie_get_total_ms();
 }
 
 jint MyDecoder_GET_POSITION(jmethodID id, va_list args) {
-    return 0;
+    return movie_get_position_ms();
 }
 
 void MyDecoder_SET_POSITION(jmethodID id, va_list args) {
     jint pos = va_arg(args, jint);
-    l_debug("MyDecoder.SET_POSITION(%i)", pos);
+    movie_set_position_ms(pos);
 }
 
 /*
