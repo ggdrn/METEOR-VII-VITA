@@ -414,14 +414,15 @@ bool movie_frame(void) {
     // Like MediaPlayer + SurfaceTexture: wait for the frame due now, upload it
     SceUInt64 waited = 0;
     while (waited < FRAME_WAIT_MAX_US) {
-        int now = position_ms();
-        video_frame_t * due = NULL;
-        while (mv.vq_tail != mv.vq_head && mv.frames[mv.vq_tail % VIDEO_QUEUE].pts_ms <= (uint32_t) now) {
-            if (due) mv.vq_tail++; // late: drop the older frame
-            due = &mv.frames[mv.vq_tail % VIDEO_QUEUE];
-        }
-        if (due) {
-            upload(due);
+        uint32_t now = (uint32_t) position_ms();
+        uint32_t head = mv.vq_head; // decoder may append meanwhile; use a snapshot
+
+        // Drop frames that are late, keeping the newest one already due
+        while (head - mv.vq_tail >= 2 && mv.frames[(mv.vq_tail + 1) % VIDEO_QUEUE].pts_ms <= now)
+            mv.vq_tail++;
+
+        if (mv.vq_tail != head && mv.frames[mv.vq_tail % VIDEO_QUEUE].pts_ms <= now) {
+            upload(&mv.frames[mv.vq_tail % VIDEO_QUEUE]);
             __sync_synchronize();
             mv.vq_tail++;
             break;
