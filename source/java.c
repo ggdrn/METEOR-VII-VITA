@@ -17,6 +17,7 @@
 
 #include <stb/stb_image.h>
 
+#include "ff7_buttons.h"
 #include "reimpl/asset_manager.h"
 #include "reimpl/movie.h"
 #include "reimpl/obb_fd.h"
@@ -182,6 +183,7 @@ jobject MainActivity_ImageGetData(jmethodID id, va_list args) {
             out[i] = (jint) (((uint32_t) p[3] << 24) | (p[0] << 16) | (p[1] << 8) | p[2]);
         }
         stbi_image_free(px);
+        ff7_buttons_patch_atlas(path, (uint32_t *) jda->array, w, h);
     }
 
     l_info("MainActivity.ImageGetData(\"%s\"): %ix%i", path, w, h);

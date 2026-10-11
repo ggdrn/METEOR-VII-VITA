@@ -1,15 +1,16 @@
 /*
  * Touch UI adjustments for libjni_ff7.so.
  *
- * The Android version draws a virtual gamepad (UIObject_DPad and
- * UIObject_ButtonMapped, from button_xx.png) over the game. On the Vita the
- * physical buttons already drive the game, so those two classes are neither
- * drawn nor allowed to take touches. Every other UI object (toggle buttons
- * such as the boosters, triggered buttons, swipers, the screen itself) keeps
- * working with the front touch screen.
+ * The Android version draws a virtual gamepad over the game: a d-pad
+ * (UIObject_DPad) and buttons mapped to keys (UIObject_ButtonMapped, key code
+ * at +40). On the Vita the physical buttons already do that, so those objects
+ * are removed from every UI layout the first time it is displayed. Mapped
+ * buttons with special actions stay: key codes >= 0x82 (staff roll, ESCAPE =
+ * 0x85...) and 0x52. 0x80/0x81 open web pages (no browser here) and go too.
+ * Toggle buttons (Encounters ON/OFF), triggered buttons, swipers and the
+ * screen itself are untouched.
  *
- * The first touches are also logged together with the objects of the current
- * UI layout, to identify each element.
+ * The first touches are logged with the objects of the current layout.
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
@@ -28,6 +29,10 @@
 extern so_module so_mod;
 
 #define TOUCH_LOG_LIMIT 40
+#define MAX_LAYOUT 32
+#define MAX_FILTERED 128
+
+enum { CLS_OTHER = -1, CLS_DPAD = 1, CLS_BUTTON_MAPPED = 8, CLS_TOGGLE = 9 };
 
 static const struct {
     const char * vtable;
@@ -50,56 +55,102 @@ static const struct {
 
 static uintptr_t vptrs[NUM_CLASSES];
 static void *** ui_current;     // &UI_current (UIObject **)
-static so_hook touch_began_hook;
+static so_hook touch_began_hook, display_hook;
 static int touches_logged;
 static void * last_logged_layout;
+static void ** filtered[MAX_FILTERED];
+static int num_filtered;
 
-static const char * class_name(void * obj) {
+static int class_of(void * obj) {
     uintptr_t vptr = *(uintptr_t *) obj;
     for (unsigned i = 0; i < NUM_CLASSES; i++)
-        if (vptrs[i] && vptrs[i] == vptr) return classes[i].name;
-    return "?";
+        if (vptrs[i] && vptrs[i] == vptr) return (int) i;
+    return CLS_OTHER;
+}
+
+static const char * class_name(void * obj) {
+    int c = class_of(obj);
+    return c >= 0 ? classes[c].name : "?";
+}
+
+static int is_virtual_gamepad(void * obj) {
+    int c = class_of(obj);
+    if (c == CLS_DPAD) return 1;
+    if (c == CLS_BUTTON_MAPPED) {
+        uint32_t key = *(uint32_t *) ((uint8_t *) obj + 40);
+        if (key == 0x52 || key >= 0x82) return 0; // special actions (ESCAPE, staff...)
+        return 1;                                  // plain buttons and web links
+    }
+    return 0;
 }
 
 static void log_layout(void ** list) {
     l_info("ui: layout %p objects:", list);
-    for (int i = 0; list && list[i] && i < 32; i++) {
+    for (int i = 0; list && list[i] && i < MAX_LAYOUT; i++) {
         uint8_t * o = list[i];
         float * r = (float *) (o + 8);
-        l_info("ui:   [%2d] %-16s rect (%.0f,%.0f %.0fx%.0f) flag4 %u touch %d",
-               i, class_name(o), r[0], r[1], r[2], r[3], o[4], *(int32_t *) (o + 24));
+        int c = class_of(o);
+        if (c == CLS_BUTTON_MAPPED)
+            l_info("ui:   [%2d] %-16s rect (%.0f,%.0f %.0fx%.0f) flag4 %u touch %d key 0x%02x",
+                   i, class_name(o), r[0], r[1], r[2], r[3], o[4], *(int32_t *) (o + 24),
+                   *(uint32_t *) (o + 40));
+        else
+            l_info("ui:   [%2d] %-16s rect (%.0f,%.0f %.0fx%.0f) flag4 %u touch %d",
+                   i, class_name(o), r[0], r[1], r[2], r[3], o[4], *(int32_t *) (o + 24));
+    }
+}
+
+// Removes the virtual gamepad from a layout (in place, once per layout)
+static void filter_layout(void ** list) {
+    if (!list) return;
+    for (int i = 0; i < num_filtered; i++)
+        if (filtered[i] == list) return;
+    if (num_filtered < MAX_FILTERED) filtered[num_filtered++] = list;
+
+    int out = 0, removed = 0;
+    for (int i = 0; list[i] && i < MAX_LAYOUT; i++) {
+        if (is_virtual_gamepad(list[i])) { removed++; continue; }
+        list[out++] = list[i];
+    }
+    if (removed) {
+        for (int i = out; i < out + removed; i++) list[i] = NULL;
+        l_info("ui: layout %p: removed %d virtual gamepad objects, %d kept", list, removed, out);
+    }
+}
+
+// UI_display(UIObject ** list): draws a layout every frame
+static void ui_display(void ** list) {
+    filter_layout(list);
+    SO_CONTINUE(int, display_hook, list);
+}
+
+// ToggleButton: +0x40 -> value byte toggled by a tap, +0x44 pressed flag
+static void log_toggles(void ** list, const char * when) {
+    for (int i = 0; list && list[i] && i < MAX_LAYOUT; i++) {
+        uint8_t * o = list[i];
+        if (class_of(o) != CLS_TOGGLE) continue;
+        uint8_t * value = *(uint8_t **) (o + 0x40);
+        l_info("ui:   %s toggle [%d]: pressed %u, value %d (at %p), touch %d",
+               when, i, o[0x44], value ? *value : -1, value, *(int32_t *) (o + 24));
     }
 }
 
 // UI_onTouchBegan(int id, float x, float y), x/y in surface pixels
 static void ui_touch_began(int id, float x, float y) {
-    if (touches_logged < TOUCH_LOG_LIMIT) {
+    void ** list = ui_current ? *ui_current : NULL;
+    filter_layout(list);
+    int log = touches_logged < TOUCH_LOG_LIMIT;
+    if (log) {
         touches_logged++;
-        void ** list = ui_current ? *ui_current : NULL;
         l_info("ui: touch began id %d at (%.0f, %.0f), layout %p", id, x, y, list);
         if (list != last_logged_layout) {
             last_logged_layout = list;
             log_layout(list);
         }
+        log_toggles(list, "before");
     }
     SO_CONTINUE(int, touch_began_hook, id, x, y);
-}
-
-// Virtual gamepad: not drawn, never takes a touch
-static void hidden_render(void * self) {
-}
-
-static int hidden_touch(void * self, float x, float y) {
-    return 0;
-}
-
-static void hook_symbol(const char * symbol, void * dst) {
-    uintptr_t addr = so_symbol(&so_mod, symbol);
-    if (!addr) {
-        l_warn("ff7_ui: %s not found", symbol);
-        return;
-    }
-    hook_addr(addr, (uintptr_t) dst);
+    if (log) log_toggles(list, "after ");
 }
 
 void ff7_ui_patch(void) {
@@ -110,16 +161,12 @@ void ff7_ui_patch(void) {
     ui_current = (void ***) so_symbol(&so_mod, "UI_current");
 
     uintptr_t began = so_symbol(&so_mod, "UI_onTouchBegan");
-    if (began) touch_began_hook = hook_addr(began, (uintptr_t) &ui_touch_began);
-
-    hook_symbol("_ZN13UIObject_DPad6renderEv", hidden_render);
-    hook_symbol("_ZN13UIObject_DPad12onTouchBeganE8CGPoint_", hidden_touch);
-    hook_symbol("_ZN13UIObject_DPad12onTouchMovedE8CGPoint_", hidden_touch);
-    hook_symbol("_ZN13UIObject_DPad12onTouchEndedE8CGPoint_", hidden_touch);
-    hook_symbol("_ZN21UIObject_ButtonMapped6renderEv", hidden_render);
-    hook_symbol("_ZN21UIObject_ButtonMapped12onTouchBeganE8CGPoint_", hidden_touch);
-    hook_symbol("_ZN21UIObject_ButtonMapped12onTouchMovedE8CGPoint_", hidden_touch);
-    hook_symbol("_ZN21UIObject_ButtonMapped12onTouchEndedE8CGPoint_", hidden_touch);
-
-    l_info("ff7_ui: virtual gamepad hidden, touch logging enabled (UI_current at %p)", ui_current);
+    uintptr_t display = so_symbol(&so_mod, "_Z10UI_displayPP8UIObject");
+    if (!began || !display) {
+        l_warn("ff7_ui: UI symbols not found, touch UI unchanged");
+        return;
+    }
+    touch_began_hook = hook_addr(began, (uintptr_t) &ui_touch_began);
+    display_hook = hook_addr(display, (uintptr_t) &ui_display);
+    l_info("ff7_ui: virtual gamepad filtered from layouts, touch logging on (UI_current at %p)", ui_current);
 }

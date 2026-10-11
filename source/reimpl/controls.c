@@ -34,16 +34,28 @@ void coord_normalize(float * x, float * y, float deadzone) {
     *y = *y * multiplier;
 }
 
+// Rear touch pad: the outermost quarter on each side acts as L2 / R2
+#define REAR_SIDE_ZONE 0.25f
+static int rear_min_x = 0, rear_max_x = 1919;
+
 void controls_init() {
     // Enable analog sticks and touchscreen
     sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, 1);
+    sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, 1);
+
+    SceTouchPanelInfo info;
+    if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_BACK, &info) >= 0 && info.maxAaX > info.minAaX) {
+        rear_min_x = info.minAaX;
+        rear_max_x = info.maxAaX;
+    }
 
     // Enable accelerometer
     sceMotionStartSampling();
 }
 
 void poll_touch();
+void poll_rear_touch();
 void poll_pad();
 void poll_accel();
 
@@ -51,6 +63,7 @@ void poll_stick(ControlsStickId which, float raw_x, float raw_y, float * reading
 
 void controls_poll() {
     poll_touch();
+    poll_rear_touch();
     poll_pad();
     //poll_accel();
 }
@@ -103,6 +116,29 @@ void poll_touch() {
     }
 
     sceClibMemcpy(&touch_old, &touch, sizeof(touch));
+}
+
+void poll_rear_touch() {
+    static int l2_held, r2_held;
+    SceTouchData rear;
+    sceTouchPeek(SCE_TOUCH_PORT_BACK, &rear, 1);
+
+    const float width = (float) (rear_max_x - rear_min_x);
+    int l2 = 0, r2 = 0;
+    for (int i = 0; i < rear.reportNum; i++) {
+        float x = (rear.report[i].x - rear_min_x) / width;
+        if (x < REAR_SIDE_ZONE) l2 = 1;
+        else if (x > 1.f - REAR_SIDE_ZONE) r2 = 1;
+    }
+
+    if (l2 != l2_held) {
+        controls_handler_key(AKEYCODE_BUTTON_L2, l2 ? CONTROLS_ACTION_DOWN : CONTROLS_ACTION_UP);
+        l2_held = l2;
+    }
+    if (r2 != r2_held) {
+        controls_handler_key(AKEYCODE_BUTTON_R2, r2 ? CONTROLS_ACTION_DOWN : CONTROLS_ACTION_UP);
+        r2_held = r2;
+    }
 }
 
 static ButtonMapping mapping[] = {
