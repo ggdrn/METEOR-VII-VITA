@@ -92,10 +92,25 @@ static inline int on_gl_thread(void) {
     return sceKernelGetThreadId() == gl_thread;
 }
 
+// The game's frame limiter (func_0x0041b9d8_ex) sleeps the remaining frame
+// time with usleep. sceKernelDelayThread overshoots (~50% on short sleeps),
+// which made 15 fps battle frames miss their 4th vblank and drop to 12-14 fps.
+// On the game thread, sleep until ~1 ms before the deadline and spin the rest.
+#define PRECISE_SLEEP_MARGIN_US 1000
+
+static int precise_usleep(unsigned int usec) {
+    SceUInt64 deadline = now_us() + usec;
+    if (usec > PRECISE_SLEEP_MARGIN_US)
+        sceKernelDelayThread(usec - PRECISE_SLEEP_MARGIN_US);
+    while (now_us() < deadline)
+        ;
+    return 0;
+}
+
 int usleep_stat(unsigned int usec) {
     if (!on_gl_thread()) return usleep(usec);
     SceUInt64 t0 = now_us();
-    int r = usleep(usec);
+    int r = precise_usleep(usec);
     st.sleep_us += now_us() - t0;
     st.sleep_req_us += usec;
     st.sleeps++;
