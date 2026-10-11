@@ -4,9 +4,10 @@
  * The Android version draws a virtual gamepad over the game: a d-pad
  * (UIObject_DPad) and buttons mapped to keys (UIObject_ButtonMapped, key code
  * at +40). On the Vita the physical buttons already do that, so those objects
- * are removed from every UI layout the first time it is displayed. Mapped
- * buttons with special actions stay: key codes >= 0x82 (staff roll, ESCAPE =
- * 0x85...) and 0x52. 0x80/0x81 open web pages (no browser here) and go too.
+ * are removed from every UI layout the first time it is displayed. Only mapped
+ * buttons with special actions stay: 0x82, 0x83 and 0x85 (ESCAPE), the cases
+ * UIObject_ButtonMapped::onTouchBegan handles itself. Everything else is a
+ * plain key (0x9C Enter/OK, 0x52 cancel, ...) or a web link (0x80/0x81).
  * Toggle buttons (Encounters ON/OFF), triggered buttons, swipers and the
  * screen itself are untouched.
  *
@@ -57,6 +58,20 @@ static uintptr_t vptrs[NUM_CLASSES];
 static void *** ui_current;     // &UI_current (UIObject **)
 static so_hook touch_began_hook, display_hook;
 static int touches_logged;
+
+typedef void (* touch_fn)(int id, float x, float y);
+typedef int (* contains_fn)(void * self, float x, float y);
+
+// SO_CONTINUE calls through an unprototyped pointer, which promotes float
+// arguments to double: call the original with the real prototype instead.
+static void call_original_touch_began(int id, float x, float y) {
+    so_hook * h = &touch_began_hook;
+    sceClibMemcpy((void *) h->addr, h->orig_instr, sizeof(h->orig_instr));
+    kuKernelFlushCaches((void *) h->addr, sizeof(h->orig_instr));
+    ((touch_fn) (h->thumb_addr ? h->thumb_addr : h->addr))(id, x, y);
+    sceClibMemcpy((void *) h->addr, h->patch_instr, sizeof(h->patch_instr));
+    kuKernelFlushCaches((void *) h->addr, sizeof(h->patch_instr));
+}
 static void * last_logged_layout;
 static void ** filtered[MAX_FILTERED];
 static int num_filtered;
@@ -78,8 +93,7 @@ static int is_virtual_gamepad(void * obj) {
     if (c == CLS_DPAD) return 1;
     if (c == CLS_BUTTON_MAPPED) {
         uint32_t key = *(uint32_t *) ((uint8_t *) obj + 40);
-        if (key == 0x52 || key >= 0x82) return 0; // special actions (ESCAPE, staff...)
-        return 1;                                  // plain buttons and web links
+        return !(key == 0x82 || key == 0x83 || key == 0x85); // keep ESCAPE & co.
     }
     return 0;
 }
@@ -124,6 +138,19 @@ static void ui_display(void ** list) {
     SO_CONTINUE(int, display_hook, list);
 }
 
+// UI_onTouchBegan's conversion to the 640x480 UI space (non-rotated surface)
+static void to_ui(float x, float y, float * ux, float * uy) {
+    extern so_module so_mod;
+    static float * dev_w, * dev_h;
+    if (!dev_w) {
+        dev_w = (float *) so_symbol(&so_mod, "DEVICE_W");
+        dev_h = (float *) so_symbol(&so_mod, "DEVICE_H");
+    }
+    float u = *dev_h / 480.f;
+    *ux = (x - (*dev_w - 640.f * u) * 0.5f) / u;
+    *uy = y / u;
+}
+
 // ToggleButton: +0x40 -> value byte toggled by a tap, +0x44 pressed flag
 static void log_toggles(void ** list, const char * when) {
     for (int i = 0; list && list[i] && i < MAX_LAYOUT; i++) {
@@ -147,9 +174,16 @@ static void ui_touch_began(int id, float x, float y) {
             last_logged_layout = list;
             log_layout(list);
         }
+        float ux, uy;
+        to_ui(x, y, &ux, &uy);
+        for (int i = 0; list && list[i] && i < MAX_LAYOUT; i++) {
+            contains_fn contains = (contains_fn) (*(uintptr_t **) list[i])[0];
+            l_info("ui:   ui point (%.0f, %.0f): [%d] %s contains %d", ux, uy, i, class_name(list[i]),
+                   contains(list[i], ux, uy));
+        }
         log_toggles(list, "before");
     }
-    SO_CONTINUE(int, touch_began_hook, id, x, y);
+    call_original_touch_began(id, x, y);
     if (log) log_toggles(list, "after ");
 }
 
