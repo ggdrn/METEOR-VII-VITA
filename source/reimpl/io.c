@@ -21,6 +21,7 @@
 #include <libc_bridge/libc_bridge.h>
 #endif
 
+#include "reimpl/obb_fd.h"
 #include "utils/logger.h"
 #include "utils/utils.h"
 
@@ -117,6 +118,7 @@ int fclose_soloader(FILE * f) {
 }
 
 int close_soloader(int fd) {
+    if (obb_fd_is(fd)) return obb_fd_close(fd);
     int ret = close(fd);
     l_debug("close(%i): %i", fd, ret);
     return ret;
@@ -184,7 +186,18 @@ int fsync_soloader(int fd) {
     return ret;
 }
 
+ssize_t read_soloader(int fd, void * buf, size_t count) {
+    if (obb_fd_is(fd)) return obb_fd_read(fd, buf, count);
+    return read(fd, buf, count);
+}
+
+off_t lseek_soloader(int fd, off_t offset, int whence) {
+    if (obb_fd_is(fd)) return (off_t) obb_fd_lseek(fd, offset, whence);
+    return lseek(fd, offset, whence);
+}
+
 int64_t lseek64_soloader(int fd, int64_t offset, int whence) {
+    if (obb_fd_is(fd)) return obb_fd_lseek(fd, offset, whence);
     // newlib's off_t is 32-bit; the OBB (~1.98 GB) still fits below 2 GB
     if (offset > INT32_MAX || offset < INT32_MIN) {
         l_error("lseek64(%i, %lld, %i): offset out of 32-bit range", fd, offset, whence);

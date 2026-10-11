@@ -14,6 +14,8 @@ EGLDisplay eglGetCurrentDisplay(void) {
 
 EGLBoolean eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface,
                             EGLint attribute, EGLint value) {
-    l_info("eglSurfaceAttrib(0x%x, 0x%x): ignored", attribute, value);
+    // Called every frame by the game: log only the first time
+    static int logged;
+    if (!logged++) l_info("eglSurfaceAttrib(0x%x, 0x%x): ignored", attribute, value);
     return EGL_TRUE;
 }

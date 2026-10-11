@@ -12,6 +12,7 @@
 #include "utils/glutil.h"
 #include "utils/logger.h"
 
+#include <malloc.h>
 #include <stdbool.h>
 #include <stdio.h>
 
@@ -49,6 +50,36 @@ static void (* ff7_onTouchMoved)(JNIEnv *, jclass, jint, jfloat, jfloat);
 static void (* ff7_onTouchEnded)(JNIEnv *, jclass, jint, jfloat, jfloat);
 
 #define FF7_CLASS ((jclass) 0x42424242)
+
+/*
+ * Watchdog: logs when a single onDrawFrame() takes too long, so logs.txt can
+ * tell a hang (or a long load) apart from the user quitting.
+ */
+static volatile SceUInt64 frame_start_us; // 0 while not inside onDrawFrame
+static volatile unsigned int frame_number;
+
+static int watchdog_thread(SceSize args, void * argp) {
+    unsigned int reported_frame = 0;
+    while (1) {
+        sceKernelDelayThread(1000000);
+        SceUInt64 start = frame_start_us;
+        if (!start) continue;
+        SceUInt64 stuck = sceKernelGetProcessTimeWide() - start;
+        if (stuck >= 3000000 && reported_frame != frame_number) {
+            reported_frame = frame_number;
+            l_warn("watchdog: onDrawFrame() #%u running for %llu s", frame_number, stuck / 1000000);
+        } else if (stuck >= 3000000 && (stuck / 1000000) % 10 == 0) {
+            l_warn("watchdog: onDrawFrame() #%u still running (%llu s)", frame_number, stuck / 1000000);
+        }
+    }
+    return 0;
+}
+
+static void log_memory(void) {
+    struct mallinfo mi = mallinfo();
+    l_info("memory: heap %u KB used, %u KB free (newlib arena %u KB)",
+           mi.uordblks / 1024, mi.fordblks / 1024, mi.arena / 1024);
+}
 
 static void * ff7_symbol(const char * name) {
     char full[128];
@@ -111,6 +142,10 @@ int main() {
     l_info("onSurfaceCreated(false, false)");
     ff7_onSurfaceCreated(&jni, FF7_CLASS, JNI_FALSE, JNI_FALSE);
 
+    SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100, 0x4000, 0, 0, NULL);
+    if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
+
+    log_memory();
     l_success("Entering main loop.");
     unsigned int frame = 0;
     unsigned int heartbeat_frame = 0;
@@ -121,7 +156,10 @@ int main() {
         // RendererWrapper.onDrawFrame() skips the first two frames
         if (++frame >= 3) {
             if (frame == 3) l_info("First onDrawFrame()");
+            frame_number = frame;
+            frame_start_us = sceKernelGetProcessTimeWide();
             ff7_onDrawFrame(&jni, FF7_CLASS);
+            frame_start_us = 0;
             if (frame == 3) l_info("First onDrawFrame() returned");
         }
 
@@ -134,6 +172,7 @@ int main() {
                    (frame - heartbeat_frame) * 1000000.0 / (double) (now - heartbeat_us));
             heartbeat_frame = frame;
             heartbeat_us = now;
+            log_memory();
         }
     }
 

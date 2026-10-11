@@ -499,13 +499,13 @@ so_default_dynlib default_dynlib[] = {
         { "ftello", (uintptr_t)&ftello },
         { "ftruncate", (uintptr_t)&ftruncate },
         { "getcwd", (uintptr_t)&getcwd },
-        { "lseek", (uintptr_t)&lseek },
+        { "lseek", (uintptr_t)&lseek_soloader },
         { "lseek64", (uintptr_t)&lseek64_soloader },
         { "lstat", (uintptr_t)&lstat },
         { "mkdir", (uintptr_t)&mkdir },
 #ifndef NDK_PORT
         { "pipe", (uintptr_t)&pipe },
-        { "read", (uintptr_t)&read },
+        { "read", (uintptr_t)&read_soloader },
 #else
         { "pipe", (uintptr_t)&fndk_pipe },
         { "read", (uintptr_t)&fndk_read },

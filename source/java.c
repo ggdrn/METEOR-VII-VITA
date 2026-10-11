@@ -18,6 +18,7 @@
 #include <stb/stb_image.h>
 
 #include "reimpl/asset_manager.h"
+#include "reimpl/obb_fd.h"
 #include "utils/logger.h"
 #include "utils/zip.h"
 
@@ -39,12 +40,13 @@ static void jstr_release(jstring s, const char * c) {
  * the original file is served as-is.
  */
 
-#define MAX_OBB_FDS 32
+// ExpansionFile keeps one descriptor per path until CLOSE_FILE_DESCRIPTOR
+#define MAX_OBB_PATHS 32
 
 static struct {
     char path[256];
     int fd;
-} obb_fds[MAX_OBB_FDS];
+} obb_fds[MAX_OBB_PATHS];
 
 static zip_entry * obb_find(const char * path) {
     if (!obb_zip || !path) return NULL;
@@ -61,9 +63,9 @@ static zip_entry * obb_find(const char * path) {
 }
 
 static void obb_close_fd(const char * path) {
-    for (int i = 0; i < MAX_OBB_FDS; i++) {
+    for (int i = 0; i < MAX_OBB_PATHS; i++) {
         if (obb_fds[i].path[0] && strcmp(obb_fds[i].path, path) == 0) {
-            close(obb_fds[i].fd);
+            obb_fd_close(obb_fds[i].fd);
             obb_fds[i].path[0] = '\0';
         }
     }
@@ -80,9 +82,10 @@ jint ExpansionFile_OPEN_FILE_DESCRIPTOR(jmethodID id, va_list args) {
     }
 
     obb_close_fd(path);
-    for (int i = 0; i < MAX_OBB_FDS; i++) {
+    for (int i = 0; i < MAX_OBB_PATHS; i++) {
         if (!obb_fds[i].path[0]) {
-            ret = open(OBB_PATH, O_RDONLY);
+            const char * base = strrchr(path, '/');
+            ret = obb_fd_open(base ? base + 1 : path);
             if (ret >= 0) {
                 strncpy(obb_fds[i].path, path, sizeof(obb_fds[i].path) - 1);
                 obb_fds[i].fd = ret;

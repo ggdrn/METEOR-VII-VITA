@@ -94,6 +94,8 @@ int ioctl_soloader(int fd, int request, ... /* arg */);
 
 int fsync_soloader(int fd);
 
+ssize_t read_soloader(int fd, void * buf, size_t count);
+off_t lseek_soloader(int fd, off_t offset, int whence);
 int64_t lseek64_soloader(int fd, int64_t offset, int whence);
 
 #ifdef __cplusplus
