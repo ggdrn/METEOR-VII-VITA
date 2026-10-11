@@ -23,6 +23,7 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include "utils/cpu.h"
 
 #define PROFILE_PATH DATA_PATH "profile.bin"
 #define SAMPLE_PERIOD_US 5000
@@ -128,7 +129,7 @@ void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us) {
         return;
     }
 
-    SceUID thid = sceKernelCreateThread("profiler", sampler_thread, 0x10000100 - 0x20, 0x4000, 0, 0, NULL);
+    SceUID thid = sceKernelCreateThread("profiler", sampler_thread, 0x10000100 - 0x20, 0x4000, 0, CPU_MASK_SECONDARY, NULL);
     if (thid >= 0) sceKernelStartThread(thid, 0, NULL);
     l_info("profiler: sampling .so text 0x%08x-0x%08x every %d us into %s%s",
            text_lo, text_hi, SAMPLE_PERIOD_US, PROFILE_PATH,

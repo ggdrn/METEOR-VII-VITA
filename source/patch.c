@@ -33,6 +33,7 @@ extern "C"
 #include "reimpl/sys.h"
 #include "ff7_texture.h"
 #include "ff7_anim.h"
+#include "ff7_lzss.h"
 #include "ff7_ui.h"
 #include <stdbool.h>
 
@@ -73,6 +74,7 @@ void so_patch(void) {
 	kuser_patch();
 	ff7_texture_patch();
 	ff7_anim_patch();
+	ff7_lzss_patch();
 	ff7_ui_patch();
 	// Sample hook with symbol name
 	// hook_addr((uintptr_t)so_symbol(&so_mod, "_ZN6glitch2os7Printer5printEPKcz"), (uintptr_t)&hookedFunction);

@@ -19,6 +19,7 @@
 #include "utils/utils.h"
 #include "utils/logger.h"
 #include <so_util/so_util.h>
+#include "utils/cpu.h"
 
 #define PTHR_MAX_OBJECTS 1024
 
@@ -168,8 +169,37 @@ PTHR_INLINE int _cond_t_static_init(pthread_cond_t_bionic * cond, const pthread_
     return ret;
 }
 
+// Entry point of the game's main thread (the recompiled ff7.exe loop)
+#define GAME_THREAD_ENTRY 0x951efd
+
+typedef struct {
+    void *(*start)(void *);
+    void *param;
+    int mask;
+} thread_tramp;
+
+// Applies the core assignment (see utils/cpu.h) from inside the new thread
+static void *thread_trampoline(void *arg) {
+    thread_tramp t = *(thread_tramp *) arg;
+    free(arg);
+    cpu_set_self(t.mask);
+    return t.start(t.param);
+}
+
 int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr, void *(*start)(void *), void *param) {
     int ret;
+    extern so_module so_mod;
+    void *(*real_start)(void *) = start;
+    void *real_param = param;
+    int is_game = (uintptr_t) start - so_mod.text_base == GAME_THREAD_ENTRY;
+    thread_tramp *t = malloc(sizeof(*t));
+    if (t) {
+        t->start = start;
+        t->param = param;
+        t->mask = is_game ? CPU_MASK_GAME : CPU_MASK_SECONDARY;
+        start = thread_trampoline;
+        param = t;
+    }
 
     if (!attr) {
         pthread_attr_t a;
@@ -183,11 +213,13 @@ int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr
         ret = pthread_create(thread, attr->real_ptr, start, param);
     }
 
+    if (ret != 0) free(t);
+
     // Offsets are relative to the .so text base, for matching with crash dumps
-    extern so_module so_mod;
-    l_info("pthread_create: start %p (so+0x%x), param %p, caller so+0x%x: %i",
-           start, (uintptr_t) start - so_mod.text_base, param,
-           (uintptr_t) __builtin_return_address(0) - so_mod.text_base, ret);
+    l_info("pthread_create: start %p (so+0x%x), param %p, caller so+0x%x: %i, %s",
+           real_start, (uintptr_t) real_start - so_mod.text_base, real_param,
+           (uintptr_t) __builtin_return_address(0) - so_mod.text_base, ret,
+           is_game ? "game thread on core 0" : "cores 1-2");
     return ret;
 }
 

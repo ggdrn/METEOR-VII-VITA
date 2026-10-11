@@ -14,6 +14,7 @@
 #include "utils/profiler.h"
 #include "ff7_texture.h"
 #include "ff7_anim.h"
+#include "ff7_lzss.h"
 #include "reimpl/gl_variants.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
@@ -31,6 +32,7 @@
 #include <so_util/so_util.h>
 
 #include "reimpl/controls.h"
+#include "utils/cpu.h"
 
 int _newlib_heap_size_user = 256 * 1024 * 1024;
 
@@ -155,7 +157,7 @@ int main() {
     l_info("onSurfaceCreated(false, false)");
     ff7_onSurfaceCreated(&jni, FF7_CLASS, JNI_FALSE, JNI_FALSE);
 
-    SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100, 0x4000, 0, 0, NULL);
+    SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100, 0x4000, 0, CPU_MASK_SECONDARY, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
 
 #if defined(ENABLE_PROFILER)
@@ -165,6 +167,7 @@ int main() {
 #endif
 
     log_memory();
+    cpu_set_self(CPU_MASK_SECONDARY); // core 0 is the game thread's
     l_success("Entering main loop.");
     unsigned int frame = 0;
     unsigned int heartbeat_frame = 0;
@@ -215,6 +218,7 @@ int main() {
             glstats_report((now - heartbeat_us) / 1000000.0);
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
+            ff7_lzss_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;

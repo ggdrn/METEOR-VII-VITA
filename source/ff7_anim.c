@@ -136,6 +136,10 @@ void ff7_anim_patch(void) {
     l_info("ff7_anim: native read_bits installed (x86 registers at %p)", regs);
 }
 
+volatile uint32_t * ff7_x86_regs(void) {
+    return regs;
+}
+
 void ff7_anim_report(double seconds) {
     if (seconds <= 0 || !calls) return;
     l_info("anim read_bits/s: %.0f", calls / seconds);

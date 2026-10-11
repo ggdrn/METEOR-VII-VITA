@@ -29,6 +29,7 @@
 
 #include "sles_allinclusive.h"
 #include <vitasdk.h>
+#include <psp2/kernel/cpu.h>
 
 #define MAX_ENGINES 4
 
@@ -142,7 +143,7 @@ void SDL_open(IEngine *thisEngine)
 
 	if (audio_thread < 0) {
 		audio_shutdown_requested = 0;
-		audio_thread = sceKernelCreateThread("OpenSLES Playback", audioThread, 0x10000100, 0x10000, 0, 0, NULL);
+		audio_thread = sceKernelCreateThread("OpenSLES Playback", audioThread, 0x10000100, 0x10000, 0, SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2, NULL) /* off the game thread's core 0 */;
 		if (audio_thread < 0) {
 			SL_LOGE("Unable to create OpenSLES playback thread: 0x%x", audio_thread);
 			return;

@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include "utils/cpu.h"
 
 #define COLOR_RED    "\x1B[38;5;196m"
 #define COLOR_PINK   "\x1B[38;5;212m"
@@ -126,7 +127,7 @@ static int _log_writer_thread(SceSize args, void * argp) {
 
 static void _log_start_writer(void) {
     sceKernelCreateLwMutex(&_flush_mutex, "log_flush", 0, 0, NULL);
-    SceUID thid = sceKernelCreateThread("log_writer", _log_writer_thread, 0x10000100 + 0x10, 0x2000, 0, 0, NULL);
+    SceUID thid = sceKernelCreateThread("log_writer", _log_writer_thread, 0x10000100 + 0x10, 0x2000, 0, CPU_MASK_SECONDARY, NULL);
     if (thid >= 0) sceKernelStartThread(thid, 0, NULL);
 }
 #endif

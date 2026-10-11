@@ -36,6 +36,7 @@
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include "utils/cpu.h"
 
 extern zip_archive * obb_zip;
 
@@ -397,7 +398,7 @@ bool movie_start(const char * fname) {
     const char * base = strrchr(path, '/');
     strncpy(mv.name, base ? base + 1 : path, sizeof(mv.name) - 1);
 
-    mv.thread = sceKernelCreateThread("movie_decoder", decoder_thread, 0x10000100 - 0x08, 0x10000, 0, 0, NULL);
+    mv.thread = sceKernelCreateThread("movie_decoder", decoder_thread, 0x10000100 - 0x08, 0x10000, 0, CPU_MASK_SECONDARY, NULL);
     if (mv.thread <= 0) {
         mv.thread = 0;
         l_error("MyDecoder: could not create decoder thread");
