@@ -12,6 +12,7 @@
 #include "utils/utils.h"
 #include "utils/dialog.h"
 #include "utils/logger.h"
+#include "reimpl/readpixels.h"
 
 #include <stdio.h>
 #include <malloc.h>
@@ -43,6 +44,7 @@ void gl_init() {
 
 void gl_swap() {
     vglSwapBuffers(GL_FALSE);
+    readpixels_invalidate();
 }
 
 void glShaderSource_soloader(GLuint shader, GLsizei count,

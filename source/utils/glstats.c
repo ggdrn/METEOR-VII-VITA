@@ -9,6 +9,7 @@
 #include "utils/logger.h"
 
 #include "reimpl/pthr.h"
+#include "reimpl/readpixels.h"
 
 #include <unistd.h>
 #include <psp2/kernel/processmgr.h>
@@ -36,6 +37,7 @@ void glDrawArrays_stat(GLenum mode, GLint first, GLsizei count) {
     if (gl_thread < 0) gl_thread = sceKernelGetThreadId();
     st.draws++;
     st.verts += count;
+    readpixels_invalidate();
     glDrawArrays(mode, first, count);
 }
 
@@ -60,7 +62,7 @@ void glTexImage2D_stat(GLenum target, GLint level, GLint internalformat, GLsizei
 
 void glReadPixels_stat(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void * pixels) {
     SceUInt64 t0 = now_us();
-    glReadPixels(x, y, width, height, format, type, pixels);
+    glReadPixels_cached(x, y, width, height, format, type, pixels);
     st.readpixels_us += now_us() - t0;
     if (!st.readpixels++) l_info("glReadPixels(%i, %i, %i, %i)", x, y, width, height);
 }
@@ -74,11 +76,13 @@ void glFlush_stat(void) {
 
 void glBindFramebuffer_stat(GLenum target, GLuint framebuffer) {
     st.fbo_binds++;
+    readpixels_invalidate();
     glBindFramebuffer(target, framebuffer);
 }
 
 void glClear_stat(GLbitfield mask) {
     st.clears++;
+    readpixels_invalidate();
     glClear(mask);
 }
 

@@ -19,6 +19,15 @@
 #include <psp2/kernel/threadmgr.h>
 
 #define OBB_BUF_SIZE (256 * 1024)
+// Refills start small and double while the reads stay sequential: a full
+// 256 KB refill for a tiny file cost up to 250 ms in some areas of the OBB
+#define OBB_REFILL_MIN (16 * 1024)
+
+// Whole-file reads (music .akb, etc.) are kept in RAM: they repeat often
+// (battle music, area music) and some took over 2 s to read from the card
+#define BIG_READ_MIN (512 * 1024)
+#define BIG_CACHE_MAX (48 * 1024 * 1024)
+#define BIG_CACHE_SLOTS 32
 // Log read statistics every this many bytes per descriptor
 #define OBB_STATS_STEP (16 * 1024 * 1024)
 
@@ -31,6 +40,7 @@ typedef struct {
     uint8_t * buf;
     int64_t buf_off;      // file offset of buf[0]
     int buf_len;          // valid bytes in buf
+    int refill;           // size of the next refill
     // statistics
     uint64_t bytes;
     uint32_t calls;
@@ -41,6 +51,18 @@ typedef struct {
 } obb_fd_t;
 
 static obb_fd_t fds[OBB_FD_MAX];
+
+typedef struct {
+    int64_t off;
+    size_t len;
+    uint8_t * data;
+    uint32_t last_use;
+} big_entry_t;
+
+static big_entry_t big_cache[BIG_CACHE_SLOTS];
+static size_t big_cache_bytes;
+static uint32_t big_cache_clock;
+static SceKernelLwMutexWork big_cache_lock;
 static SceKernelLwMutexWork table_lock;
 static bool table_lock_ready;
 
@@ -57,6 +79,7 @@ bool obb_fd_is(int fd) {
 int obb_fd_open(const char * tag) {
     if (!table_lock_ready) {
         sceKernelCreateLwMutex(&table_lock, "obb_fd_table", 0, 0, NULL);
+        sceKernelCreateLwMutex(&big_cache_lock, "obb_big_cache", 0, 0, NULL);
         table_lock_ready = true;
     }
 
@@ -77,6 +100,7 @@ int obb_fd_open(const char * tag) {
             f->size = sceIoLseek(uid, 0, SCE_SEEK_END);
             f->buf = malloc(OBB_BUF_SIZE);
             f->next_report = OBB_STATS_STEP;
+            f->refill = OBB_REFILL_MIN;
             strncpy(f->tag, tag ? tag : "?", sizeof(f->tag) - 1);
             sceKernelCreateLwMutex(&f->lock, "obb_fd", 0, 0, NULL);
             fd = OBB_FD_BASE + i;
@@ -97,6 +121,59 @@ static int raw_read(obb_fd_t * f, int64_t off, void * dst, size_t len) {
     SceUInt64 t0 = sceKernelGetProcessTimeWide();
     int r = sceIoPread(f->uid, dst, len, off);
     f->io_us += sceKernelGetProcessTimeWide() - t0;
+    return r;
+}
+
+// Large reads: served from / stored in the RAM cache. Returns bytes read.
+static int big_read(obb_fd_t * f, int64_t off, uint8_t * dst, size_t len) {
+    sceKernelLockLwMutex(&big_cache_lock, 1, NULL);
+    for (int i = 0; i < BIG_CACHE_SLOTS; i++) {
+        if (big_cache[i].data && big_cache[i].off == off && big_cache[i].len == len) {
+            memcpy(dst, big_cache[i].data, len);
+            big_cache[i].last_use = ++big_cache_clock;
+            sceKernelUnlockLwMutex(&big_cache_lock, 1);
+            l_info("OBB [%s]: %u KB from RAM cache", f->tag, len / 1024);
+            return (int) len;
+        }
+    }
+    sceKernelUnlockLwMutex(&big_cache_lock, 1);
+
+    SceUInt64 t0 = sceKernelGetProcessTimeWide();
+    int r = raw_read(f, off, dst, len);
+    SceUInt64 us = sceKernelGetProcessTimeWide() - t0;
+    l_info("OBB [%s]: read %u KB at offset %lld in %llu ms (%.1f MB/s)", f->tag, len / 1024, off, us / 1000,
+           us ? len / (double) us : 0.0);
+    if (r != (int) len || len > BIG_CACHE_MAX / 2) return r;
+
+    sceKernelLockLwMutex(&big_cache_lock, 1, NULL);
+    // Evict least recently used entries until it fits
+    while (big_cache_bytes + len > BIG_CACHE_MAX) {
+        int lru = -1;
+        for (int i = 0; i < BIG_CACHE_SLOTS; i++)
+            if (big_cache[i].data && (lru < 0 || big_cache[i].last_use < big_cache[lru].last_use)) lru = i;
+        if (lru < 0) break;
+        big_cache_bytes -= big_cache[lru].len;
+        free(big_cache[lru].data);
+        big_cache[lru].data = NULL;
+    }
+    int slot = -1;
+    for (int i = 0; i < BIG_CACHE_SLOTS && slot < 0; i++)
+        if (!big_cache[i].data) slot = i;
+    if (slot < 0) { // all slots used: replace the least recently used
+        slot = 0;
+        for (int i = 1; i < BIG_CACHE_SLOTS; i++)
+            if (big_cache[i].last_use < big_cache[slot].last_use) slot = i;
+        big_cache_bytes -= big_cache[slot].len;
+        free(big_cache[slot].data);
+        big_cache[slot].data = NULL;
+    }
+    uint8_t * copy = malloc(len);
+    if (copy) {
+        memcpy(copy, dst, len);
+        big_cache[slot] = (big_entry_t) { off, len, copy, ++big_cache_clock };
+        big_cache_bytes += len;
+    }
+    sceKernelUnlockLwMutex(&big_cache_lock, 1);
     return r;
 }
 
@@ -129,16 +206,24 @@ ssize_t obb_fd_read(int fd, void * buf, size_t count) {
             continue;
         }
 
-        // Large reads go straight to the destination
+        // Large reads go straight to the destination (through the RAM cache)
         if (left >= OBB_BUF_SIZE) {
-            int r = raw_read(f, pos, dst + done, left);
+            int r = left >= BIG_READ_MIN ? big_read(f, pos, dst + done, left)
+                                         : raw_read(f, pos, dst + done, left);
             if (r <= 0) break;
             done += r;
             continue;
         }
 
-        // Refill
-        int r = raw_read(f, pos, f->buf, OBB_BUF_SIZE);
+        // Refill: grow while sequential, restart small after a seek
+        if (pos == f->buf_off + f->buf_len) {
+            if (f->refill < OBB_BUF_SIZE) f->refill *= 2;
+        } else {
+            f->refill = OBB_REFILL_MIN;
+        }
+        int want = f->refill;
+        if ((size_t) want < left) want = OBB_BUF_SIZE; // never refill less than the request needs
+        int r = raw_read(f, pos, f->buf, want);
         f->refills++;
         if (r <= 0) { f->buf_len = 0; break; }
         f->buf_off = pos;
