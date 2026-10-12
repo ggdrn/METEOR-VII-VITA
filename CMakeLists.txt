@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.35")
+set(PORT_VERSION "0.00.36")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -56,7 +56,7 @@ if (ENABLE_SELFTESTS)
 endif()
 
 option(ENABLE_PROFILER "Sample the game's .so for performance analysis (slows the game down)" OFF)
-option(ENABLE_SPIKE_PROFILER "Sample the game's .so only during frames slower than 100 ms (no cost otherwise)" ON)
+option(ENABLE_SPIKE_PROFILER "Sample the game's .so during slow frames and CPU-bound stretches" OFF)
 if (ENABLE_PROFILER)
   add_definitions(-DENABLE_PROFILER)
 elseif (ENABLE_SPIKE_PROFILER)
@@ -143,6 +143,8 @@ set(SOURCES
     source/ff7_lzss.c
     source/ff7_swirl.c
     source/ff7_light.c
+    source/ff7_bg.c
+    source/ff7_math.c
     source/ff7_ui.c
     source/ff7_buttons.c
     source/reimpl/bits/_ctype.c
