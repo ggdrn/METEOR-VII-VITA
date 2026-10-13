@@ -37,7 +37,7 @@ source/patch.c       patches específicos do jogo
 source/reimpl/       reimplementações de APIs Android (AAsset, EGL, pthread...)
 source/utils/zip.c   leitor do APK/OBB originais, sem extração
 lib/                 so_util, FalsoJNI, vitaGL (submódulos), kubridge, libc_bridge
-scripts/             setup do SDK, ambiente, verificação do VPK
+scripts/             setup do SDK, ambiente, verificação do VPK, tabela de endereços (gen-memmap-sites.py)
 ```
 
 ## Créditos

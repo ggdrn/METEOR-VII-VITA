@@ -21,7 +21,7 @@ set(VITA_VERSION "01.00") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.00.36")
+set(PORT_VERSION "0.00.37")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -133,6 +133,18 @@ else ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g0 -ffast-math")
 endif()
 
+# mk_address call sites with constant addresses (scripts/gen-memmap-sites.py),
+# embedded as a C array for source/ff7_memmap.c
+set(MEMMAP_SITES_BIN ${CMAKE_SOURCE_DIR}/source/ff7_memmap_sites.bin)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${MEMMAP_SITES_BIN})
+file(READ ${MEMMAP_SITES_BIN} memmap_sites_hex HEX)
+string(LENGTH "${memmap_sites_hex}" memmap_sites_len)
+math(EXPR memmap_sites_len "${memmap_sites_len} / 2")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," memmap_sites_hex "${memmap_sites_hex}")
+file(WRITE ${CMAKE_BINARY_DIR}/ff7_memmap_sites.c
+     "#include <stdint.h>\nconst uint8_t ff7_memmap_sites[] = {${memmap_sites_hex}};\n"
+     "const uint32_t ff7_memmap_sites_size = ${memmap_sites_len};\n")
+
 set(SOURCES
     source/main.c
     source/dynlib.c
@@ -147,6 +159,8 @@ set(SOURCES
     source/ff7_math.c
     source/ff7_ui.c
     source/ff7_buttons.c
+    source/ff7_memmap.c
+    ${CMAKE_BINARY_DIR}/ff7_memmap_sites.c
     source/reimpl/bits/_ctype.c
     source/reimpl/errno.c
     source/reimpl/io.c
