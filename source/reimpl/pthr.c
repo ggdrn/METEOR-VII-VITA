@@ -8,6 +8,8 @@
  * of the MIT license. See the LICENSE file for details.
  */
 
+#include "reimpl/gl_queue.h"
+#include "utils/glstats.h"
 #include "reimpl/pthr.h"
 
 #include <stdio.h>
@@ -186,7 +188,11 @@ static void *thread_trampoline(void *arg) {
     cpu_set_self(t.mask);
     extern so_module so_mod;
     char name[20];
-    if (t.mask == CPU_MASK_GAME) snprintf(name, sizeof(name), "game");
+    if (t.mask == CPU_MASK_GAME) {
+        snprintf(name, sizeof(name), "game");
+        glstats_set_gl_thread();
+        gl_queue_set_game_thread();
+    }
     else snprintf(name, sizeof(name), "so+%x/%x", (unsigned) ((uintptr_t) t.start - so_mod.text_base),
                   (unsigned) sceKernelGetThreadId() & 0xfff);
     cpu_register_thread(name, sceKernelGetThreadId());

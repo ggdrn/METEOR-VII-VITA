@@ -86,7 +86,39 @@ para comparar o `perf:` / `heartbeat:` do log no mesmo lugar, com e sem.
    funções com quadro padrão). É a mudança com maior potencial (pode chegar
    perto de dobrar o desempenho do código recompilado), mas precisa de
    testes no aparelho a cada passo.
-4. Thread de render (fila de comandos GL no core 1): até ~7%.
+4. ~~Thread de render (fila de comandos GL no core 1): até ~7%.~~ Feito na
+   v0.00.38, ver abaixo.
+
+## Resultado da v0.00.37
+
+Os dois patches funcionaram no Vita: `mk_address` rápida instalada e
+71.246/71.246 chamadas removidas, sem divergência. Em cenas comparáveis
+(~100–120 draws por quadro), o trabalho da thread do jogo caiu ~5–10%
+(ex.: ~24 → ~21–22 ms por quadro). A sessão não passou pelos trechos
+pesados do Setor 7, então o número ainda é indicativo.
+
+## Thread de render (v0.00.38, `source/reimpl/gl_queue.c`)
+
+Na thread do jogo, as chamadas GL viram registros numa fila de 8 MB; a
+thread `gl_render` (cores 1–2) executa a fila em ordem, pelos mesmos wrappers
+de antes. O jogo usa só 53 funções GL, sem VBOs nem `glDrawElements`:
+
+- `glDrawArrays` copia para a fila os vértices que vai ler (o jogo reaproveita
+  o buffer logo depois); `glTexImage2D`, `glUniformMatrix4fv` e
+  `glDeleteTextures` copiam seus dados.
+- Chamadas que devolvem algo (`glGen*`, consultas de shader, `glReadPixels`,
+  `glGetIntegerv`) esperam a fila esvaziar e rodam direto. Fora da
+  inicialização, só acontecem ao carregar texturas e na captura da batalha.
+- `glGetError` (chamada após quase toda troca de estado) responde
+  `GL_NO_ERROR` sem esperar.
+- A thread principal (que compõe o quadro em `onDrawFrame` e faz o swap)
+  espera a fila esvaziar e trava a thread de render enquanto usa GL.
+
+No log, a linha `render thread:` mostra ocupação, chamadas e draws por
+segundo, dados copiados e quanto a thread do jogo esperou. Ganho esperado:
+~3–5% na thread do jogo (o GL dela, menos o custo de copiar os vértices).
+`ux0:data/ffvii-vita/glthread_off.txt` desliga a thread de render para
+comparar.
 
 ## Vídeo de abertura com glitches (corrigido na v0.00.37)
 

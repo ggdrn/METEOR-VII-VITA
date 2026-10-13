@@ -21,6 +21,7 @@
 #include "ff7_bg.h"
 #include "ff7_math.h"
 #include "reimpl/gl_variants.h"
+#include "reimpl/gl_queue.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
 
@@ -157,6 +158,7 @@ int main() {
 
     // GLSurfaceView: RendererWrapper.onSurfaceChanged() -> onSurfaceCreated()
     gl_init();
+    gl_queue_init();
     l_info("onSurfaceChanged(960, 544)");
     ff7_onSurfaceChanged(&jni, FF7_CLASS, 960, 544);
     perf_init();
@@ -244,6 +246,7 @@ int main() {
             ff7_bg_report((now - heartbeat_us) / 1000000.0);
             ff7_math_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
+            gl_queue_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
             heartbeat_frame = frame;

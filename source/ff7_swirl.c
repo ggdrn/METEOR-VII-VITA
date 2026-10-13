@@ -28,6 +28,7 @@
 #include "ff7_swirl.h"
 #include "ff7_anim.h"
 
+#include "reimpl/gl_queue.h"
 #include "utils/logger.h"
 #include "utils/glstats.h"
 
@@ -183,6 +184,7 @@ static int grab_native(int x, int y, int w, int h, int screen_h, int x_scale, in
     (void) read_buffer; // glReadBuffer is a no-op in the .so
 
     SceUInt64 t0 = sceKernelGetProcessTimeWide();
+    gl_queue_finish(); // GL used directly below, on the game thread
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     int skip = screen_h - (y + h); // rows below the grab, in GL coordinates
     uint16_t * out = dst;

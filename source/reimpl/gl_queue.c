@@ -1,0 +1,625 @@
+/*
+ * Render thread: the game thread's GL calls run on another core.
+ *
+ * The game thread (core 0) is the bottleneck in busy scenes, and 5-9% of it
+ * went to GL calls, mostly vitaGL's work for glDrawArrays (state checks,
+ * copying the vertex arrays, building the GXM draw). Here the GL functions
+ * the .so imports are entry points that, on the game thread, append the call
+ * to a queue; a render thread on cores 1-2 runs the queue in order through
+ * the same wrappers as before (shader variants, OES mapping, statistics), so
+ * vitaGL only ever runs on one thread at a time.
+ *
+ *  - glDrawArrays copies the vertex data it will read (the game reuses its
+ *    vertex buffer right after the call) into the queue; the render thread
+ *    points the attribute arrays at that copy. The game only uses client-side
+ *    arrays and glDrawArrays, never buffer objects or glDrawElements.
+ *  - glTexImage2D, glUniformMatrix4fv and glDeleteTextures copy their data.
+ *  - Calls that return something (glGen*, shader/program queries,
+ *    glReadPixels, glGetIntegerv...) wait for the queue to drain and run on
+ *    the calling thread. They are rare outside startup and texture loads.
+ *  - glGetError, called after nearly every state change, answers
+ *    GL_NO_ERROR without waiting (errors of queued calls cannot be reported
+ *    at that point anyway; the game only logs them).
+ *  - Any other thread (the main thread composites the frame in
+ *    onDrawFrame, then swaps) waits for the queue to drain and holds the
+ *    execution lock around its GL calls.
+ *
+ * Creating DATA_PATH "glthread_off.txt" turns the render thread off.
+ *
+ * This software may be modified and distributed under the terms
+ * of the MIT license. See the LICENSE file for details.
+ */
+
+#include "reimpl/gl_queue.h"
+
+#include "reimpl/gl_variants.h"
+#include "utils/cpu.h"
+#include "utils/glstats.h"
+#include "utils/glutil.h"
+#include "utils/logger.h"
+#include "utils/utils.h"
+
+#include <malloc.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
+
+void glBindTexture_oes(GLenum target, GLuint texture);
+void glTexParameteri_oes(GLenum target, GLenum pname, GLint param);
+
+#define OFF_SWITCH  DATA_PATH "glthread_off.txt"
+#define QUEUE_SIZE  (8u << 20)  // divides 2^32: head/tail wrap consistently
+#define MAX_PAYLOAD (2u << 20)  // larger data: run the call directly instead
+#define MAX_ARGS    9
+#define MAX_ATTRIBS 16
+
+enum { OP_WRAP = 1, OP_CALL, OP_DRAW };
+
+typedef struct {
+    uint16_t op, n;  // n: arguments (OP_CALL) or attribute arrays (OP_DRAW)
+    uint32_t size;   // whole record, multiple of 8
+} hdr_t;
+
+// softfp: float arguments travel in core registers, so every GL entry point
+// can be called through integer arguments
+typedef void (* fn_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+
+typedef struct {
+    hdr_t h;
+    fn_t fn;
+    uint32_t a[];    // n arguments, then the payload (8-aligned)
+} call_t;
+
+typedef struct {
+    uint8_t index, size, normalized, pad;
+    GLenum type;
+    GLsizei stride;
+    uint32_t off;    // from the record start
+} draw_attr_t;
+
+typedef struct {
+    hdr_t h;
+    GLenum mode;
+    GLsizei count;
+    draw_attr_t attr[]; // n of them, then the vertex data
+} draw_t;
+
+static uint8_t * ring;
+static volatile uint32_t head, tail; // bytes published / executed
+static int active;
+static uint32_t game_tls;
+static SceUID wake_sema = -1;
+static volatile int sleeping;
+static SceKernelLwMutexWork exec_lock;
+
+// GL state the queue needs, as last set by any thread
+static struct {
+    int enabled;
+    GLint size;
+    GLenum type;
+    GLboolean normalized;
+    GLsizei stride;
+    const uint8_t * ptr;
+} attribs[MAX_ATTRIBS];
+static GLint unpack_alignment = 4;
+
+static struct {
+    unsigned calls, draws, syncs;
+    unsigned long long bytes, game_us, sync_us, stall_us, busy_us;
+    uint32_t peak;
+} st;
+
+static inline SceUInt64 now_us(void) {
+    return sceKernelGetProcessTimeWide();
+}
+
+// User read-only thread ID register: distinct for every thread, one instruction
+static inline uint32_t tls_reg(void) {
+    uint32_t v;
+    __asm__ volatile("mrc p15, 0, %0, c13, c0, 3" : "=r"(v));
+    return v;
+}
+
+static inline int on_game(void) {
+    return active && tls_reg() == game_tls;
+}
+
+static inline uint32_t align8(uint32_t v) {
+    return (v + 7) & ~7u;
+}
+
+/*
+ * Render thread
+ */
+static void exec_call(const call_t * c) {
+    uint32_t a[MAX_ARGS] = {0};
+    memcpy(a, c->a, c->h.n * sizeof(uint32_t));
+    c->fn(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]);
+}
+
+static void exec_draw(const draw_t * d) {
+    for (int i = 0; i < d->h.n; i++) {
+        const draw_attr_t * at = &d->attr[i];
+        glVertexAttribPointer(at->index, at->size, at->type, at->normalized, at->stride,
+                              (const uint8_t *) d + at->off);
+    }
+    glDrawArrays_stat(d->mode, 0, d->count);
+}
+
+static int render_thread(SceSize args, void * argp) {
+    while (1) {
+        if (tail == head) {
+            sleeping = 1;
+            __sync_synchronize();
+            if (tail == head) sceKernelWaitSema(wake_sema, 1, NULL);
+            sleeping = 0;
+            continue;
+        }
+        SceUInt64 t0 = now_us();
+        sceKernelLockLwMutex(&exec_lock, 1, NULL);
+        while (tail != head) {
+            __sync_synchronize(); // the record was written before head moved
+            const hdr_t * h = (const hdr_t *) (ring + tail % QUEUE_SIZE);
+            if (h->op == OP_CALL) exec_call((const call_t *) h);
+            else if (h->op == OP_DRAW) exec_draw((const draw_t *) h);
+            uint32_t size = h->size;
+            __sync_synchronize(); // done with the record before it can be reused
+            tail += size;
+        }
+        sceKernelUnlockLwMutex(&exec_lock, 1);
+        st.busy_us += now_us() - t0;
+    }
+    return 0;
+}
+
+/*
+ * Queue (written by the game thread only)
+ */
+static void * reserve(uint32_t size) {
+    uint32_t off = head % QUEUE_SIZE;
+    uint32_t waste = off + size > QUEUE_SIZE ? QUEUE_SIZE - off : 0;
+    if (head + waste + size - tail > QUEUE_SIZE) {
+        SceUInt64 t0 = now_us();
+        while (head + waste + size - tail > QUEUE_SIZE)
+            ;
+        st.stall_us += now_us() - t0;
+    }
+    if (waste) {
+        hdr_t * w = (hdr_t *) (ring + off);
+        w->op = OP_WRAP;
+        w->n = 0;
+        w->size = waste;
+        __sync_synchronize();
+        head += waste;
+    }
+    return ring + head % QUEUE_SIZE;
+}
+
+static void publish(uint32_t size) {
+    __sync_synchronize();
+    head += size;
+    uint32_t used = head - tail;
+    if (used > st.peak) st.peak = used;
+    __sync_synchronize();
+    if (sleeping) {
+        sleeping = 0;
+        sceKernelSignalSema(wake_sema, 1);
+    }
+}
+
+// Queues fn(args...); if `data` is set, `len` bytes are copied after the
+// arguments and argument `data_arg` points at the copy
+static void queue_call(void * fn, int n, const uint32_t * args, const void * data, uint32_t len, int data_arg) {
+    uint32_t args_end = align8(sizeof(call_t) + n * sizeof(uint32_t));
+    uint32_t size = args_end + align8(data ? len : 0);
+    call_t * c = reserve(size);
+    c->h.op = OP_CALL;
+    c->h.n = n;
+    c->h.size = size;
+    c->fn = (fn_t) fn;
+    memcpy(c->a, args, n * sizeof(uint32_t));
+    if (data) {
+        memcpy((uint8_t *) c + args_end, data, len);
+        c->a[data_arg] = (uint32_t) ((uint8_t *) c + args_end);
+        st.bytes += len;
+    }
+    st.calls++;
+    publish(size);
+}
+
+#define QUEUE(fn, ...) do {                                         \
+        const uint32_t a_[] = { __VA_ARGS__ };                       \
+        queue_call((void *) (fn), sizeof(a_) / sizeof(a_[0]), a_, NULL, 0, 0); \
+    } while (0)
+
+static inline uint32_t fbits(GLfloat f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+void gl_queue_finish(void) {
+    if (!active || tail == head) return;
+    SceUInt64 t0 = now_us();
+    while (tail != head)
+        ;
+    if (tls_reg() == game_tls) {
+        st.syncs++;
+        st.sync_us += now_us() - t0;
+    }
+}
+
+void gl_queue_lock(void) {
+    if (!active) return;
+    gl_queue_finish();
+    sceKernelLockLwMutex(&exec_lock, 1, NULL);
+}
+
+void gl_queue_unlock(void) {
+    if (active) sceKernelUnlockLwMutex(&exec_lock, 1);
+}
+
+// Direct GL use: after everything queued has run, with the render thread out
+static SceUInt64 direct_t0;
+
+static inline void direct_begin(void) {
+    if (!active) return;
+    if (tls_reg() == game_tls) direct_t0 = now_us();
+    gl_queue_lock();
+}
+
+static inline void direct_end(void) {
+    if (!active) return;
+    gl_queue_unlock();
+    if (tls_reg() == game_tls) st.game_us += now_us() - direct_t0;
+}
+
+#define DIRECT(call) do { direct_begin(); call; direct_end(); } while (0)
+#define DIRECT_RET(type, call) do { direct_begin(); type r_ = call; direct_end(); return r_; } while (0)
+
+/*
+ * Setup and statistics
+ */
+void gl_queue_init(void) {
+    if (file_exists(OFF_SWITCH)) {
+        l_info("gl_queue: render thread disabled by %s", OFF_SWITCH);
+        return;
+    }
+    ring = memalign(64, QUEUE_SIZE);
+    wake_sema = sceKernelCreateSema("gl_queue_wake", 0, 0, 1, NULL);
+    if (!ring || wake_sema < 0 || sceKernelCreateLwMutex(&exec_lock, "gl_queue_exec", 0, 0, NULL) < 0) {
+        l_error("gl_queue: could not allocate the queue, GL stays on the game thread");
+        return;
+    }
+    SceUID thid = sceKernelCreateThread("gl_render", render_thread, 0x10000100 - 0x04, 0x10000, 0,
+                                        CPU_MASK_SECONDARY, NULL);
+    if (thid < 0 || sceKernelStartThread(thid, 0, NULL) < 0) {
+        l_error("gl_queue: could not start the render thread, GL stays on the game thread");
+        return;
+    }
+    cpu_register_thread("gl_render", thid);
+    l_info("gl_queue: render thread started (%u KB queue)", QUEUE_SIZE / 1024);
+}
+
+void gl_queue_set_game_thread(void) {
+    if (!ring || wake_sema < 0) return;
+    game_tls = tls_reg();
+    __sync_synchronize();
+    active = 1;
+}
+
+int gl_queue_active(void) {
+    return active;
+}
+
+unsigned long long gl_queue_take_game_us(void) {
+    unsigned long long us = st.game_us;
+    st.game_us = 0;
+    return us;
+}
+
+void gl_queue_report(double seconds) {
+    if (!active || seconds <= 0) return;
+    l_info("render thread: busy %.0f%% | %.0f calls/s, %.0f draws/s, %.0f KB/s copied | "
+           "game thread waited: %.0f syncs/s %.1f ms/s, queue full %.1f ms/s | peak queue %u KB",
+           st.busy_us / 10000.0 / seconds, st.calls / seconds, st.draws / seconds, st.bytes / 1024.0 / seconds,
+           st.syncs / seconds, st.sync_us / 1000.0 / seconds, st.stall_us / 1000.0 / seconds, st.peak / 1024);
+    st.calls = st.draws = st.syncs = 0;
+    st.bytes = st.sync_us = st.stall_us = st.busy_us = 0;
+    st.peak = 0;
+}
+
+/*
+ * Draws
+ */
+static unsigned type_size(GLenum type) {
+    switch (type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE: return 1;
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT: return 2;
+        default: return 4; // GL_FLOAT, GL_FIXED
+    }
+}
+
+// Points vitaGL back at the arrays the caller set (the render thread leaves
+// them on queue copies), for draws that run directly
+static void apply_attribs(void) {
+    for (int i = 0; i < MAX_ATTRIBS; i++)
+        if (attribs[i].ptr)
+            glVertexAttribPointer(i, attribs[i].size, attribs[i].type, attribs[i].normalized,
+                                  attribs[i].stride, attribs[i].ptr);
+}
+
+void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    if (!on_game()) {
+        DIRECT((active ? apply_attribs() : (void) 0, glDrawArrays_stat(mode, first, count)));
+        return;
+    }
+    SceUInt64 t0 = now_us();
+
+    // Bytes each enabled array reads for vertices first .. first + count - 1
+    int n = 0;
+    uint8_t idx[MAX_ATTRIBS];
+    const uint8_t * start[MAX_ATTRIBS];
+    uint32_t len[MAX_ATTRIBS], stride[MAX_ATTRIBS], total = 0;
+    const uint8_t * lo = NULL, * hi = NULL;
+    for (int i = 0; i < MAX_ATTRIBS && count > 0; i++) {
+        if (!attribs[i].enabled || !attribs[i].ptr) continue;
+        uint32_t elem = attribs[i].size * type_size(attribs[i].type);
+        uint32_t s = attribs[i].stride ? (uint32_t) attribs[i].stride : elem;
+        idx[n] = i;
+        stride[n] = s;
+        start[n] = attribs[i].ptr + (uint32_t) first * s;
+        len[n] = (uint32_t) (count - 1) * s + elem;
+        if (!lo || start[n] < lo) lo = start[n];
+        if (!hi || start[n] + len[n] > hi) hi = start[n] + len[n];
+        total += len[n];
+        n++;
+    }
+    // Interleaved arrays (the usual case): copy their common span once
+    int span = n > 1 && (uint32_t) (hi - lo) <= total + 64;
+    uint32_t data = span ? (uint32_t) (hi - lo) : total;
+
+    if (data > MAX_PAYLOAD) {
+        DIRECT((apply_attribs(), glDrawArrays_stat(mode, first, count)));
+        return;
+    }
+
+    uint32_t head_size = align8(sizeof(draw_t) + n * sizeof(draw_attr_t));
+    uint32_t size = head_size + align8(data);
+    draw_t * d = reserve(size);
+    d->h.op = OP_DRAW;
+    d->h.n = n;
+    d->h.size = size;
+    d->mode = mode;
+    d->count = count > 0 ? count : 0;
+    uint8_t * out = (uint8_t *) d + head_size;
+    if (span) memcpy(out, lo, data);
+    uint32_t pos = head_size;
+    for (int k = 0; k < n; k++) {
+        draw_attr_t * at = &d->attr[k];
+        int i = idx[k];
+        at->index = i;
+        at->size = attribs[i].size;
+        at->normalized = attribs[i].normalized;
+        at->pad = 0;
+        at->type = attribs[i].type;
+        at->stride = stride[k];
+        if (span) {
+            at->off = head_size + (uint32_t) (start[k] - lo);
+        } else {
+            memcpy((uint8_t *) d + pos, start[k], len[k]);
+            at->off = pos;
+            pos += len[k];
+        }
+    }
+    st.draws++;
+    st.bytes += data;
+    publish(size);
+    st.game_us += now_us() - t0;
+}
+
+void gq_glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
+                              const void * pointer) {
+    if (index < MAX_ATTRIBS) {
+        attribs[index].size = size;
+        attribs[index].type = type;
+        attribs[index].normalized = normalized;
+        attribs[index].stride = stride;
+        attribs[index].ptr = pointer;
+    }
+    if (!on_game() || index >= MAX_ATTRIBS) DIRECT(glVertexAttribPointer(index, size, type, normalized, stride, pointer));
+    // Game thread: applied by each queued draw
+}
+
+void gq_glEnableVertexAttribArray(GLuint index) {
+    if (index < MAX_ATTRIBS) attribs[index].enabled = 1;
+    if (on_game()) QUEUE(glEnableVertexAttribArray, index);
+    else DIRECT(glEnableVertexAttribArray(index));
+}
+
+/*
+ * Calls with data
+ */
+static unsigned pixel_size(GLenum format, GLenum type) {
+    if (type == GL_UNSIGNED_SHORT_5_6_5 || type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1)
+        return 2;
+    if (type != GL_UNSIGNED_BYTE) return 0;
+    switch (format) {
+        case GL_RGBA: return 4;
+        case GL_RGB: return 3;
+        case GL_LUMINANCE_ALPHA: return 2;
+        case GL_LUMINANCE:
+        case GL_ALPHA: return 1;
+        default: return 0;
+    }
+}
+
+void gq_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h,
+                     GLint border, GLenum format, GLenum type, const void * pixels) {
+    if (on_game()) {
+        unsigned bpp = pixel_size(format, type);
+        uint32_t bytes = 0;
+        if (bpp && w > 0 && h > 0) {
+            uint32_t row = (uint32_t) w * bpp;
+            uint32_t pitch = (row + unpack_alignment - 1) / unpack_alignment * unpack_alignment;
+            bytes = pitch * (uint32_t) (h - 1) + row;
+        }
+        if (!pixels || (bytes && bytes <= MAX_PAYLOAD)) {
+            const uint32_t a[] = { target, level, internalformat, w, h, border, format, type, 0 };
+            queue_call((void *) glTexImage2D_stat, 9, a, pixels, bytes, 8);
+            return;
+        }
+    }
+    DIRECT(glTexImage2D_stat(target, level, internalformat, w, h, border, format, type, pixels));
+}
+
+void gq_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat * value) {
+    if (on_game() && count > 0 && value) {
+        const uint32_t a[] = { location, count, transpose, 0 };
+        queue_call((void *) glUniformMatrix4fv_variants, 4, a, value, (uint32_t) count * 16 * sizeof(GLfloat), 3);
+        return;
+    }
+    DIRECT(glUniformMatrix4fv_variants(location, count, transpose, value));
+}
+
+void gq_glDeleteTextures(GLsizei n, const GLuint * textures) {
+    if (on_game() && n > 0 && textures) {
+        const uint32_t a[] = { n, 0 };
+        queue_call((void *) glDeleteTextures, 2, a, textures, (uint32_t) n * sizeof(GLuint), 1);
+        return;
+    }
+    DIRECT(glDeleteTextures(n, textures));
+}
+
+void gq_glPixelStorei(GLenum pname, GLint param) {
+    if (pname == GL_UNPACK_ALIGNMENT && (param == 1 || param == 2 || param == 4 || param == 8))
+        unpack_alignment = param;
+    if (on_game()) QUEUE(glPixelStorei, pname, param);
+    else DIRECT(glPixelStorei(pname, param));
+}
+
+/*
+ * Plain state changes: queued on the game thread
+ */
+#define QUEUED(name, fn, params, ...)        \
+    void gq_##name params {                 \
+        if (on_game()) QUEUE(fn, __VA_ARGS__); \
+        else DIRECT(fn(__VA_ARGS__));       \
+    }
+
+QUEUED(glActiveTexture, glActiveTexture, (GLenum texture), texture)
+QUEUED(glBindFramebuffer, glBindFramebuffer_stat, (GLenum target, GLuint fb), target, fb)
+QUEUED(glBindRenderbuffer, glBindRenderbuffer, (GLenum target, GLuint rb), target, rb)
+QUEUED(glBindTexture, glBindTexture_oes, (GLenum target, GLuint texture), target, texture)
+QUEUED(glBlendFunc, glBlendFunc, (GLenum s, GLenum d), s, d)
+QUEUED(glClear, glClear_stat, (GLbitfield mask), mask)
+QUEUED(glColorMask, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a), r, g, b, a)
+QUEUED(glCullFace, glCullFace, (GLenum mode), mode)
+QUEUED(glDeleteProgram, glDeleteProgram, (GLuint program), program)
+QUEUED(glDeleteShader, glDeleteShader, (GLuint shader), shader)
+QUEUED(glDepthFunc, glDepthFunc, (GLenum func), func)
+QUEUED(glDepthMask, glDepthMask, (GLboolean flag), flag)
+QUEUED(glDisable, glDisable, (GLenum cap), cap)
+QUEUED(glEnable, glEnable, (GLenum cap), cap)
+QUEUED(glFramebufferRenderbuffer, glFramebufferRenderbuffer,
+       (GLenum target, GLenum attachment, GLenum rbtarget, GLuint rb), target, attachment, rbtarget, rb)
+QUEUED(glFramebufferTexture2D, glFramebufferTexture2D,
+       (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level),
+       target, attachment, textarget, texture, level)
+QUEUED(glFrontFace, glFrontFace, (GLenum mode), mode)
+QUEUED(glRenderbufferStorage, glRenderbufferStorage, (GLenum target, GLenum format, GLsizei w, GLsizei h),
+       target, format, w, h)
+QUEUED(glTexParameteri, glTexParameteri_oes, (GLenum target, GLenum pname, GLint param), target, pname, param)
+QUEUED(glUniform1i, glUniform1i_variants, (GLint location, GLint v0), location, v0)
+QUEUED(glUseProgram, glUseProgram_variants, (GLuint program), program)
+QUEUED(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h), x, y, w, h)
+
+void gq_glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
+    if (on_game()) QUEUE(glClearColor, fbits(r), fbits(g), fbits(b), fbits(a));
+    else DIRECT(glClearColor(r, g, b, a));
+}
+
+void gq_glClearDepthf(GLfloat depth) {
+    if (on_game()) QUEUE(glClearDepthf, fbits(depth));
+    else DIRECT(glClearDepthf(depth));
+}
+
+void gq_glDepthRangef(GLfloat n, GLfloat f) {
+    if (on_game()) QUEUE(glDepthRangef, fbits(n), fbits(f));
+    else DIRECT(glDepthRangef(n, f));
+}
+
+void gq_glLineWidth(GLfloat width) {
+    if (on_game()) QUEUE(glLineWidth, fbits(width));
+    else DIRECT(glLineWidth(width));
+}
+
+GLenum gq_glGetError(void) {
+    if (on_game()) return GL_NO_ERROR;
+    DIRECT_RET(GLenum, glGetError());
+}
+
+/*
+ * Calls that return something: run directly once the queue is empty
+ */
+void gq_glAttachShader(GLuint program, GLuint shader) {
+    DIRECT(glAttachShader_variants(program, shader));
+}
+void gq_glBindAttribLocation(GLuint program, GLuint index, const GLchar * name) {
+    DIRECT(glBindAttribLocation(program, index, name));
+}
+GLenum gq_glCheckFramebufferStatus(GLenum target) {
+    DIRECT_RET(GLenum, glCheckFramebufferStatus(target));
+}
+void gq_glCompileShader(GLuint shader) {
+    DIRECT(glCompileShader_soloader(shader));
+}
+GLuint gq_glCreateProgram(void) {
+    DIRECT_RET(GLuint, glCreateProgram());
+}
+GLuint gq_glCreateShader(GLenum type) {
+    DIRECT_RET(GLuint, glCreateShader(type));
+}
+void gq_glGenFramebuffers(GLsizei n, GLuint * ids) {
+    DIRECT(glGenFramebuffers(n, ids));
+}
+void gq_glGenRenderbuffers(GLsizei n, GLuint * ids) {
+    DIRECT(glGenRenderbuffers(n, ids));
+}
+void gq_glGenTextures(GLsizei n, GLuint * ids) {
+    DIRECT(glGenTextures(n, ids));
+}
+void gq_glGetIntegerv(GLenum pname, GLint * data) {
+    DIRECT(glGetIntegerv(pname, data));
+}
+void gq_glGetProgramInfoLog(GLuint program, GLsizei size, GLsizei * length, GLchar * log) {
+    DIRECT(glGetProgramInfoLog(program, size, length, log));
+}
+void gq_glGetProgramiv(GLuint program, GLenum pname, GLint * params) {
+    DIRECT(glGetProgramiv(program, pname, params));
+}
+void gq_glGetShaderInfoLog(GLuint shader, GLsizei size, GLsizei * length, GLchar * log) {
+    DIRECT(glGetShaderInfoLog(shader, size, length, log));
+}
+void gq_glGetShaderiv(GLuint shader, GLenum pname, GLint * params) {
+    DIRECT(glGetShaderiv(shader, pname, params));
+}
+const GLubyte * gq_glGetString(GLenum name) {
+    DIRECT_RET(const GLubyte *, glGetString(name));
+}
+GLint gq_glGetUniformLocation(GLuint program, const GLchar * name) {
+    DIRECT_RET(GLint, glGetUniformLocation_variants(program, name));
+}
+void gq_glLinkProgram(GLuint program) {
+    DIRECT(glLinkProgram(program));
+}
+void gq_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void * pixels) {
+    DIRECT(glReadPixels_stat(x, y, w, h, format, type, pixels));
+}
+void gq_glShaderSource(GLuint shader, GLsizei count, const GLchar ** string, const GLint * length) {
+    DIRECT(glShaderSource_soloader(shader, count, string, length));
+}

@@ -19,6 +19,7 @@
 
 #include "reimpl/movie.h"
 
+#include "reimpl/gl_queue.h"
 #include "utils/logger.h"
 #include "utils/zip.h"
 
@@ -416,6 +417,7 @@ void movie_set_texture(unsigned int tex) {
 
 static void upload(video_frame_t * f) {
     if (!movie_texture) return;
+    gl_queue_finish(); // GL used directly below, on the game thread
     SceUInt64 t0 = now_us();
     GLint previous = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
