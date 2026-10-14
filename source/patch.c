@@ -39,6 +39,8 @@ extern "C"
 #include "ff7_bg.h"
 #include "ff7_math.h"
 #include "ff7_ui.h"
+#include "ff7_memmap.h"
+#include "ff7_tri.h"
 #include <stdbool.h>
 
 void __kuser_memory_barrier(void) {
@@ -84,6 +86,8 @@ void so_patch(void) {
 	ff7_bg_patch();
 	ff7_math_patch();
 	ff7_ui_patch();
+	ff7_tri_patch();
+	ff7_memmap_patch(); // last: its site checks must see the other hooks
 	// Sample hook with symbol name
 	// hook_addr((uintptr_t)so_symbol(&so_mod, "_ZN6glitch2os7Printer5printEPKcz"), (uintptr_t)&hookedFunction);
 	// Or with offset

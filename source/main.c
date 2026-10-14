@@ -20,9 +20,12 @@
 #include "ff7_light.h"
 #include "ff7_bg.h"
 #include "ff7_math.h"
+#include "ff7_tri.h"
 #include "reimpl/gl_variants.h"
+#include "reimpl/gl_queue.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
+#include "utils/utils.h"
 
 #include <malloc.h>
 #include <stdbool.h>
@@ -157,6 +160,7 @@ int main() {
 
     // GLSurfaceView: RendererWrapper.onSurfaceChanged() -> onSurfaceCreated()
     gl_init();
+    gl_queue_init();
     l_info("onSurfaceChanged(960, 544)");
     ff7_onSurfaceChanged(&jni, FF7_CLASS, 960, 544);
     perf_init();
@@ -167,10 +171,19 @@ int main() {
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
     if (wd >= 0) cpu_register_thread("watchdog", wd);
 
+    // ux0:data/ffvii-vita/profile_on.txt: spike profiler without a special build
+    int profiling = 0;
 #if defined(ENABLE_PROFILER)
     profiler_start(NULL, 0);
+    profiling = 1;
 #elif defined(ENABLE_SPIKE_PROFILER)
     profiler_start(&frame_start_us, 100000);
+    profiling = 1;
+#else
+    if (file_exists(DATA_PATH "profile_on.txt")) {
+        profiler_start(&frame_start_us, 100000);
+        profiling = 1;
+    }
 #endif
 
     log_memory();
@@ -233,9 +246,7 @@ int main() {
             glstats_report((now - heartbeat_us) / 1000000.0);
             cpu_report((now - heartbeat_us) / 1000000.0);
             perf_report(frames * 1000000.0 / (double) (now - heartbeat_us), cpu_last_pct("game"));
-#if defined(ENABLE_PROFILER) || defined(ENABLE_SPIKE_PROFILER)
-            profiler_report();
-#endif
+            if (profiling) profiler_report();
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
             ff7_lzss_report((now - heartbeat_us) / 1000000.0);
@@ -243,7 +254,9 @@ int main() {
             ff7_light_report((now - heartbeat_us) / 1000000.0);
             ff7_bg_report((now - heartbeat_us) / 1000000.0);
             ff7_math_report((now - heartbeat_us) / 1000000.0);
+            ff7_tri_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
+            gl_queue_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
             heartbeat_frame = frame;

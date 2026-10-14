@@ -19,6 +19,9 @@ void glFlush_stat(void);
 void glBindFramebuffer_stat(GLenum target, GLuint framebuffer);
 void glClear_stat(GLbitfield mask);
 
+/** Marks the calling thread as the game thread (sleep/wait accounting). */
+void glstats_set_gl_thread(void);
+
 /* Wait/sleep wrappers: time is accounted only for the game (GL) thread */
 int usleep_stat(unsigned int usec);
 int pthread_mutex_lock_stat(void * mutex);

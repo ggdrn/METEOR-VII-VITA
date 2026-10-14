@@ -19,6 +19,7 @@
 
 #include "reimpl/movie.h"
 
+#include "reimpl/gl_queue.h"
 #include "utils/logger.h"
 #include "utils/zip.h"
 
@@ -33,7 +34,6 @@
 #include <vpx/vpx_decoder.h>
 #include <vitaGL.h>
 
-#include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include "utils/cpu.h"
@@ -92,10 +92,6 @@ static struct {
 } mv;
 
 static GLuint movie_texture = 0;
-
-// Texture memory of the current movie (allocated once, then written in place)
-static uint8_t * tex_data;
-static GLuint tex_data_name;
 
 static struct {
     unsigned decoded, dropped;
@@ -323,7 +319,6 @@ void movie_stop(void) {
                    mv.shown ? ms.upload_us / 1000.0 / mv.shown : 0.0, ms.upload_max_us / 1000.0);
     }
     memset(&ms, 0, sizeof(ms));
-    tex_data = NULL;
     mv.playing = 0;
     mv.paused = 0;
     close_container();
@@ -420,39 +415,23 @@ void movie_set_texture(unsigned int tex) {
     movie_texture = tex;
 }
 
-// Same plane layout vitaGL uses for YUV420P3 textures (gpu_alloc_planar_texture)
-static uint32_t po2(uint32_t v) { uint32_t p = 1; while (p < v) p <<= 1; return p; }
-
 static void upload(video_frame_t * f) {
     if (!movie_texture) return;
+    gl_queue_finish(); // GL used directly below, on the game thread
     SceUInt64 t0 = now_us();
     GLint previous = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
     glBindTexture(GL_TEXTURE_2D, movie_texture);
 
-    int w = mv.width, h = mv.height;
-    uint8_t * current = vglGetTexDataPointer(GL_TEXTURE_2D);
-    if (!tex_data || tex_data_name != movie_texture || current != tex_data || (w % 16) || (h % 2)) {
-        // First frame (or the game replaced the texture): allocate it
-        glCompressedTexImage2D(GL_TEXTURE_2D, 0, VGL_YUV420P_BT601, w, h, 0, w * h * 3 / 2, f->yuv);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        tex_data = (w % 16 || h % 2) ? NULL : vglGetTexDataPointer(GL_TEXTURE_2D);
-        tex_data_name = movie_texture;
-    } else {
-        // Later frames: copy the planes straight into the texture memory
-        uint32_t plane_w = po2(w) < 8 ? 8 : po2(w), plane_h = po2(h);
-        uint32_t half_plane_w = po2(w / 2) < 8 ? 8 : po2(w / 2), half_plane_h = po2(h / 2) < 8 ? 8 : po2(h / 2);
-        const uint8_t * y = f->yuv;
-        const uint8_t * u = y + w * h;
-        const uint8_t * v = u + (w / 2) * (h / 2);
-        uint8_t * dy = tex_data;
-        uint8_t * du = dy + plane_w * plane_h;
-        uint8_t * dv = du + half_plane_w * half_plane_h;
-        sceClibMemcpy(dy, y, w * h);
-        sceClibMemcpy(du, u, (w / 2) * (h / 2));
-        sceClibMemcpy(dv, v, (w / 2) * (h / 2));
-    }
+    // New texture memory for every frame. vitaGL renders a frame on the GPU
+    // after the CPU has moved on, so the previous movie frame may still be
+    // being sampled: writing over its memory in place showed up as torn,
+    // half-updated frames. Re-specifying the texture gives each frame its own
+    // buffer, and vitaGL frees the old one only once the GPU is done with it.
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, VGL_YUV420P_BT601, mv.width, mv.height, 0,
+                           mv.width * mv.height * 3 / 2, f->yuv);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glBindTexture(GL_TEXTURE_2D, (GLuint) previous);
     mv.shown++;
 

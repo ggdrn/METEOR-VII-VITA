@@ -18,3 +18,4 @@ data/
 *.exe
 *.dex
 libjni_ff7*
+__pycache__/

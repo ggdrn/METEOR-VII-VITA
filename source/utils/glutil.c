@@ -7,6 +7,7 @@
  * of the MIT license. See the LICENSE file for details.
  */
 
+#include "reimpl/gl_queue.h"
 #include "utils/glutil.h"
 
 #include "utils/utils.h"
@@ -50,7 +51,9 @@ void gl_init() {
 }
 
 void gl_swap() {
+    gl_queue_lock();
     vglSwapBuffers(GL_FALSE);
+    gl_queue_unlock();
     readpixels_invalidate();
 }
 

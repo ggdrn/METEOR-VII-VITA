@@ -28,6 +28,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_light.h"
+#include "ff7_light_core.h"
 #include "ff7_anim.h"
 
 #include "utils/logger.h"
@@ -41,11 +42,16 @@
 extern so_module so_mod;
 
 #define SYM_LIGHT       "_Z15func_0x0068dd1ev"
+#define SYM_LIGHT2      "_Z15func_0x0068de75v"
+#define FPU_GOT         0xf4c82c // GOT slot: pointer to the x87 state
+#define FPU_C0          0x5c     // x87 condition flags as the recompiler keeps them
+#define FPU_C2          0x5e
+#define FPU_C3          0x64
 #define SYM_CHECK_EVENT "_Z12_check_eventv"
 #define SYM_MK_ADDRESS  "mk_address"
 #define SELFTEST_CALLS  2000
 
-enum { EAX = 0, ECX = 1, EDX = 2, ESP = 4 };
+enum { EAX = 0, ECX = 1, EDX = 2, ESP = 4, EBP = 5 };
 
 typedef uint8_t * (* mk_address_fn)(uint32_t addr);
 typedef void (* check_event_fn)(void);
@@ -58,6 +64,11 @@ static uint32_t prologue;
 
 static int selftest_left = SELFTEST_CALLS, disabled;
 static unsigned long long calls;
+
+static so_hook light2_hook;
+static uint8_t * fpu;
+static int selftest2_left = SELFTEST_CALLS, disabled2;
+static unsigned long long calls2;
 
 // Reads n consecutive dwords from x86 memory (handles page crossings)
 static inline void xread(uint32_t addr, void * dst, uint32_t n_bytes) {
@@ -150,6 +161,170 @@ static void light_native(void) {
     calls++;
 }
 
+/*
+ * 0x68DE75: the same lighting with a per-channel scale and a saturation
+ * color (see light_core_vertex2). Profiling showed it, with its mk_address
+ * calls, at ~23% of the game thread in the busiest Sector 7 scenes.
+ * Checked offline against the recompiled code under emulation (output,
+ * EAX/ECX/EDX and x87 flags identical over 24,000 random vertices) and on the
+ * first calls in game against the original.
+ */
+typedef struct {
+    uint8_t out[4];
+    uint32_t edx;
+    int lt, eq;
+} light2_result;
+
+static int light2(uint32_t color, uint32_t scale_addr, uint32_t m_addr, uint32_t n_addr, uint32_t rgb_addr,
+                  uint32_t src_addr, uint32_t out_addr, light2_result * r) {
+    float scale[3], m[12], n[3], rgb[3];
+    xread(scale_addr, scale, sizeof(scale));
+    xread(m_addr, m, sizeof(m));
+    xread(n_addr, n, sizeof(n));
+    xread(rgb_addr, rgb, sizeof(rgb));
+    int last;
+    if (!light_core_vertex2(color, scale, m, n, rgb, *mk_address(src_addr + 3), r->out, &last, &r->lt, &r->eq))
+        return 0;
+    r->edx = ((last == LIGHT2_NORMAL ? m_addr : out_addr) & ~0xffu) | r->out[3];
+    return 1;
+}
+
+// Everything 0x68DE75 does but the ret; 0 (nothing done) for NaN inputs
+static int light2_apply(uint32_t color, uint32_t scale, uint32_t m, uint32_t n, uint32_t rgb, uint32_t src,
+                        uint32_t out) {
+    light2_result r;
+    if (!light2(color, scale, m, n, rgb, src, out, &r)) return 0;
+    for (int i = 0; i < 4; i++) *mk_address(out + i) = r.out[i];
+    regs[EAX] = out;
+    regs[ECX] = src;
+    regs[EDX] = r.edx;
+    fpu[FPU_C0] = r.lt;
+    fpu[FPU_C2] = 0;
+    fpu[FPU_C3] = r.eq;
+    check_event(); // 0x66CFE8's
+    check_event();
+    calls2++;
+    return 1;
+}
+
+static void light2_native(void) {
+    uint32_t esp = regs[ESP];
+    uint32_t color = stack_arg(esp, 1), scale = stack_arg(esp, 2), m = stack_arg(esp, 3), n = stack_arg(esp, 4);
+    uint32_t rgb = stack_arg(esp, 5), src = stack_arg(esp, 6), out = stack_arg(esp, 7);
+
+    light2_result r;
+    if (disabled2 || !light2(color, scale, m, n, rgb, src, out, &r)) { // NaN: the original
+        SO_CONTINUE(int, light2_hook);
+        return;
+    }
+
+    if (selftest2_left > 0) {
+        selftest2_left--;
+        SO_CONTINUE(int, light2_hook);
+        uint8_t orig[4];
+        xread(out, orig, 4);
+        if (memcmp(orig, r.out, 4) || regs[EAX] != out || regs[ECX] != src || regs[EDX] != r.edx
+            || fpu[FPU_C0] != r.lt || fpu[FPU_C2] != 0 || fpu[FPU_C3] != r.eq) {
+            l_error("ff7_light 0x68DE75 selftest MISMATCH: native %02x%02x%02x%02x edx %08x c0 %d c3 %d, original "
+                    "%02x%02x%02x%02x edx %08x c0 %d c3 %d - disabled", r.out[0], r.out[1], r.out[2], r.out[3],
+                    r.edx, r.lt, r.eq, orig[0], orig[1], orig[2], orig[3], regs[EDX], fpu[FPU_C0], fpu[FPU_C3]);
+            disabled2 = 1;
+        } else if (selftest2_left == 0) {
+            l_info("ff7_light 0x68DE75 selftest ok: %d vertices identical", SELFTEST_CALLS);
+        }
+        return;
+    }
+
+    light2_apply(color, scale, m, n, rgb, src, out);
+    regs[ESP] = esp + 4; // ret
+}
+
+/*
+ * The per-vertex loop of 0x68E92D that calls 0x68DE75 (0xD1D288-0xD1D3F6),
+ * where profiling put ~3/4 of that function's time. In x86 terms:
+ *
+ *     do {
+ *         0x68DE75(ctx->[0x5a8], &scale (ebp-0x34), ctx + 0xf8, *q, q + 4, q + 0x14, p + 0x10);
+ *         p += 0x20; q += 0x18;     // ebp-0x20, ebp-0x1c
+ *     } while (--count > 0);       // ebp-0x24; ctx = [ebp+0xc]
+ *
+ * leaving EAX = count, ECX = p, EDX = q. The loop head jumps here (stub) and
+ * the native loop returns to the loop test at 0xD1D3F8, which sets the x86
+ * flags and exits. Checked offline under emulation (scripts/emu/
+ * test_e92d_loop.py). While 0x68DE75 is still being self-tested, or for NaN
+ * inputs, each vertex goes through the x86 call instead.
+ */
+#define E92D_LOOP      0xd1d288
+#define E92D_LOOP_TEST 0xd1d3f8
+static const uint32_t e92d_loop_code[2] = { 0x38206968, 0xfa42f420 }; // ldr r0, [r5, #20]; subs r0, #32; bl mk_address
+uintptr_t ff7_e92d_loop_exit;
+static unsigned long long loop_vertices;
+
+static inline uint32_t xrd32(uint32_t addr) {
+    uint32_t v;
+    xread(addr, &v, 4);
+    return v;
+}
+
+static inline void xwr32(uint32_t addr, uint32_t v) {
+    if ((addr & 0xfff) <= 0xffc) memcpy(mk_address(addr), &v, 4);
+    else for (int i = 0; i < 4; i++) *mk_address(addr + i) = (uint8_t) (v >> (8 * i));
+}
+
+// The x86 call: push the 7 arguments, call (the hooked entry), pop them
+static void light2_call_x86(uint32_t color, uint32_t scale, uint32_t m, uint32_t n, uint32_t rgb, uint32_t src,
+                            uint32_t out) {
+    uint32_t esp = regs[ESP];
+    xwr32(esp - 0x04, out);
+    xwr32(esp - 0x08, src);
+    xwr32(esp - 0x0c, rgb);
+    xwr32(esp - 0x10, n);
+    xwr32(esp - 0x14, m);
+    xwr32(esp - 0x18, scale);
+    xwr32(esp - 0x1c, color);
+    regs[ESP] = esp - 0x20; // + return address
+    light2_native();        // ret: ESP += 4
+    regs[ESP] = esp;        // add esp, 0x1c
+}
+
+__attribute__((used, noinline)) void ff7_e92d_loop_native(void) {
+    uint32_t ebp = regs[EBP];
+    uint32_t ctx = xrd32(ebp + 0xc);
+    int32_t count = (int32_t) xrd32(ebp - 0x24);
+    uint32_t p = xrd32(ebp - 0x20), q = xrd32(ebp - 0x1c);
+    do {
+        uint32_t color = xrd32(ctx + 0x5a8), n = xrd32(q);
+        if (disabled2 || selftest2_left > 0
+            || !light2_apply(color, ebp - 0x34, ctx + 0xf8, n, q + 4, q + 0x14, p + 0x10))
+            light2_call_x86(color, ebp - 0x34, ctx + 0xf8, n, q + 4, q + 0x14, p + 0x10);
+        p += 0x20;
+        q += 0x18;
+        count--;
+        xwr32(ebp - 0x20, p);
+        xwr32(ebp - 0x1c, q);
+        xwr32(ebp - 0x24, (uint32_t) count);
+        loop_vertices++;
+    } while (count > 0);
+    regs[EAX] = (uint32_t) count;
+    regs[ECX] = p;
+    regs[EDX] = q;
+}
+
+// Called instead of the loop head; r4-r6 hold the recompiled code's state
+// (r4/r5 = x86 registers, r6 = OF for the loop test) and are preserved
+__attribute__((naked)) static void e92d_loop_stub(void) {
+    __asm__ volatile(
+        "push {r0-r12, lr}\n\t"
+        "bl ff7_e92d_loop_native\n\t"
+        "pop {r0-r12, lr}\n\t"
+        "push {r0, r1}\n\t"
+        "ldr r0, =ff7_e92d_loop_exit\n\t"
+        "ldr r0, [r0]\n\t"
+        "str r0, [sp, #4]\n\t"
+        "pop {r0, pc}\n\t"
+        ".ltorg\n\t");
+}
+
 void ff7_light_patch(void) {
     uintptr_t fn = so_symbol(&so_mod, SYM_LIGHT);
     check_event = (check_event_fn) so_symbol(&so_mod, SYM_CHECK_EVENT);
@@ -164,10 +339,31 @@ void ff7_light_patch(void) {
     light_hook = hook_addr(fn, (uintptr_t) &light_native);
     l_info("ff7_light: native vertex lighting installed (prologue %08x, selftest on %d vertices)",
            prologue, SELFTEST_CALLS);
+
+    uintptr_t fn2 = so_symbol(&so_mod, SYM_LIGHT2);
+    fpu = *(uint8_t **) (so_mod.text_base + FPU_GOT);
+    uintptr_t f = (uintptr_t) fpu;
+    if (!fn2 || f < so_mod.text_base || f >= so_mod.text_base + 0x1498e40) {
+        l_warn("ff7_light: unexpected .so layout, native 0x68DE75 disabled");
+        return;
+    }
+    light2_hook = hook_addr(fn2, (uintptr_t) &light2_native);
+    l_info("ff7_light: native scaled vertex lighting (0x68DE75) installed (selftest on %d vertices)", SELFTEST_CALLS);
+
+    uintptr_t loop = so_mod.text_base + E92D_LOOP;
+    if (memcmp((void *) loop, e92d_loop_code, sizeof(e92d_loop_code))
+        || *(uint32_t *) (so_mod.text_base + E92D_LOOP_TEST) != 0x38246960) { // ldr r0, [r4, #20]; subs r0, #36
+        l_warn("ff7_light: unexpected code at 0x68E92D's lighting loop, left alone");
+        return;
+    }
+    ff7_e92d_loop_exit = (so_mod.text_base + E92D_LOOP_TEST) | 1;
+    hook_addr(loop | 1, (uintptr_t) &e92d_loop_stub);
+    l_info("ff7_light: native lighting loop of 0x68E92D installed");
 }
 
 void ff7_light_report(double seconds) {
-    if (seconds <= 0 || !calls) return;
-    l_info("lit vertices/s: %.0f (native)", calls / seconds);
-    calls = 0;
+    if (seconds <= 0 || (!calls && !calls2)) return;
+    l_info("lit vertices/s: %.0f + %.0f scaled (native; %.0f from 0x68E92D's loop)", calls / seconds,
+           calls2 / seconds, loop_vertices / seconds);
+    calls = calls2 = loop_vertices = 0;
 }

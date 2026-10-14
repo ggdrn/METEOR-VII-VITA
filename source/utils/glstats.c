@@ -11,6 +11,7 @@
 #include "reimpl/pthr.h"
 #include "reimpl/readpixels.h"
 #include "reimpl/gl_variants.h"
+#include "reimpl/gl_queue.h"
 
 #include <unistd.h>
 #include <psp2/kernel/processmgr.h>
@@ -40,6 +41,10 @@ static struct {
 } last;
 
 static inline SceUInt64 now_us(void) { return sceKernelGetProcessTimeWide(); }
+
+void glstats_set_gl_thread(void) {
+    gl_thread = sceKernelGetThreadId();
+}
 
 void glDrawArrays_stat(GLenum mode, GLint first, GLsizei count) {
     if (gl_thread < 0) gl_thread = sceKernelGetThreadId();
@@ -199,7 +204,10 @@ void glstats_report(double seconds) {
     last.sleep_pct = st.sleep_us / 10000.0 / seconds;
     last.spin_pct = st.spin_us / 10000.0 / seconds;
     last.wait_pct = (st.wait_us + st.lock_us) / 10000.0 / seconds;
-    last.gl_pct = (st.draw_us + st.gl_misc_us + st.tex_us + st.readpixels_us) / 10000.0 / seconds;
+    // With the render thread, the GL timings above are its own: the game
+    // thread only pays for queuing and for the calls that wait on the queue
+    last.gl_pct = (gl_queue_active() ? gl_queue_take_game_us()
+                   : st.draw_us + st.gl_misc_us + st.tex_us + st.readpixels_us) / 10000.0 / seconds;
     st.sleeps = st.locks = st.waits = 0;
     st.sleep_req_us = st.sleep_us = st.lock_us = st.wait_us = st.spin_us = st.gl_misc_us = 0;
     l_info("gl/s: %.0f draws (%.1f ms), %.0f verts, %.1f clears, %.1f fbo binds | tex %.1f uploads (%.0f KB, %.1f ms) | "
