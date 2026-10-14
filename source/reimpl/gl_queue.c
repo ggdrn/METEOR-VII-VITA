@@ -21,8 +21,8 @@
  *    GL_NO_ERROR without waiting (errors of queued calls cannot be reported
  *    at that point anyway; the game only logs them).
  *  - Any other thread (the main thread composites the frame in
- *    onDrawFrame, then swaps) waits for the queue to drain and holds the
- *    execution lock around its GL calls.
+ *    onDrawFrame, then swaps) waits for the calls queued before it and holds
+ *    the execution lock around its GL calls.
  *
  * Creating DATA_PATH "glthread_off.txt" turns the render thread off.
  *
@@ -93,6 +93,7 @@ static uint32_t game_tls;
 static SceUID wake_sema = -1;
 static volatile int sleeping;
 static SceKernelLwMutexWork exec_lock;
+static volatile int lock_wanted; // threads waiting for exec_lock (not the render thread)
 
 // GL state the queue needs, as last set by any thread
 static struct {
@@ -107,7 +108,7 @@ static GLint unpack_alignment = 4;
 
 static struct {
     unsigned calls, draws, syncs;
-    unsigned long long bytes, game_us, sync_us, stall_us, busy_us;
+    unsigned long long bytes, game_us, sync_us, stall_us, busy_us, other_us;
     uint32_t peak;
 } st;
 
@@ -157,9 +158,12 @@ static int render_thread(SceSize args, void * argp) {
             sleeping = 0;
             continue;
         }
+        // Bounded batches: another thread waiting for the lock gets it
+        // between them even while the game thread keeps queuing
         SceUInt64 t0 = now_us();
         sceKernelLockLwMutex(&exec_lock, 1, NULL);
-        while (tail != head) {
+        uint32_t end = head;
+        while (tail != end) {
             __sync_synchronize(); // the record was written before head moved
             const hdr_t * h = (const hdr_t *) (ring + tail % QUEUE_SIZE);
             if (h->op == OP_CALL) exec_call((const call_t *) h);
@@ -170,6 +174,8 @@ static int render_thread(SceSize args, void * argp) {
         }
         sceKernelUnlockLwMutex(&exec_lock, 1);
         st.busy_us += now_us() - t0;
+        while (lock_wanted) // let them in before the next batch
+            ;
     }
     return 0;
 }
@@ -240,21 +246,30 @@ static inline uint32_t fbits(GLfloat f) {
     return u;
 }
 
+// Waits for the calls queued before this point. Another thread does not wait
+// for the queue to be empty: the game thread may keep queuing meanwhile (it
+// used to call GL concurrently with the main thread's composition and swap)
 void gl_queue_finish(void) {
-    if (!active || tail == head) return;
+    if (!active) return;
+    uint32_t until = head;
+    if ((int32_t) (tail - until) >= 0) return;
     SceUInt64 t0 = now_us();
-    while (tail != head)
+    while ((int32_t) (tail - until) < 0)
         ;
     if (tls_reg() == game_tls) {
         st.syncs++;
         st.sync_us += now_us() - t0;
+    } else {
+        st.other_us += now_us() - t0;
     }
 }
 
 void gl_queue_lock(void) {
     if (!active) return;
     gl_queue_finish();
+    __sync_fetch_and_add(&lock_wanted, 1);
     sceKernelLockLwMutex(&exec_lock, 1, NULL);
+    __sync_fetch_and_sub(&lock_wanted, 1);
 }
 
 void gl_queue_unlock(void) {
@@ -323,11 +338,12 @@ unsigned long long gl_queue_take_game_us(void) {
 void gl_queue_report(double seconds) {
     if (!active || seconds <= 0) return;
     l_info("render thread: busy %.0f%% | %.0f calls/s, %.0f draws/s, %.0f KB/s copied | "
-           "game thread waited: %.0f syncs/s %.1f ms/s, queue full %.1f ms/s | peak queue %u KB",
+           "game thread waited: %.0f syncs/s %.1f ms/s, queue full %.1f ms/s | main thread waited %.1f ms/s | peak queue %u KB",
            st.busy_us / 10000.0 / seconds, st.calls / seconds, st.draws / seconds, st.bytes / 1024.0 / seconds,
-           st.syncs / seconds, st.sync_us / 1000.0 / seconds, st.stall_us / 1000.0 / seconds, st.peak / 1024);
+           st.syncs / seconds, st.sync_us / 1000.0 / seconds, st.stall_us / 1000.0 / seconds,
+           st.other_us / 1000.0 / seconds, st.peak / 1024);
     st.calls = st.draws = st.syncs = 0;
-    st.bytes = st.sync_us = st.stall_us = st.busy_us = 0;
+    st.bytes = st.sync_us = st.stall_us = st.busy_us = st.other_us = 0;
     st.peak = 0;
 }
 

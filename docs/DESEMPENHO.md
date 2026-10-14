@@ -129,3 +129,30 @@ enquanto o novo era escrito → quadros rasgados / meio atualizados. Agora cada
 quadro recebe memória nova (`glCompressedTexImage2D`) e o vitaGL só libera a
 antiga quando a GPU termina de usá-la. O custo é o mesmo (~2 ms por quadro,
 15 quadros/s).
+
+## Resultado da v0.00.38
+
+No mesmo trecho pesado do Setor 7 (~190 draws e ~16.400 vértices por quadro):
+
+| Versão | FPS | Trabalho da thread do jogo por quadro |
+|---|---|---|
+| v0.00.36 | 17,8 | ~52 ms + ~3 ms de GL |
+| v0.00.38 | 19,6 | ~48,5 ms + ~1 ms de GL |
+
+A thread de render ocupa ~9% de um núcleo e a thread do jogo não esperou
+nenhuma vez por ela. O que sobra é o código recompilado do jogo (95% da
+thread). Os travamentos de 660–820 ms são trocas de tela de campo: LZSS,
+texturas e leitura do OBB somam só ~60 ms; o resto é código do jogo
+carregando a área.
+
+Corrigido na v0.00.39: um swap de 481 ms. A thread principal esperava a fila
+ficar vazia enquanto a thread do jogo continuava enfileirando; agora espera
+só o que foi enfileirado antes dela.
+
+## Perfil sem build especial (v0.00.39)
+
+Criar `ux0:data/ffvii-vita/profile_on.txt` liga o profiler de picos: ele só
+amostra quadros lentos e trechos em que a thread do jogo não fica ociosa por
+50 ms. As amostras vão para `ux0:data/ffvii-vita/profile.bin`;
+`scripts/profile-report.py profile.bin libjni_ff7.so` gera o ranking de
+funções. O jogo fica um pouco mais lento enquanto o profiler está ligado.

@@ -24,6 +24,7 @@
 #include "reimpl/gl_queue.h"
 #include "reimpl/obb_fd.h"
 #include "utils/logger.h"
+#include "utils/utils.h"
 
 #include <malloc.h>
 #include <stdbool.h>
@@ -169,10 +170,19 @@ int main() {
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
     if (wd >= 0) cpu_register_thread("watchdog", wd);
 
+    // ux0:data/ffvii-vita/profile_on.txt: spike profiler without a special build
+    int profiling = 0;
 #if defined(ENABLE_PROFILER)
     profiler_start(NULL, 0);
+    profiling = 1;
 #elif defined(ENABLE_SPIKE_PROFILER)
     profiler_start(&frame_start_us, 100000);
+    profiling = 1;
+#else
+    if (file_exists(DATA_PATH "profile_on.txt")) {
+        profiler_start(&frame_start_us, 100000);
+        profiling = 1;
+    }
 #endif
 
     log_memory();
@@ -235,9 +245,7 @@ int main() {
             glstats_report((now - heartbeat_us) / 1000000.0);
             cpu_report((now - heartbeat_us) / 1000000.0);
             perf_report(frames * 1000000.0 / (double) (now - heartbeat_us), cpu_last_pct("game"));
-#if defined(ENABLE_PROFILER) || defined(ENABLE_SPIKE_PROFILER)
-            profiler_report();
-#endif
+            if (profiling) profiler_report();
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
             ff7_lzss_report((now - heartbeat_us) / 1000000.0);
