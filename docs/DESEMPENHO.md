@@ -156,3 +156,31 @@ amostra quadros lentos e trechos em que a thread do jogo não fica ociosa por
 50 ms. As amostras vão para `ux0:data/ffvii-vita/profile.bin`;
 `scripts/profile-report.py profile.bin libjni_ff7.so` gera o ranking de
 funções. O jogo fica um pouco mais lento enquanto o profiler está ligado.
+
+## Perfil do Setor 7 (v0.00.39) e iluminação escalada nativa (v0.00.40)
+
+O profiler só dispara quando o código pula para outra página de memória, então
+funções pequenas e muito chamadas (`mk_address`, entradas PLT) acumulam as
+amostras de quem as chama. Reatribuindo essas amostras à função chamadora (LR),
+a thread do jogo ficou assim:
+
+| Função | % | O que é |
+|---|---|---|
+| `func_0x0068de75` | 23% | iluminação de vértice com escala por canal (x87, 116 `mk_address`) |
+| `func_0x0068e92d` | 8% | chama a anterior duas vezes |
+| `VIDEO_enableTex` + `VIDEO_drawBuffers` | 13% | renderizador do port, por draw (inclui gravar na fila GL) |
+| `C_006A8002` + `glVertex3f` + `fake_glColor4ub` + `C_0066CE40` | 13,5% | triângulos transformados um vértice por vez |
+
+`0x68DE75(cor, escala[3], m, n, rgb[3], src, out)` é a `light_vertex`
+(`0x68DD1E`) com duas diferenças: cada canal é multiplicado por `escala[k]`, e
+um canal saturado (≥ 255) recebe o byte `k` de `cor` em vez de 255. No caminho
+do ambiente o valor fica em double, sem arredondar nem saturar.
+
+A semântica foi levantada e conferida com o código recompilado rodando num
+emulador ARM (`scripts/emu/`, Unicorn): saída, EAX/ECX/EDX e flags C0/C2/C3
+idênticos em dezenas de milhares de vértices aleatórios, incluindo infinitos,
+denormais, igualdades exatas e endereços desalinhados. Casos com NaN numa
+comparação ficam com a função original. No jogo, os primeiros 2000 vértices
+ainda são conferidos com o original (`ff7_light 0x68DE75 selftest ok`).
+
+`scripts/emu/test_light2.py libjni_ff7.so` repete a comparação no PC.

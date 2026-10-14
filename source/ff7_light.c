@@ -28,6 +28,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_light.h"
+#include "ff7_light_core.h"
 #include "ff7_anim.h"
 
 #include "utils/logger.h"
@@ -41,6 +42,11 @@
 extern so_module so_mod;
 
 #define SYM_LIGHT       "_Z15func_0x0068dd1ev"
+#define SYM_LIGHT2      "_Z15func_0x0068de75v"
+#define FPU_GOT         0xf4c82c // GOT slot: pointer to the x87 state
+#define FPU_C0          0x5c     // x87 condition flags as the recompiler keeps them
+#define FPU_C2          0x5e
+#define FPU_C3          0x64
 #define SYM_CHECK_EVENT "_Z12_check_eventv"
 #define SYM_MK_ADDRESS  "mk_address"
 #define SELFTEST_CALLS  2000
@@ -58,6 +64,11 @@ static uint32_t prologue;
 
 static int selftest_left = SELFTEST_CALLS, disabled;
 static unsigned long long calls;
+
+static so_hook light2_hook;
+static uint8_t * fpu;
+static int selftest2_left = SELFTEST_CALLS, disabled2;
+static unsigned long long calls2;
 
 // Reads n consecutive dwords from x86 memory (handles page crossings)
 static inline void xread(uint32_t addr, void * dst, uint32_t n_bytes) {
@@ -150,6 +161,75 @@ static void light_native(void) {
     calls++;
 }
 
+/*
+ * 0x68DE75: the same lighting with a per-channel scale and a saturation
+ * color (see light_core_vertex2). Profiling showed it, with its mk_address
+ * calls, at ~23% of the game thread in the busiest Sector 7 scenes.
+ * Checked offline against the recompiled code under emulation (output,
+ * EAX/ECX/EDX and x87 flags identical over 24,000 random vertices) and on the
+ * first calls in game against the original.
+ */
+typedef struct {
+    uint8_t out[4];
+    uint32_t edx;
+    int lt, eq;
+} light2_result;
+
+static int light2(uint32_t color, uint32_t scale_addr, uint32_t m_addr, uint32_t n_addr, uint32_t rgb_addr,
+                  uint32_t src_addr, uint32_t out_addr, light2_result * r) {
+    float scale[3], m[12], n[3], rgb[3];
+    xread(scale_addr, scale, sizeof(scale));
+    xread(m_addr, m, sizeof(m));
+    xread(n_addr, n, sizeof(n));
+    xread(rgb_addr, rgb, sizeof(rgb));
+    int last;
+    if (!light_core_vertex2(color, scale, m, n, rgb, *mk_address(src_addr + 3), r->out, &last, &r->lt, &r->eq))
+        return 0;
+    r->edx = ((last == LIGHT2_NORMAL ? m_addr : out_addr) & ~0xffu) | r->out[3];
+    return 1;
+}
+
+static void light2_native(void) {
+    uint32_t esp = regs[ESP];
+    uint32_t color = stack_arg(esp, 1), scale = stack_arg(esp, 2), m = stack_arg(esp, 3), n = stack_arg(esp, 4);
+    uint32_t rgb = stack_arg(esp, 5), src = stack_arg(esp, 6), out = stack_arg(esp, 7);
+
+    light2_result r;
+    if (disabled2 || !light2(color, scale, m, n, rgb, src, out, &r)) { // NaN: the original
+        SO_CONTINUE(int, light2_hook);
+        return;
+    }
+
+    if (selftest2_left > 0) {
+        selftest2_left--;
+        SO_CONTINUE(int, light2_hook);
+        uint8_t orig[4];
+        xread(out, orig, 4);
+        if (memcmp(orig, r.out, 4) || regs[EAX] != out || regs[ECX] != src || regs[EDX] != r.edx
+            || fpu[FPU_C0] != r.lt || fpu[FPU_C2] != 0 || fpu[FPU_C3] != r.eq) {
+            l_error("ff7_light 0x68DE75 selftest MISMATCH: native %02x%02x%02x%02x edx %08x c0 %d c3 %d, original "
+                    "%02x%02x%02x%02x edx %08x c0 %d c3 %d - disabled", r.out[0], r.out[1], r.out[2], r.out[3],
+                    r.edx, r.lt, r.eq, orig[0], orig[1], orig[2], orig[3], regs[EDX], fpu[FPU_C0], fpu[FPU_C3]);
+            disabled2 = 1;
+        } else if (selftest2_left == 0) {
+            l_info("ff7_light 0x68DE75 selftest ok: %d vertices identical", SELFTEST_CALLS);
+        }
+        return;
+    }
+
+    for (int i = 0; i < 4; i++) *mk_address(out + i) = r.out[i];
+    regs[EAX] = out;
+    regs[ECX] = src;
+    regs[EDX] = r.edx;
+    fpu[FPU_C0] = r.lt;
+    fpu[FPU_C2] = 0;
+    fpu[FPU_C3] = r.eq;
+    check_event(); // 0x66CFE8's
+    check_event();
+    regs[ESP] = esp + 4; // ret
+    calls2++;
+}
+
 void ff7_light_patch(void) {
     uintptr_t fn = so_symbol(&so_mod, SYM_LIGHT);
     check_event = (check_event_fn) so_symbol(&so_mod, SYM_CHECK_EVENT);
@@ -164,10 +244,20 @@ void ff7_light_patch(void) {
     light_hook = hook_addr(fn, (uintptr_t) &light_native);
     l_info("ff7_light: native vertex lighting installed (prologue %08x, selftest on %d vertices)",
            prologue, SELFTEST_CALLS);
+
+    uintptr_t fn2 = so_symbol(&so_mod, SYM_LIGHT2);
+    fpu = *(uint8_t **) (so_mod.text_base + FPU_GOT);
+    uintptr_t f = (uintptr_t) fpu;
+    if (!fn2 || f < so_mod.text_base || f >= so_mod.text_base + 0x1498e40) {
+        l_warn("ff7_light: unexpected .so layout, native 0x68DE75 disabled");
+        return;
+    }
+    light2_hook = hook_addr(fn2, (uintptr_t) &light2_native);
+    l_info("ff7_light: native scaled vertex lighting (0x68DE75) installed (selftest on %d vertices)", SELFTEST_CALLS);
 }
 
 void ff7_light_report(double seconds) {
-    if (seconds <= 0 || !calls) return;
-    l_info("lit vertices/s: %.0f (native)", calls / seconds);
-    calls = 0;
+    if (seconds <= 0 || (!calls && !calls2)) return;
+    l_info("lit vertices/s: %.0f + %.0f scaled (native)", calls / seconds, calls2 / seconds);
+    calls = calls2 = 0;
 }
