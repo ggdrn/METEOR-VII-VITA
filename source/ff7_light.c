@@ -51,7 +51,7 @@ extern so_module so_mod;
 #define SYM_MK_ADDRESS  "mk_address"
 #define SELFTEST_CALLS  2000
 
-enum { EAX = 0, ECX = 1, EDX = 2, ESP = 4 };
+enum { EAX = 0, ECX = 1, EDX = 2, ESP = 4, EBP = 5 };
 
 typedef uint8_t * (* mk_address_fn)(uint32_t addr);
 typedef void (* check_event_fn)(void);
@@ -189,6 +189,24 @@ static int light2(uint32_t color, uint32_t scale_addr, uint32_t m_addr, uint32_t
     return 1;
 }
 
+// Everything 0x68DE75 does but the ret; 0 (nothing done) for NaN inputs
+static int light2_apply(uint32_t color, uint32_t scale, uint32_t m, uint32_t n, uint32_t rgb, uint32_t src,
+                        uint32_t out) {
+    light2_result r;
+    if (!light2(color, scale, m, n, rgb, src, out, &r)) return 0;
+    for (int i = 0; i < 4; i++) *mk_address(out + i) = r.out[i];
+    regs[EAX] = out;
+    regs[ECX] = src;
+    regs[EDX] = r.edx;
+    fpu[FPU_C0] = r.lt;
+    fpu[FPU_C2] = 0;
+    fpu[FPU_C3] = r.eq;
+    check_event(); // 0x66CFE8's
+    check_event();
+    calls2++;
+    return 1;
+}
+
 static void light2_native(void) {
     uint32_t esp = regs[ESP];
     uint32_t color = stack_arg(esp, 1), scale = stack_arg(esp, 2), m = stack_arg(esp, 3), n = stack_arg(esp, 4);
@@ -217,17 +235,94 @@ static void light2_native(void) {
         return;
     }
 
-    for (int i = 0; i < 4; i++) *mk_address(out + i) = r.out[i];
-    regs[EAX] = out;
-    regs[ECX] = src;
-    regs[EDX] = r.edx;
-    fpu[FPU_C0] = r.lt;
-    fpu[FPU_C2] = 0;
-    fpu[FPU_C3] = r.eq;
-    check_event(); // 0x66CFE8's
-    check_event();
+    light2_apply(color, scale, m, n, rgb, src, out);
     regs[ESP] = esp + 4; // ret
-    calls2++;
+}
+
+/*
+ * The per-vertex loop of 0x68E92D that calls 0x68DE75 (0xD1D288-0xD1D3F6),
+ * where profiling put ~3/4 of that function's time. In x86 terms:
+ *
+ *     do {
+ *         0x68DE75(ctx->[0x5a8], &scale (ebp-0x34), ctx + 0xf8, *q, q + 4, q + 0x14, p + 0x10);
+ *         p += 0x20; q += 0x18;     // ebp-0x20, ebp-0x1c
+ *     } while (--count > 0);       // ebp-0x24; ctx = [ebp+0xc]
+ *
+ * leaving EAX = count, ECX = p, EDX = q. The loop head jumps here (stub) and
+ * the native loop returns to the loop test at 0xD1D3F8, which sets the x86
+ * flags and exits. Checked offline under emulation (scripts/emu/
+ * test_e92d_loop.py). While 0x68DE75 is still being self-tested, or for NaN
+ * inputs, each vertex goes through the x86 call instead.
+ */
+#define E92D_LOOP      0xd1d288
+#define E92D_LOOP_TEST 0xd1d3f8
+static const uint32_t e92d_loop_code[2] = { 0x38206968, 0xfa42f420 }; // ldr r0, [r5, #20]; subs r0, #32; bl mk_address
+uintptr_t ff7_e92d_loop_exit;
+static unsigned long long loop_vertices;
+
+static inline uint32_t xrd32(uint32_t addr) {
+    uint32_t v;
+    xread(addr, &v, 4);
+    return v;
+}
+
+static inline void xwr32(uint32_t addr, uint32_t v) {
+    if ((addr & 0xfff) <= 0xffc) memcpy(mk_address(addr), &v, 4);
+    else for (int i = 0; i < 4; i++) *mk_address(addr + i) = (uint8_t) (v >> (8 * i));
+}
+
+// The x86 call: push the 7 arguments, call (the hooked entry), pop them
+static void light2_call_x86(uint32_t color, uint32_t scale, uint32_t m, uint32_t n, uint32_t rgb, uint32_t src,
+                            uint32_t out) {
+    uint32_t esp = regs[ESP];
+    xwr32(esp - 0x04, out);
+    xwr32(esp - 0x08, src);
+    xwr32(esp - 0x0c, rgb);
+    xwr32(esp - 0x10, n);
+    xwr32(esp - 0x14, m);
+    xwr32(esp - 0x18, scale);
+    xwr32(esp - 0x1c, color);
+    regs[ESP] = esp - 0x20; // + return address
+    light2_native();        // ret: ESP += 4
+    regs[ESP] = esp;        // add esp, 0x1c
+}
+
+__attribute__((used, noinline)) void ff7_e92d_loop_native(void) {
+    uint32_t ebp = regs[EBP];
+    uint32_t ctx = xrd32(ebp + 0xc);
+    int32_t count = (int32_t) xrd32(ebp - 0x24);
+    uint32_t p = xrd32(ebp - 0x20), q = xrd32(ebp - 0x1c);
+    do {
+        uint32_t color = xrd32(ctx + 0x5a8), n = xrd32(q);
+        if (disabled2 || selftest2_left > 0
+            || !light2_apply(color, ebp - 0x34, ctx + 0xf8, n, q + 4, q + 0x14, p + 0x10))
+            light2_call_x86(color, ebp - 0x34, ctx + 0xf8, n, q + 4, q + 0x14, p + 0x10);
+        p += 0x20;
+        q += 0x18;
+        count--;
+        xwr32(ebp - 0x20, p);
+        xwr32(ebp - 0x1c, q);
+        xwr32(ebp - 0x24, (uint32_t) count);
+        loop_vertices++;
+    } while (count > 0);
+    regs[EAX] = (uint32_t) count;
+    regs[ECX] = p;
+    regs[EDX] = q;
+}
+
+// Called instead of the loop head; r4-r6 hold the recompiled code's state
+// (r4/r5 = x86 registers, r6 = OF for the loop test) and are preserved
+__attribute__((naked)) static void e92d_loop_stub(void) {
+    __asm__ volatile(
+        "push {r0-r12, lr}\n\t"
+        "bl ff7_e92d_loop_native\n\t"
+        "pop {r0-r12, lr}\n\t"
+        "push {r0, r1}\n\t"
+        "ldr r0, =ff7_e92d_loop_exit\n\t"
+        "ldr r0, [r0]\n\t"
+        "str r0, [sp, #4]\n\t"
+        "pop {r0, pc}\n\t"
+        ".ltorg\n\t");
 }
 
 void ff7_light_patch(void) {
@@ -254,10 +349,21 @@ void ff7_light_patch(void) {
     }
     light2_hook = hook_addr(fn2, (uintptr_t) &light2_native);
     l_info("ff7_light: native scaled vertex lighting (0x68DE75) installed (selftest on %d vertices)", SELFTEST_CALLS);
+
+    uintptr_t loop = so_mod.text_base + E92D_LOOP;
+    if (memcmp((void *) loop, e92d_loop_code, sizeof(e92d_loop_code))
+        || *(uint32_t *) (so_mod.text_base + E92D_LOOP_TEST) != 0x38246960) { // ldr r0, [r4, #20]; subs r0, #36
+        l_warn("ff7_light: unexpected code at 0x68E92D's lighting loop, left alone");
+        return;
+    }
+    ff7_e92d_loop_exit = (so_mod.text_base + E92D_LOOP_TEST) | 1;
+    hook_addr(loop | 1, (uintptr_t) &e92d_loop_stub);
+    l_info("ff7_light: native lighting loop of 0x68E92D installed");
 }
 
 void ff7_light_report(double seconds) {
     if (seconds <= 0 || (!calls && !calls2)) return;
-    l_info("lit vertices/s: %.0f + %.0f scaled (native)", calls / seconds, calls2 / seconds);
-    calls = calls2 = 0;
+    l_info("lit vertices/s: %.0f + %.0f scaled (native; %.0f from 0x68E92D's loop)", calls / seconds,
+           calls2 / seconds, loop_vertices / seconds);
+    calls = calls2 = loop_vertices = 0;
 }

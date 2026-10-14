@@ -184,3 +184,30 @@ comparação ficam com a função original. No jogo, os primeiros 2000 vértices
 ainda são conferidos com o original (`ff7_light 0x68DE75 selftest ok`).
 
 `scripts/emu/test_light2.py libjni_ff7.so` repete a comparação no PC.
+
+## v0.00.41: os três próximos itens do perfil
+
+**Renderizador de triângulos (`C_006A8002`, ~13,5%)** — `source/ff7_tri.c`.
+É C++ dos porters: por vértice chama a transformação 4×4, `fake_glColor4ub` e
+`glVertex3f` da emulação de GL 1.x, cada uma recarregando seus globais pelo
+GOT. A versão nativa faz o mesmo em linha, entre os `glBegin`/`glEnd`
+originais. Conferida no emulador (`scripts/emu/test_tri.py`: `VERTICES`,
+`pCurVertex` e cor atual idênticos, inclusive buffer cheio, w ≤ 0, infinitos)
+e nas 300 primeiras chamadas no jogo contra o original (`ff7_tri selftest`).
+
+**Renderizador do port por desenho (~13%)** — `source/reimpl/gl_queue.c`.
+`VIDEO_enableTex` + `VIDEO_drawBuffers` fazem ~12 chamadas GL por desenho. O
+custo estava na fila: cada chamada acordava a thread de render (uma chamada
+de kernel) e cada desenho lia o relógio duas vezes. Agora só os desenhos
+acordam a thread de render (ela também espera ~10 µs antes de dormir), o
+relógio saiu do caminho do desenho, e chamadas que não mudam nada não entram
+na fila: `glEnableVertexAttribArray` de um array já ativo (o jogo nunca
+desativa) e `glUseProgram`/`glUniform1i` com o valor já em vigor. A linha
+`render thread:` mostra as chamadas puladas e quantas vezes a thread acordou.
+
+**`0x68E92D` (~8%)** — `source/ff7_light.c`. 74% das amostras dessa função
+caem num laço por vértice que chama a `0x68DE75`. A cabeça do laço desvia para
+uma versão nativa que roda todas as iterações e volta ao teste do laço
+original, com o mesmo estado x86 (contagem, ponteiros, EAX/ECX/EDX, flags do
+FPU). Conferida no emulador (`scripts/emu/test_e92d_loop.py`). Enquanto a
+`0x68DE75` está em autoteste, o laço passa pela chamada x86 normal.

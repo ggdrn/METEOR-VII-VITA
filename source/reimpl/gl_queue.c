@@ -54,6 +54,9 @@ void glTexParameteri_oes(GLenum target, GLenum pname, GLint param);
 #define MAX_PAYLOAD (2u << 20)  // larger data: run the call directly instead
 #define MAX_ARGS    9
 #define MAX_ATTRIBS 16
+#define SPIN_BEFORE_SLEEP 2000  // ~10 us on cores 1-2 (mostly idle)
+#define CACHE_PROGS 16          // programs / uniform locations tracked for redundant calls
+#define CACHE_LOCS  16
 
 enum { OP_WRAP = 1, OP_CALL, OP_DRAW };
 
@@ -107,7 +110,7 @@ static struct {
 static GLint unpack_alignment = 4;
 
 static struct {
-    unsigned calls, draws, syncs;
+    unsigned calls, draws, syncs, wakes, skipped;
     unsigned long long bytes, game_us, sync_us, stall_us, busy_us, other_us;
     uint32_t peak;
 } st;
@@ -152,6 +155,10 @@ static void exec_draw(const draw_t * d) {
 static int render_thread(SceSize args, void * argp) {
     while (1) {
         if (tail == head) {
+            // Short spin first: the next draw is often just behind
+            for (int i = 0; i < SPIN_BEFORE_SLEEP && tail == head; i++)
+                __asm__ volatile("yield" ::: "memory");
+            if (tail != head) continue;
             sleeping = 1;
             __sync_synchronize();
             if (tail == head) sceKernelWaitSema(wake_sema, 1, NULL);
@@ -183,10 +190,20 @@ static int render_thread(SceSize args, void * argp) {
 /*
  * Queue (written by the game thread only)
  */
+// Wakes the render thread if it is asleep (any thread)
+static inline void wake(void) {
+    __sync_synchronize(); // head (or the waiter's state) before reading `sleeping`
+    if (sleeping && __sync_bool_compare_and_swap(&sleeping, 1, 0)) {
+        st.wakes++;
+        sceKernelSignalSema(wake_sema, 1);
+    }
+}
+
 static void * reserve(uint32_t size) {
     uint32_t off = head % QUEUE_SIZE;
     uint32_t waste = off + size > QUEUE_SIZE ? QUEUE_SIZE - off : 0;
     if (head + waste + size - tail > QUEUE_SIZE) {
+        wake();
         SceUInt64 t0 = now_us();
         while (head + waste + size - tail > QUEUE_SIZE)
             ;
@@ -203,16 +220,14 @@ static void * reserve(uint32_t size) {
     return ring + head % QUEUE_SIZE;
 }
 
-static void publish(uint32_t size) {
+// Only draws wake the render thread: state changes wait for the next draw
+// (or for whoever waits on the queue), which saves a kernel call per GL call
+static void publish(uint32_t size, int wake_up) {
     __sync_synchronize();
     head += size;
     uint32_t used = head - tail;
     if (used > st.peak) st.peak = used;
-    __sync_synchronize();
-    if (sleeping) {
-        sleeping = 0;
-        sceKernelSignalSema(wake_sema, 1);
-    }
+    if (wake_up) wake();
 }
 
 // Queues fn(args...); if `data` is set, `len` bytes are copied after the
@@ -232,7 +247,7 @@ static void queue_call(void * fn, int n, const uint32_t * args, const void * dat
         st.bytes += len;
     }
     st.calls++;
-    publish(size);
+    publish(size, 0);
 }
 
 #define QUEUE(fn, ...) do {                                         \
@@ -253,6 +268,7 @@ void gl_queue_finish(void) {
     if (!active) return;
     uint32_t until = head;
     if ((int32_t) (tail - until) >= 0) return;
+    wake();
     SceUInt64 t0 = now_us();
     while ((int32_t) (tail - until) < 0)
         ;
@@ -337,12 +353,13 @@ unsigned long long gl_queue_take_game_us(void) {
 
 void gl_queue_report(double seconds) {
     if (!active || seconds <= 0) return;
-    l_info("render thread: busy %.0f%% | %.0f calls/s, %.0f draws/s, %.0f KB/s copied | "
+    l_info("render thread: busy %.0f%% | %.0f calls/s (%.0f redundant skipped), %.0f draws/s, %.0f wakes/s, %.0f KB/s copied | "
            "game thread waited: %.0f syncs/s %.1f ms/s, queue full %.1f ms/s | main thread waited %.1f ms/s | peak queue %u KB",
-           st.busy_us / 10000.0 / seconds, st.calls / seconds, st.draws / seconds, st.bytes / 1024.0 / seconds,
+           st.busy_us / 10000.0 / seconds, st.calls / seconds, st.skipped / seconds, st.draws / seconds,
+           st.wakes / seconds, st.bytes / 1024.0 / seconds,
            st.syncs / seconds, st.sync_us / 1000.0 / seconds, st.stall_us / 1000.0 / seconds,
            st.other_us / 1000.0 / seconds, st.peak / 1024);
-    st.calls = st.draws = st.syncs = 0;
+    st.calls = st.draws = st.syncs = st.wakes = st.skipped = 0;
     st.bytes = st.sync_us = st.stall_us = st.busy_us = st.other_us = 0;
     st.peak = 0;
 }
@@ -374,8 +391,6 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         DIRECT((active ? apply_attribs() : (void) 0, glDrawArrays_stat(mode, first, count)));
         return;
     }
-    SceUInt64 t0 = now_us();
-
     // Bytes each enabled array reads for vertices first .. first + count - 1
     int n = 0;
     uint8_t idx[MAX_ATTRIBS];
@@ -434,8 +449,7 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     }
     st.draws++;
     st.bytes += data;
-    publish(size);
-    st.game_us += now_us() - t0;
+    publish(size, 1);
 }
 
 void gq_glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
@@ -452,6 +466,11 @@ void gq_glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean n
 }
 
 void gq_glEnableVertexAttribArray(GLuint index) {
+    // The game never disables an array (glDisableVertexAttribArray is not imported)
+    if (on_game() && index < MAX_ATTRIBS && attribs[index].enabled) {
+        st.skipped++;
+        return;
+    }
     if (index < MAX_ATTRIBS) attribs[index].enabled = 1;
     if (on_game()) QUEUE(glEnableVertexAttribArray, index);
     else DIRECT(glEnableVertexAttribArray(index));
@@ -535,7 +554,6 @@ QUEUED(glBlendFunc, glBlendFunc, (GLenum s, GLenum d), s, d)
 QUEUED(glClear, glClear_stat, (GLbitfield mask), mask)
 QUEUED(glColorMask, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a), r, g, b, a)
 QUEUED(glCullFace, glCullFace, (GLenum mode), mode)
-QUEUED(glDeleteProgram, glDeleteProgram, (GLuint program), program)
 QUEUED(glDeleteShader, glDeleteShader, (GLuint shader), shader)
 QUEUED(glDepthFunc, glDepthFunc, (GLenum func), func)
 QUEUED(glDepthMask, glDepthMask, (GLboolean flag), flag)
@@ -550,9 +568,56 @@ QUEUED(glFrontFace, glFrontFace, (GLenum mode), mode)
 QUEUED(glRenderbufferStorage, glRenderbufferStorage, (GLenum target, GLenum format, GLsizei w, GLsizei h),
        target, format, w, h)
 QUEUED(glTexParameteri, glTexParameteri_oes, (GLenum target, GLenum pname, GLint param), target, pname, param)
-QUEUED(glUniform1i, glUniform1i_variants, (GLint location, GLint v0), location, v0)
-QUEUED(glUseProgram, glUseProgram_variants, (GLuint program), program)
 QUEUED(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h), x, y, w, h)
+
+/*
+ * glUseProgram / glUniform1i with the values already set are skipped on the
+ * game thread (VIDEO_enableTex sets both before every draw). The cache only
+ * follows the game thread: a call from another thread empties it.
+ */
+static int cur_prog = -1;
+static int32_t uniform_val[CACHE_PROGS][CACHE_LOCS];
+static uint8_t uniform_set[CACHE_PROGS][CACHE_LOCS];
+
+static void forget_program(GLuint program) {
+    if (program < CACHE_PROGS) memset(uniform_set[program], 0, sizeof(uniform_set[program]));
+}
+
+static void forget_all(void) {
+    cur_prog = -1;
+    memset(uniform_set, 0, sizeof(uniform_set));
+}
+
+void gq_glUseProgram(GLuint program) {
+    if (!on_game()) {
+        forget_all();
+        DIRECT(glUseProgram_variants(program));
+        return;
+    }
+    if ((int) program == cur_prog) {
+        st.skipped++;
+        return;
+    }
+    cur_prog = (int) program;
+    QUEUE(glUseProgram_variants, program);
+}
+
+void gq_glUniform1i(GLint location, GLint v0) {
+    if (!on_game()) {
+        forget_all();
+        DIRECT(glUniform1i_variants(location, v0));
+        return;
+    }
+    if (cur_prog >= 0 && cur_prog < CACHE_PROGS && location >= 0 && location < CACHE_LOCS) {
+        if (uniform_set[cur_prog][location] && uniform_val[cur_prog][location] == v0) {
+            st.skipped++;
+            return;
+        }
+        uniform_set[cur_prog][location] = 1;
+        uniform_val[cur_prog][location] = v0;
+    }
+    QUEUE(glUniform1i_variants, location, v0);
+}
 
 void gq_glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     if (on_game()) QUEUE(glClearColor, fbits(r), fbits(g), fbits(b), fbits(a));
@@ -631,7 +696,15 @@ GLint gq_glGetUniformLocation(GLuint program, const GLchar * name) {
     DIRECT_RET(GLint, glGetUniformLocation_variants(program, name));
 }
 void gq_glLinkProgram(GLuint program) {
+    forget_program(program); // uniforms are reset by linking
     DIRECT(glLinkProgram(program));
+}
+
+void gq_glDeleteProgram(GLuint program) {
+    forget_program(program);
+    if ((int) program == cur_prog) cur_prog = -1;
+    if (on_game()) QUEUE(glDeleteProgram, program);
+    else DIRECT(glDeleteProgram(program));
 }
 void gq_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void * pixels) {
     DIRECT(glReadPixels_stat(x, y, w, h, format, type, pixels));
