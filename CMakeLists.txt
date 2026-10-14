@@ -31,7 +31,7 @@ set(PARSECOREPATH "$ENV{PARSECOREPATH}" CACHE STRING "vita-parse-core main.py")
 
 # Game-specific definitions
 # No game data is ever shipped in the VPK: the user copies the original files
-# from their own Play Store install into DATA_PATH (see docs/DADOS.md).
+# from their own Play Store install into DATA_PATH (see docs/DATA.md).
 set(DATA_PATH "ux0:data/ffvii-vita/") # Path to data (with trailing /)
 set(APK_PATH "${DATA_PATH}base.apk") # Original APK (v1.0.29)
 set(SO_APK_ENTRY "lib/armeabi-v7a/libjni_ff7.so") # .so loaded straight from the APK

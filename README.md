@@ -5,7 +5,7 @@ A *loader* that runs the native library of the Android version of FINAL FANTASY 
 directly on the CPU, with the Android system calls redirected to their Vita equivalents.
 
 > **No game data is distributed.** You need to have bought the game on
-> Google Play and copy the files from your own installation. See [docs/DADOS.md](docs/DADOS.md).
+> Google Play and copy the files from your own installation. See [docs/DATA.md](docs/DATA.md).
 
 Status and roadmap: [PLANO.md](PLANO.md).
 
