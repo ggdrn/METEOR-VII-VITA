@@ -110,7 +110,7 @@ static struct {
 static GLint unpack_alignment = 4;
 
 static struct {
-    unsigned calls, draws, syncs, wakes, skipped;
+    unsigned calls, draws, syncs, wakes, skipped, bare_draws;
     unsigned long long bytes, game_us, sync_us, stall_us, busy_us, other_us;
     uint32_t peak;
 } st;
@@ -353,9 +353,9 @@ unsigned long long gl_queue_take_game_us(void) {
 
 void gl_queue_report(double seconds) {
     if (!active || seconds <= 0) return;
-    l_info("render thread: busy %.0f%% | %.0f calls/s (%.0f redundant skipped), %.0f draws/s, %.0f wakes/s, %.0f KB/s copied | "
+    l_info("render thread: busy %.0f%% | %.0f calls/s (%.0f redundant skipped), %.0f draws/s (%u without arrays so far), %.0f wakes/s, %.0f KB/s copied | "
            "game thread waited: %.0f syncs/s %.1f ms/s, queue full %.1f ms/s | main thread waited %.1f ms/s | peak queue %u KB",
-           st.busy_us / 10000.0 / seconds, st.calls / seconds, st.skipped / seconds, st.draws / seconds,
+           st.busy_us / 10000.0 / seconds, st.calls / seconds, st.skipped / seconds, st.draws / seconds, st.bare_draws,
            st.wakes / seconds, st.bytes / 1024.0 / seconds,
            st.syncs / seconds, st.sync_us / 1000.0 / seconds, st.stall_us / 1000.0 / seconds,
            st.other_us / 1000.0 / seconds, st.peak / 1024);
@@ -410,6 +410,13 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         total += len[n];
         n++;
     }
+    // Diagnostic: a draw with vertices but no enabled array to copy would run
+    // on stale pointers
+    if (n == 0 && count > 0 && st.bare_draws++ < 5)
+        l_warn("gl_queue: draw of %d vertices with no vertex array (enabled %d%d%d%d, ptr %p %p %p %p)", count,
+               attribs[0].enabled, attribs[1].enabled, attribs[2].enabled, attribs[3].enabled,
+               attribs[0].ptr, attribs[1].ptr, attribs[2].ptr, attribs[3].ptr);
+
     // Interleaved arrays (the usual case): copy their common span once
     int span = n > 1 && (uint32_t) (hi - lo) <= total + 64;
     uint32_t data = span ? (uint32_t) (hi - lo) : total;

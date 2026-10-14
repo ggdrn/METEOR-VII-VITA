@@ -211,3 +211,23 @@ uma versão nativa que roda todas as iterações e volta ao teste do laço
 original, com o mesmo estado x86 (contagem, ponteiros, EAX/ECX/EDX, flags do
 FPU). Conferida no emulador (`scripts/emu/test_e92d_loop.py`). Enquanto a
 `0x68DE75` está em autoteste, o laço passa pela chamada x86 normal.
+
+## Resultado da v0.00.41
+
+No mesmo trecho pesado do Setor 7 (~190 draws e ~16.400 vértices por quadro):
+
+| Versão | FPS | Trabalho da thread do jogo por quadro |
+|---|---|---|
+| v0.00.36 | 17,8 | ~52 ms + ~3 ms de GL |
+| v0.00.38 | 19,6 | ~48,5 ms + ~1 ms de GL |
+| v0.00.41 | **28,7–29** | **~33 ms** |
+
+Todos os autotestes passaram (triângulos, iluminação, `0x68DE75`, fundo,
+cos/sin). O jogo ainda fica 96% ocupado nesse trecho, logo abaixo dos 30 fps
+do próprio jogo.
+
+Em parte dos trechos pesados, a linha `render thread:` mostrou só ~2 bytes
+copiados por vértice desenhado (o normal é 24). A fila foi testada no PC e
+copia certo em todos os casos; a v0.00.42 registra um aviso
+(`gl_queue: draw of N vertices with no vertex array`) se algum desenho chegar
+sem array de vértices, para confirmar se é só a estatística ou um desenho real.
