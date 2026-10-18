@@ -29,6 +29,10 @@ void gl_queue_unlock(void);
 /** Game thread time (us) spent in the GL entry points since the last call. */
 unsigned long long gl_queue_take_game_us(void);
 
+/** Wakes the render thread if calls are pending. Game thread, before it
+ *  goes idle (draws otherwise wake it only every few calls). */
+void gl_queue_kick(void);
+
 /** 1 if GL calls from the game thread are being queued. */
 int gl_queue_active(void);
 

@@ -140,6 +140,7 @@ static int precise_usleep(unsigned int usec) {
 int usleep_stat(unsigned int usec) {
     if (!on_gl_thread()) return usleep(usec);
     ff7_music_poll(); // a track read in the background starts here
+    gl_queue_kick();  // the frame's last draws run while the game sleeps
     SceUInt64 t0 = now_us();
     int r = precise_usleep(usec);
     game_last_idle_us = now_us();
@@ -160,6 +161,7 @@ int pthread_mutex_lock_stat(void * mutex) {
 
 int pthread_cond_wait_stat(void * cond, void * mutex) {
     if (!on_gl_thread()) return pthread_cond_wait_soloader(cond, mutex);
+    gl_queue_kick();
     SceUInt64 t0 = now_us();
     int r = pthread_cond_wait_soloader(cond, mutex);
     SceUInt64 waited = now_us() - t0;
@@ -172,6 +174,7 @@ int pthread_cond_wait_stat(void * cond, void * mutex) {
 
 int sem_wait_stat(int * sem) {
     if (!on_gl_thread()) return sem_wait_soloader(sem);
+    gl_queue_kick();
     SceUInt64 t0 = now_us();
     int r = sem_wait_soloader(sem);
     st.wait_us += now_us() - t0;

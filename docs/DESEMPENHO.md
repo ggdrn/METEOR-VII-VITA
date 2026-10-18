@@ -325,3 +325,21 @@ trocados por `add.w` em 370 ms no boot (1 ponto não confere com o padrão e
 mantém a chamada). Nos trechos de campo a 30 fps, o trabalho real médio da
 thread do jogo caiu de ~47–53% (v0.2 e v0.2.03) para ~35%. As sessões não
 passaram pelos mesmos lugares, então o número é indicativo.
+
+## Menos despertares da thread de render (v0.2.05)
+
+Na cena pesada do Setor 7, a fila GL acordava a thread de render ~4.000 vezes
+por segundo (para ~5.000 desenhos), e cada despertar custa uma chamada ao
+kernel na thread do jogo. Agora a thread do jogo a acorda a cada 8 desenhos,
+quando vai dormir (`usleep`, fim do quadro) ou bloquear (`pthread_cond_wait`,
+`sem_wait`), e sempre que algo espera a fila (fila cheia, `gl_queue_finish`,
+chamadas GL diretas). A linha `render thread:` do log mostra os `wakes/s`;
+`ux0:data/ffvii-vita/glbatch_off.txt` volta a acordar a cada desenho.
+
+### Resultado da v0.2.05
+
+No Vita, na cena mais pesada (~4.770 desenhos e ~460 mil vértices por
+segundo, a mesma que na v0.2 ficava em 28–29 fps com a thread do jogo 96%
+ocupada): 615 despertares por segundo em vez de ~4.000, e 30 fps estáveis com
+74–76% de trabalho real. A queda vem principalmente da pilha sem chamada
+(v0.2.04); os despertares agrupados somam pouco.
