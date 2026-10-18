@@ -21,6 +21,7 @@
  */
 
 #include "ff7_anim.h"
+#include "ff7_selftest.h"
 
 #include "utils/logger.h"
 
@@ -335,8 +336,9 @@ static void decode_patch(void) {
         l_warn("ff7_anim: frame decoder not found, left as is");
         return;
     }
+    decode_selftests = ff7_selftest_count(DECODE_SELFTESTS);
     decode_hook = hook_addr(fn, (uintptr_t) &decode_native);
-    l_info("ff7_anim: native frame decoder installed (selftest on the first %d frames)", DECODE_SELFTESTS);
+    l_info("ff7_anim: native frame decoder installed (selftest on the first %d frames)", decode_selftests);
 }
 
 volatile uint32_t * ff7_x86_regs(void) {

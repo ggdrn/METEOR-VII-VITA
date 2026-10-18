@@ -24,6 +24,7 @@
 
 #include "ff7_tri.h"
 #include "ff7_tri_core.h"
+#include "ff7_selftest.h"
 
 #include "utils/logger.h"
 
@@ -134,8 +135,9 @@ void ff7_tri_patch(void) {
     state.v = (const uint32_t *) (b + CUR_V);
     state.keep_alpha = (const uint32_t *) (b + KEEP_ALPHA);
     vertices = (uint8_t *) (b + VERTICES);
+    selftest_left = ff7_selftest_count(SELFTEST_CALLS);
     tri_hook = hook_addr(fn, (uintptr_t) &tri_native);
-    l_info("ff7_tri: native triangle renderer installed (selftest on %d calls)", SELFTEST_CALLS);
+    l_info("ff7_tri: native triangle renderer installed (selftest on %d calls)", selftest_left);
 }
 
 void ff7_tri_report(double seconds) {

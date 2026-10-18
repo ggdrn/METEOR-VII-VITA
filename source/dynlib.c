@@ -517,12 +517,12 @@ so_default_dynlib default_dynlib[] = {
         { "read", (uintptr_t)&fndk_read },
 #endif
         { "realpath", (uintptr_t)&realpath },
-        { "remove", (uintptr_t)&remove },
-        { "rename", (uintptr_t)&rename },
+        { "remove", (uintptr_t)&remove_soloader },
+        { "rename", (uintptr_t)&rename_soloader },
         { "rewind", (uintptr_t)&rewind },
         { "rmdir", (uintptr_t)&rmdir },
         { "truncate", (uintptr_t)&truncate },
-        { "unlink", (uintptr_t)&unlink },
+        { "unlink", (uintptr_t)&unlink_soloader },
 #ifndef NDK_PORT
         { "write", (uintptr_t)&write_soloader },
 #else

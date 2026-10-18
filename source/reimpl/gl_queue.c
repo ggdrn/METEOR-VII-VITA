@@ -24,7 +24,16 @@
  *    onDrawFrame, then swaps) waits for the calls queued before it and holds
  *    the execution lock around its GL calls.
  *
- * Creating DATA_PATH "glthread_off.txt" turns the render thread off.
+ *  - The render thread sleeps when the queue is empty. Waking it costs the
+ *    game thread a kernel call, and in busy scenes that happened for almost
+ *    every draw (~4,000/s for ~5,000 draws/s). Now the game thread wakes it
+ *    every WAKE_BATCH draws, when it is about to sleep (end of its frame,
+ *    gl_queue_kick from usleep), and whenever something waits for the queue
+ *    (full queue, gl_queue_finish, direct GL calls), so no call is left
+ *    waiting past the frame.
+ *
+ * Creating DATA_PATH "glthread_off.txt" turns the render thread off;
+ * DATA_PATH "glbatch_off.txt" wakes it on every draw, as before v0.2.05.
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
@@ -50,6 +59,8 @@ void glBindTexture_oes(GLenum target, GLuint texture);
 void glTexParameteri_oes(GLenum target, GLenum pname, GLint param);
 
 #define OFF_SWITCH  DATA_PATH "glthread_off.txt"
+#define BATCH_OFF_SWITCH DATA_PATH "glbatch_off.txt"
+#define WAKE_BATCH  8           // draws queued per wake-up of the render thread
 #define QUEUE_SIZE  (8u << 20)  // divides 2^32: head/tail wrap consistently
 #define MAX_PAYLOAD (2u << 20)  // larger data: run the call directly instead
 #define MAX_ARGS    9
@@ -97,6 +108,8 @@ static SceUID wake_sema = -1;
 static volatile int sleeping;
 static SceKernelLwMutexWork exec_lock;
 static volatile int lock_wanted; // threads waiting for exec_lock (not the render thread)
+static unsigned wake_batch = WAKE_BATCH;
+static unsigned pending_draws;   // queued since the last wake-up (game thread only)
 
 // GL state the queue needs, as last set by any thread
 static struct {
@@ -331,7 +344,8 @@ void gl_queue_init(void) {
         return;
     }
     cpu_register_thread("gl_render", thid);
-    l_info("gl_queue: render thread started (%u KB queue)", QUEUE_SIZE / 1024);
+    if (file_exists(BATCH_OFF_SWITCH)) wake_batch = 1;
+    l_info("gl_queue: render thread started (%u KB queue, woken every %u draws)", QUEUE_SIZE / 1024, wake_batch);
 }
 
 void gl_queue_set_game_thread(void) {
@@ -456,7 +470,17 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     }
     st.draws++;
     st.bytes += data;
-    publish(size, 1);
+    publish(size, 0);
+    if (++pending_draws >= wake_batch) {
+        pending_draws = 0;
+        wake();
+    }
+}
+
+void gl_queue_kick(void) {
+    if (!on_game() || tail == head) return;
+    pending_draws = 0;
+    wake();
 }
 
 void gq_glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,

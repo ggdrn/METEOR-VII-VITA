@@ -93,7 +93,9 @@ bool obb_fd_is(int fd) {
     return get(fd) != NULL;
 }
 
-int obb_fd_open(const char * tag) {
+// Called before any OBB access (the game thread opens the first descriptor
+// long before music can be prefetched, so this never races)
+static void init_locks(void) {
     if (!table_lock_ready) {
         sceKernelCreateLwMutex(&table_lock, "obb_fd_table", 0, 0, NULL);
         sceKernelCreateLwMutex(&big_cache_lock, "obb_big_cache", 0, 0, NULL);
@@ -101,6 +103,10 @@ int obb_fd_open(const char * tag) {
         for (int i = 0; i < BLOCK_SLOTS; i++) blocks[i].index = -1;
         table_lock_ready = true;
     }
+}
+
+int obb_fd_open(const char * tag) {
+    init_locks();
 
     SceUID uid = sceIoOpen(OBB_PATH, SCE_O_RDONLY, 0);
     if (uid < 0) {
@@ -182,28 +188,16 @@ static int block_read(obb_fd_t * f, int64_t index, uint8_t * dst) {
     return len;
 }
 
-// Large reads: served from / stored in the RAM cache. Returns bytes read.
-static int big_read(obb_fd_t * f, int64_t off, uint8_t * dst, size_t len) {
+// Stores `data` (malloc'd, owned by the cache from now on) for [off, off+len)
+static void big_cache_put(int64_t off, size_t len, uint8_t * data) {
     sceKernelLockLwMutex(&big_cache_lock, 1, NULL);
     for (int i = 0; i < BIG_CACHE_SLOTS; i++) {
-        if (big_cache[i].data && big_cache[i].off == off && big_cache[i].len == len) {
-            memcpy(dst, big_cache[i].data, len);
-            big_cache[i].last_use = ++big_cache_clock;
+        if (big_cache[i].data && big_cache[i].off == off && big_cache[i].len == len) { // already there
             sceKernelUnlockLwMutex(&big_cache_lock, 1);
-            l_info("OBB [%s]: %u KB from RAM cache", f->tag, len / 1024);
-            return (int) len;
+            free(data);
+            return;
         }
     }
-    sceKernelUnlockLwMutex(&big_cache_lock, 1);
-
-    SceUInt64 t0 = sceKernelGetProcessTimeWide();
-    int r = raw_read(f, off, dst, len);
-    SceUInt64 us = sceKernelGetProcessTimeWide() - t0;
-    l_info("OBB [%s]: read %u KB at offset %lld in %llu ms (%.1f MB/s)", f->tag, len / 1024, off, us / 1000,
-           us ? len / (double) us : 0.0);
-    if (r != (int) len || len > BIG_CACHE_MAX / 2) return r;
-
-    sceKernelLockLwMutex(&big_cache_lock, 1, NULL);
     // Evict least recently used entries until it fits
     while (big_cache_bytes + len > BIG_CACHE_MAX) {
         int lru = -1;
@@ -225,13 +219,79 @@ static int big_read(obb_fd_t * f, int64_t off, uint8_t * dst, size_t len) {
         free(big_cache[slot].data);
         big_cache[slot].data = NULL;
     }
+    big_cache[slot] = (big_entry_t) { off, len, data, ++big_cache_clock };
+    big_cache_bytes += len;
+    sceKernelUnlockLwMutex(&big_cache_lock, 1);
+}
+
+// Large reads: served from / stored in the RAM cache. Returns bytes read.
+static int big_read(obb_fd_t * f, int64_t off, uint8_t * dst, size_t len) {
+    sceKernelLockLwMutex(&big_cache_lock, 1, NULL);
+    for (int i = 0; i < BIG_CACHE_SLOTS; i++) {
+        if (big_cache[i].data && big_cache[i].off == off && big_cache[i].len == len) {
+            memcpy(dst, big_cache[i].data, len);
+            big_cache[i].last_use = ++big_cache_clock;
+            sceKernelUnlockLwMutex(&big_cache_lock, 1);
+            l_info("OBB [%s]: %u KB from RAM cache", f->tag, len / 1024);
+            return (int) len;
+        }
+    }
+    sceKernelUnlockLwMutex(&big_cache_lock, 1);
+
+    SceUInt64 t0 = sceKernelGetProcessTimeWide();
+    int r = raw_read(f, off, dst, len);
+    SceUInt64 us = sceKernelGetProcessTimeWide() - t0;
+    l_info("OBB [%s]: read %u KB at offset %lld in %llu ms (%.1f MB/s)", f->tag, len / 1024, off, us / 1000,
+           us ? len / (double) us : 0.0);
+    if (r != (int) len || len > BIG_CACHE_MAX / 2) return r;
+
     uint8_t * copy = malloc(len);
     if (copy) {
         memcpy(copy, dst, len);
-        big_cache[slot] = (big_entry_t) { off, len, copy, ++big_cache_clock };
-        big_cache_bytes += len;
+        big_cache_put(off, len, copy);
     }
+    return r;
+}
+
+bool obb_cache_has(int64_t off, size_t len) {
+    if (!table_lock_ready) return false;
+    bool found = false;
+    sceKernelLockLwMutex(&big_cache_lock, 1, NULL);
+    for (int i = 0; i < BIG_CACHE_SLOTS && !found; i++)
+        found = big_cache[i].data && big_cache[i].off == off && big_cache[i].len == len;
     sceKernelUnlockLwMutex(&big_cache_lock, 1);
+    return found;
+}
+
+int obb_cache_prefetch(int64_t off, size_t len, const char * tag) {
+    init_locks();
+    if (len < BIG_READ_MIN || len > BIG_CACHE_MAX / 2) return -1; // big_read() wouldn't look it up
+    if (obb_cache_has(off, len)) return (int) len;
+
+    uint8_t * data = malloc(len);
+    if (!data) {
+        l_warn("OBB prefetch [%s]: out of memory for %u KB", tag, len / 1024);
+        return -1;
+    }
+    SceUID uid = sceIoOpen(OBB_PATH, SCE_O_RDONLY, 0);
+    if (uid < 0) {
+        free(data);
+        return -1;
+    }
+    SceUInt64 t0 = sceKernelGetProcessTimeWide();
+    int r = sceIoPread(uid, data, len, off);
+    SceUInt64 us = sceKernelGetProcessTimeWide() - t0;
+    sceIoClose(uid);
+    if (r != (int) len) {
+        l_warn("OBB prefetch [%s]: read %d of %u bytes", tag, r, len);
+        free(data);
+        return -1;
+    }
+    total_io_us += us;
+    total_bytes += len;
+    l_info("OBB prefetch [%s]: %u KB at offset %lld in %llu ms (%.1f MB/s)", tag, len / 1024, off, us / 1000,
+           us ? len / (double) us : 0.0);
+    big_cache_put(off, len, data);
     return r;
 }
 

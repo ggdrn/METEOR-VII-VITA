@@ -25,6 +25,7 @@
 
 #include "ff7_math.h"
 #include "ff7_anim.h"
+#include "ff7_selftest.h"
 
 #include "utils/logger.h"
 
@@ -106,9 +107,10 @@ void ff7_math_patch(void) {
         l_warn("ff7_math: unexpected .so layout, native cos/sin disabled");
         return;
     }
+    selftest_cos = selftest_sin = ff7_selftest_count(SELFTEST_CALLS);
     cos_hook = hook_addr(c, (uintptr_t) &cos_native);
     sin_hook = hook_addr(s, (uintptr_t) &sin_native);
-    l_info("ff7_math: native cos/sin installed (x87 state at %p)", fpu);
+    l_info("ff7_math: native cos/sin installed (x87 state at %p, selftest on %d calls)", fpu, selftest_cos);
 }
 
 void ff7_math_report(double seconds) {

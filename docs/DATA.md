@@ -31,7 +31,15 @@ Do not extract or rename the OBB: the port reads the original file directly.
 
 If a file is missing, the port shows an error message with the expected path.
 
-## 4. Logs
+## 4. Saves
+
+Saves are kept in `ux0:data/ffvii-vita/save/` (`save00.ff7` to `save09.ff7`);
+back up that folder to keep your progress. Options stay in
+`ux0:data/ffvii-vita/Documents/`. Before v0.2.03 saves were written to
+`Documents/`: on the first run of a newer version they are copied to `save/`
+(the originals are left in place).
+
+## 5. Logs
 
 On every run the port writes `ux0:data/ffvii-vita/logs.txt`. The previous run
 is kept in `logs_anterior.txt` (useful when the game crashed and was reopened).

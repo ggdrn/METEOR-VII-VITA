@@ -41,7 +41,14 @@ extern "C"
 #include "ff7_ui.h"
 #include "ff7_memmap.h"
 #include "ff7_tri.h"
+#include "ff7_music.h"
+#include "ff7_screen.h"
+#include "ff7_stack.h"
+#include "ff7_selftest.h"
+#include "utils/utils.h"
 #include <stdbool.h>
+
+bool ff7_selftests_on;
 
 void __kuser_memory_barrier(void) {
 	__sync_synchronize();
@@ -78,6 +85,8 @@ void kuser_patch(void) {
 
 void so_patch(void) {
 	kuser_patch();
+	ff7_selftests_on = file_exists(SELFTEST_SWITCH);
+	l_info("selftests: %s (%s)", ff7_selftests_on ? "on" : "off", SELFTEST_SWITCH);
 	ff7_texture_patch();
 	ff7_anim_patch();
 	ff7_lzss_patch();
@@ -87,6 +96,9 @@ void so_patch(void) {
 	ff7_math_patch();
 	ff7_ui_patch();
 	ff7_tri_patch();
+	ff7_music_patch();
+	ff7_screen_patch();
+	ff7_stack_patch();
 	ff7_memmap_patch(); // last: its site checks must see the other hooks
 	// Sample hook with symbol name
 	// hook_addr((uintptr_t)so_symbol(&so_mod, "_ZN6glitch2os7Printer5printEPKcz"), (uintptr_t)&hookedFunction);

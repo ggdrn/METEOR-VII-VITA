@@ -74,6 +74,14 @@ FILE * fopen_soloader(const char * filename, const char * mode);
 DIR *opendir_soloader(char *name);
 
 int stat_soloader(const char * path, stat64_bionic * buf);
+
+/** Creates SAVE_PATH and copies saveNN.ff7 there from DOCUMENTS_PATH, for
+ *  the saves that aren't there yet. Call once at startup. */
+void saves_migrate(void);
+
+int remove_soloader(const char * path);
+int unlink_soloader(const char * path);
+int rename_soloader(const char * from, const char * to);
 ssize_t write_soloader(int fd, const void * buf, size_t count);
 
 int fstat_soloader(int fd, stat64_bionic * buf);

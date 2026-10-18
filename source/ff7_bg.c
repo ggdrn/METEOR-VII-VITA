@@ -27,6 +27,7 @@
 
 #include "ff7_bg.h"
 #include "ff7_anim.h"
+#include "ff7_selftest.h"
 
 #include "utils/logger.h"
 
@@ -340,7 +341,10 @@ static void unhook_alloc(void) {
     alloc_hooked = 0;
 }
 
+volatile uint64_t ff7_bg_last_us;
+
 static void bg_native(void) {
+    ff7_bg_last_us = sceKernelGetProcessTimeWide();
     if (disabled) {
         SO_CONTINUE(int, bg_hook);
         return;
@@ -395,10 +399,11 @@ void ff7_bg_patch(void) {
         l_warn("ff7_bg: unexpected .so layout, native background renderer disabled");
         return;
     }
+    selftest_left = ff7_selftest_count(SELFTEST_FRAMES);
     alloc_hook = hook_addr(alloc, (uintptr_t) &alloc_recorder);
     alloc_hooked = 1;
     bg_hook = hook_addr(bg, (uintptr_t) &bg_native);
-    l_info("ff7_bg: native field background renderer installed (selftest on %d frames)", SELFTEST_FRAMES);
+    l_info("ff7_bg: native field background renderer installed (selftest on %d frames)", selftest_left);
 }
 
 void ff7_bg_report(double seconds) {

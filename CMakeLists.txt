@@ -17,11 +17,11 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 set(VITA_APP_NAME "FINAL FANTASY VII")
 set(VITA_TITLEID "FFSQ00007")
 set(VITA_VPKNAME "ff7_vita")
-set(VITA_VERSION "00.20") # SFO APP_VER (must be ##.##)
+set(VITA_VERSION "00.50") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.2")
+set(PORT_VERSION "0.5")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -39,10 +39,13 @@ set(OBB_PATH "${DATA_PATH}main.30.com.square_enix.android_googleplay.FFVII.obb")
 # Android passes getExternalFilesDir()/Documents to setDataPath; the game then
 # uses dirname(path) + "/Documents/" for saves, options and APP.LOG.
 set(DOCUMENTS_PATH "${DATA_PATH}Documents")
+# Saves (saveNN.ff7) are redirected from Documents/ to their own folder
+set(SAVE_PATH "${DATA_PATH}save")
 set(LOG_PATH "${DATA_PATH}logs.txt")
 add_definitions(-DDATA_PATH="${DATA_PATH}" -DAPK_PATH="${APK_PATH}"
                 -DSO_APK_ENTRY="${SO_APK_ENTRY}" -DOBB_PATH="${OBB_PATH}"
-                -DDOCUMENTS_PATH="${DOCUMENTS_PATH}" -DLOG_PATH="${LOG_PATH}")
+                -DDOCUMENTS_PATH="${DOCUMENTS_PATH}" -DLOG_PATH="${LOG_PATH}"
+                -DSAVE_PATH="${SAVE_PATH}")
 
 # Loader logs (info/warn/error) go to LOG_PATH even in Release builds.
 # Debug builds additionally enable l_debug() and verbose loader output.
@@ -145,6 +148,18 @@ file(WRITE ${CMAKE_BINARY_DIR}/ff7_memmap_sites.c
      "#include <stdint.h>\nconst uint8_t ff7_memmap_sites[] = {${memmap_sites_hex}};\n"
      "const uint32_t ff7_memmap_sites_size = ${memmap_sites_len};\n")
 
+# mk_address call sites on the x86 stack (scripts/gen-stack-sites.py), for
+# source/ff7_stack.c
+set(STACK_SITES_BIN ${CMAKE_SOURCE_DIR}/source/ff7_stack_sites.bin)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${STACK_SITES_BIN})
+file(READ ${STACK_SITES_BIN} stack_sites_hex HEX)
+string(LENGTH "${stack_sites_hex}" stack_sites_len)
+math(EXPR stack_sites_len "${stack_sites_len} / 2")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," stack_sites_hex "${stack_sites_hex}")
+file(WRITE ${CMAKE_BINARY_DIR}/ff7_stack_sites.c
+     "#include <stdint.h>\nconst uint8_t ff7_stack_sites[] = {${stack_sites_hex}};\n"
+     "const uint32_t ff7_stack_sites_size = ${stack_sites_len};\n")
+
 set(SOURCES
     source/main.c
     source/dynlib.c
@@ -161,7 +176,11 @@ set(SOURCES
     source/ff7_buttons.c
     source/ff7_memmap.c
     source/ff7_tri.c
+    source/ff7_music.c
+    source/ff7_screen.c
     ${CMAKE_BINARY_DIR}/ff7_memmap_sites.c
+    source/ff7_stack.c
+    ${CMAKE_BINARY_DIR}/ff7_stack_sites.c
     source/reimpl/bits/_ctype.c
     source/reimpl/errno.c
     source/reimpl/io.c

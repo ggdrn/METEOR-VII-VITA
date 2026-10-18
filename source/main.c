@@ -21,6 +21,7 @@
 #include "ff7_bg.h"
 #include "ff7_math.h"
 #include "ff7_tri.h"
+#include "ff7_stack.h"
 #include "reimpl/gl_variants.h"
 #include "reimpl/gl_queue.h"
 #include "reimpl/obb_fd.h"
@@ -255,6 +256,7 @@ int main() {
             ff7_bg_report((now - heartbeat_us) / 1000000.0);
             ff7_math_report((now - heartbeat_us) / 1000000.0);
             ff7_tri_report((now - heartbeat_us) / 1000000.0);
+            ff7_stack_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
             gl_queue_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
