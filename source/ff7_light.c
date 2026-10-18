@@ -30,6 +30,7 @@
 #include "ff7_light.h"
 #include "ff7_light_core.h"
 #include "ff7_anim.h"
+#include "ff7_selftest.h"
 
 #include "utils/logger.h"
 
@@ -336,9 +337,11 @@ void ff7_light_patch(void) {
         l_warn("ff7_light: unexpected .so layout, native lighting disabled");
         return;
     }
+    selftest_left = ff7_selftest_count(SELFTEST_CALLS);
+    selftest2_left = ff7_selftest_count(SELFTEST_CALLS);
     light_hook = hook_addr(fn, (uintptr_t) &light_native);
     l_info("ff7_light: native vertex lighting installed (prologue %08x, selftest on %d vertices)",
-           prologue, SELFTEST_CALLS);
+           prologue, selftest_left);
 
     uintptr_t fn2 = so_symbol(&so_mod, SYM_LIGHT2);
     fpu = *(uint8_t **) (so_mod.text_base + FPU_GOT);
@@ -348,7 +351,7 @@ void ff7_light_patch(void) {
         return;
     }
     light2_hook = hook_addr(fn2, (uintptr_t) &light2_native);
-    l_info("ff7_light: native scaled vertex lighting (0x68DE75) installed (selftest on %d vertices)", SELFTEST_CALLS);
+    l_info("ff7_light: native scaled vertex lighting (0x68DE75) installed (selftest on %d vertices)", selftest2_left);
 
     uintptr_t loop = so_mod.text_base + E92D_LOOP;
     if (memcmp((void *) loop, e92d_loop_code, sizeof(e92d_loop_code))

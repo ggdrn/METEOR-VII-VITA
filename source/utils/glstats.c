@@ -12,6 +12,7 @@
 #include "reimpl/readpixels.h"
 #include "reimpl/gl_variants.h"
 #include "reimpl/gl_queue.h"
+#include "ff7_music.h"
 
 #include <unistd.h>
 #include <psp2/kernel/processmgr.h>
@@ -88,8 +89,12 @@ void glReadPixels_stat(GLint x, GLint y, GLsizei width, GLsizei height, GLenum f
 // storing the whole render target to memory and loading it back for the next
 // scene, which kept the GPU near 100%. Nothing needs it here: vitaGL syncs on
 // its own for glReadPixels, framebuffer switches and textures still in use.
+static inline int on_gl_thread(void);
+
 void glFlush_stat(void) {
     st.flushes++;
+    // Every frame, even when the game never sleeps (CPU-bound scenes)
+    if (on_gl_thread()) ff7_music_poll();
 }
 
 void glBindFramebuffer_stat(GLenum target, GLuint framebuffer) {
@@ -134,6 +139,7 @@ static int precise_usleep(unsigned int usec) {
 
 int usleep_stat(unsigned int usec) {
     if (!on_gl_thread()) return usleep(usec);
+    ff7_music_poll(); // a track read in the background starts here
     SceUInt64 t0 = now_us();
     int r = precise_usleep(usec);
     game_last_idle_us = now_us();

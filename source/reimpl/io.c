@@ -32,7 +32,76 @@
 // void stat_newlib_to_bionic(struct stat * src, stat64_bionic * dst);
 #include "reimpl/bits/_struct_converters.c"
 
+#include <ctype.h>
+#include <stdio.h>
+#include <psp2/io/dirent.h>
+#include <psp2/io/stat.h>
+
+/*
+ * Saves. The game keeps saveNN.ff7 next to its options in its data path
+ * (DOCUMENTS_PATH); the port keeps them in SAVE_PATH instead, so they are easy
+ * to find and back up. Every path the game passes to open/fopen/stat/remove/
+ * unlink/rename is checked; only DOCUMENTS_PATH "/saveNN.ff7" is redirected.
+ */
+
+static int is_save_name(const char * name) {
+    if (strncmp(name, "save", 4) != 0) return 0;
+    const char * p = name + 4;
+    if (!isdigit((unsigned char) *p)) return 0;
+    while (isdigit((unsigned char) *p)) p++;
+    return strcmp(p, ".ff7") == 0;
+}
+
+static const char * save_path(const char * path, char * buf, size_t size) {
+    static const char docs[] = DOCUMENTS_PATH "/";
+    if (!path || strncmp(path, docs, sizeof(docs) - 1) != 0) return path;
+    const char * name = path + sizeof(docs) - 1;
+    if (!is_save_name(name)) return path;
+    snprintf(buf, size, "%s/%s", SAVE_PATH, name);
+    return buf;
+}
+
+void saves_migrate(void) {
+    sceIoMkdir(SAVE_PATH, 0777);
+    SceUID dir = sceIoDopen(DOCUMENTS_PATH);
+    if (dir < 0) return;
+    SceIoDirent entry;
+    int copied = 0;
+    while (sceIoDread(dir, &entry) > 0) {
+        if (SCE_S_ISDIR(entry.d_stat.st_mode) || !is_save_name(entry.d_name)) continue;
+        char from[256], to[256];
+        snprintf(from, sizeof(from), "%s/%s", DOCUMENTS_PATH, entry.d_name);
+        snprintf(to, sizeof(to), "%s/%s", SAVE_PATH, entry.d_name);
+        if (file_exists(to)) continue; // already moved (or saved there since)
+        if (file_copy(from, to)) {
+            l_info("saves: copied %s to %s", from, to);
+            copied++;
+        } else {
+            l_error("saves: could not copy %s to %s", from, to);
+        }
+    }
+    sceIoDclose(dir);
+    l_info("saves: in %s (%d copied from %s)", SAVE_PATH, copied, DOCUMENTS_PATH);
+}
+
+int remove_soloader(const char * path) {
+    char buf[256];
+    return remove(save_path(path, buf, sizeof(buf)));
+}
+
+int unlink_soloader(const char * path) {
+    char buf[256];
+    return unlink(save_path(path, buf, sizeof(buf)));
+}
+
+int rename_soloader(const char * from, const char * to) {
+    char buf1[256], buf2[256];
+    return rename(save_path(from, buf1, sizeof(buf1)), save_path(to, buf2, sizeof(buf2)));
+}
+
 FILE * fopen_soloader(const char * filename, const char * mode) {
+    char save_buf[256];
+    filename = save_path(filename, save_buf, sizeof(save_buf));
     if (strcmp(filename, "/proc/cpuinfo") == 0) {
         return fopen_soloader("app0:/cpuinfo", mode);
     } else if (strcmp(filename, "/proc/meminfo") == 0) {
@@ -54,6 +123,8 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
 }
 
 int open_soloader(const char * path, int oflag, ...) {
+    char save_buf[256];
+    path = save_path(path, save_buf, sizeof(save_buf));
     if (strcmp(path, "/proc/cpuinfo") == 0) {
         return open_soloader("app0:/cpuinfo", oflag);
     } else if (strcmp(path, "/proc/meminfo") == 0) {
@@ -110,6 +181,8 @@ int stat_soloader(const char * path, stat64_bionic * buf) {
         return 0;
     }
 
+    char save_buf[256];
+    path = save_path(path, save_buf, sizeof(save_buf));
     struct stat st;
     int res = stat(path, &st);
 

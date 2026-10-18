@@ -116,7 +116,7 @@ Diagnóstico e plano detalhados em [docs/DESEMPENHO.md](docs/DESEMPENHO.md)
 - [x] v0.00.37: `mk_address` mais rápida e 71.246 acessos a globais sem chamada (`source/ff7_memmap.c`)
 - [ ] Medir com/sem `memmap_off.txt` no Setor 7; perfil com `ENABLE_SPIKE_PROFILER`
 - [x] v0.00.38: thread de render (GL da thread do jogo executado nos cores 1–2, `source/reimpl/gl_queue.c`)
-- [ ] Acessos à pilha x86 (`esp/ebp ± constante`) sem chamada
+- [x] Acessos à pilha x86 (`esp/ebp ± constante`) sem chamada (v0.2.04, `ff7_stack.c`; medir no Vita)
 
 - [ ] Perfil de memória (limite ~365 MB do app), cache de shaders compilados
 - [ ] Clock 444/222/222/166 MHz já aplicado no init; medir se dá para baixar

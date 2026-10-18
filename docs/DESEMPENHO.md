@@ -231,3 +231,97 @@ copiados por vértice desenhado (o normal é 24). A fila foi testada no PC e
 copia certo em todos os casos; a v0.00.42 registra um aviso
 (`gl_queue: draw of N vertices with no vertex array`) se algum desenho chegar
 sem array de vértices, para confirmar se é só a estatística ou um desenho real.
+
+## Travamentos na troca de música e autotestes (depois da v0.2)
+
+Nos logs da v0.2, o jogo fica quase sempre no limite de quadros dele (30 fps
+no campo, 15 na batalha, 60 nos menus). O que se nota são travamentos de
+0,3 a 1,1 s nas trocas de área e de música. Uma das causas é a leitura da
+música: `SND_play` lê o `.akb` inteiro (2 a 4 MB) na thread do jogo, e uma
+faixa fora do cache em RAM levava de 170 a 600 ms
+(`OBB slow read [dokubo.akb] ... 277 ms`).
+
+**Música em segundo plano** (`source/ff7_music.c`). Quando a faixa não está
+no cache, a música atual para (como o `SND_play` já fazia) e uma thread
+`music_loader`, nos cores 1–2, lê o arquivo para o cache em RAM. O jogo segue
+rodando. Quando a leitura termina, a thread do jogo chama o `SND_play`
+original, que encontra o arquivo em RAM. Toda chamada ao SdSoundSystem
+continua na thread do jogo e na mesma ordem. Enquanto a faixa carrega,
+`SND_getStatus` responde "tocando", `SND_stop` cancela o carregamento e
+pausar/retomar é aplicado quando a faixa começa. A música começa alguns
+centésimos depois, em vez de o jogo parar. O log mostra
+`music: <faixa> loaded in the background in N ms`. Criar
+`ux0:data/ffvii-vita/music_async_off.txt` volta ao comportamento antigo.
+
+**Autotestes desligados por padrão.** Os autotestes das funções nativas
+(iluminação, `0x68DE75`, fundo, cos/sin, triângulos, decodificador de
+animação) rodavam a cada boot e caíam perto de quadros lentos. Agora só rodam
+se existir `ux0:data/ffvii-vita/selftest_on.txt`. O log diz
+`selftests: on/off` no boot.
+
+## Faixa preta no modo de exploração (v0.2.02)
+
+O jogo desenha cada quadro numa textura de 640×480, e o `VIDEO_update` a
+estica na altura da tela (725×544 no Vita). No campo, o jogo deixa vazias as
+últimas 16 das 480 linhas, o que aparecia como uma faixa preta de 18 px
+embaixo. Não há arte para essa faixa na maioria dos cenários.
+
+`source/ff7_screen.c` aumenta a imagem em 480/464 (+3,4%) a partir do topo,
+mas só enquanto o renderizador de cenário roda (modo de exploração). O cenário
+ocupa a altura toda, com 750 px de largura e sem distorção, e as bordas
+laterais encolhem junto. Os botões "Encounters ON" e "A" continuam no mesmo
+lugar, por cima da imagem. Batalha, menus, vídeos e mapa-múndi não mudam. O log
+mostra `field zoom: on/off` e cada área de desenho nova que o jogo pede
+(`drawing area: ... bottom at line N of 480 - field`), para conferir as 464
+linhas em outros mapas. Criar `ux0:data/ffvii-vita/field_zoom_off.txt` desliga
+o zoom.
+
+## Acessos à pilha x86 sem chamada (v0.2.04, `source/ff7_stack.c`)
+
+Metade das 669.918 chamadas a `mk_address` traduz um endereço da pilha x86:
+`ESP + c` (push, pop, argumentos) ou `EBP + c` (variáveis locais e argumentos
+de funções com ponteiro de quadro). A pilha é uma região só: VA
+`0x170000–0x190000` (128 KB), que o `main_ff7` passa ao `start_ff7_core`.
+
+**Como funciona.** Antes de o `start_ff7_core` mapear a pilha, um hook aloca
+um bloco num endereço fixo `H` tal que `K = H − 0x170000` seja um imediato
+Thumb-2 (`0xXY000000`) e preenche com ele as 32 entradas da pilha no `MEMMAP`.
+O `VA_newMapper` só preenche entradas vazias, então mantém as nossas, e vale
+`host = va + K` para toda a pilha. Cada ponto da lista vira:
+
+    bl mk_address   ->   add.w r0, r0, #K
+
+Há uma folga de 32 KB de cada lado da pilha dentro do bloco.
+
+**Quais pontos** (`scripts/gen-stack-sites.py`, regras no cabeçalho). Uma
+análise de fluxo de dados no código ARM prova, ponto a ponto, que `r0` no
+`bl` é `ESP + c` ou `EBP + c` (|c| ≤ 0x8000):
+
+| Tipo | Pontos | Condição |
+|---|---|---|
+| `ESP + c` | 114.575 | sempre na pilha |
+| `EBP + c` | 218.878 | só em funções onde o EBP é ponteiro de quadro: a primeira escrita no EBP é `mov ebp, esp` no bloco de entrada, e toda outra escrita (o `pop ebp` do epílogo) é seguida direto da saída |
+| `EBP + c` sem prova | 851 | ficam com a chamada |
+
+São **333.453 chamadas removidas, 50% de todas as chamadas a `mk_address`**.
+Somadas às 71.246 de globais da v0.00.37, 61% das chamadas deixam de existir.
+
+**Chaves (pasta de dados):**
+- `stack_off.txt`: volta ao original.
+- `stack_check.txt`: modo de conferência. Em vez do `add`, cada ponto chama
+  uma função que devolve o mesmo que `mk_address` e registra no log todo ponto
+  cujo endereço não está na pilha (`ff7_stack: site so+0x... accessed VA ...`).
+  É mais lento, mas sempre correto: serve para validar a lista no aparelho.
+
+**Como testar:** primeiro uma sessão com `stack_check.txt` (o log não deve ter
+nenhum `not on the stack`), depois sem o arquivo, comparando o `work` das
+linhas `perf:` nos mesmos lugares (na v0.2.03, campo a 30 fps: trabalho real
+de 35% a 79%).
+
+### Resultado da v0.2.04
+
+No Vita: pilha em `0x9b170000` (`K = 0x9b000000`), 333.452 de 333.453 pontos
+trocados por `add.w` em 370 ms no boot (1 ponto não confere com o padrão e
+mantém a chamada). Nos trechos de campo a 30 fps, o trabalho real médio da
+thread do jogo caiu de ~47–53% (v0.2 e v0.2.03) para ~35%. As sessões não
+passaram pelos mesmos lugares, então o número é indicativo.

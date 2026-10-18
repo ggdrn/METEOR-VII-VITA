@@ -5,9 +5,11 @@
  * (UIObject_DPad) and buttons mapped to keys (UIObject_ButtonMapped, key code
  * at +40). On the Vita the physical buttons already do that, so those objects
  * are removed from every UI layout the first time it is displayed. Only mapped
- * buttons with special actions stay: 0x82, 0x83 and 0x85 (ESCAPE), the cases
+ * buttons with special actions stay: 0x82 and 0x85, cases
  * UIObject_ButtonMapped::onTouchBegan handles itself. Everything else is a
  * plain key (0x9C Enter/OK, 0x52 cancel, ...) or a web link (0x80/0x81).
+ * 0x83 is the floating ESCAPE button of battles: it holds PageUp + PageDown,
+ * the PC's L1 + R1, so it goes too (holding L + R on the Vita escapes).
  * Toggle buttons (Encounters ON/OFF), triggered buttons, swipers and the
  * screen itself are untouched.
  *
@@ -93,7 +95,7 @@ static int is_virtual_gamepad(void * obj) {
     if (c == CLS_DPAD) return 1;
     if (c == CLS_BUTTON_MAPPED) {
         uint32_t key = *(uint32_t *) ((uint8_t *) obj + 40);
-        return !(key == 0x82 || key == 0x83 || key == 0x85); // keep ESCAPE & co.
+        return !(key == 0x82 || key == 0x85); // special actions; ESCAPE (0x83) = L + R
     }
     return 0;
 }

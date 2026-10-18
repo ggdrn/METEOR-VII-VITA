@@ -35,6 +35,19 @@ int obb_fd_close(int fd);
 /** Measures card read speed at several OBB offsets (diagnostic). */
 void obb_benchmark(void);
 
+/** Whether [off, off+len) of the OBB is in the RAM cache of whole-file reads. */
+bool obb_cache_has(int64_t off, size_t len);
+
+/**
+ * Reads [off, off+len) of the OBB into that cache (any thread), so a later
+ * read of the whole entry by the game is served from RAM. Returns the bytes
+ * read, or < 0 if it wasn't cached (too small or large, no memory, IO error).
+ */
+int obb_cache_prefetch(int64_t off, size_t len, const char * tag);
+
+/** Finds an OBB entry the way ExpansionFile does (java.c). */
+bool obb_entry_find(const char * path, int64_t * off, int64_t * len);
+
 /** Logs OBB read totals accumulated over `seconds`, then resets them. */
 void obb_fd_report(double seconds);
 

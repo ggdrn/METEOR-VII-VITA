@@ -64,6 +64,14 @@ static zip_entry * obb_find(const char * path) {
     return e;
 }
 
+bool obb_entry_find(const char * path, int64_t * off, int64_t * len) {
+    zip_entry * e = obb_find(path);
+    if (!e) return false;
+    *off = zip_entry_data_offset(obb_zip, e);
+    *len = e->uncomp_size;
+    return true;
+}
+
 static void obb_close_fd(const char * path) {
     for (int i = 0; i < MAX_OBB_PATHS; i++) {
         if (obb_fds[i].path[0] && strcmp(obb_fds[i].path, path) == 0) {

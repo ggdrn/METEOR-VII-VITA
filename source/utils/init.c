@@ -16,6 +16,7 @@
 #include "utils/settings.h"
 #include "utils/zip.h"
 #include "reimpl/obb_fd.h"
+#include "reimpl/io.h"
 
 #include <reimpl/controls.h>
 
@@ -82,6 +83,7 @@ void soloader_init_all() {
                     APK_PATH, OBB_PATH);
     }
     sceIoMkdir(DOCUMENTS_PATH, 0777);
+    saves_migrate();
 
     apk_zip = zip_open(APK_PATH);
     zip_entry * so_entry = apk_zip ? zip_find(apk_zip, SO_APK_ENTRY) : NULL;
