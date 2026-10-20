@@ -5,6 +5,7 @@ FINAL FANTASY VII
 0.6
 
 # Changelog (Only if update)
+- Right analog stick rotates the world map camera (same rate as L/R buttons, no effect outside world map).
 - World map runs at a steady 30 fps. The four hottest world map routines were replaced with native ARM code that produces identical results (was 19–23 fps in v0.5).
 - Fields that recreate textures every frame are faster: paletted conversion is split by destination format, and GL texture names are pre-generated so the game thread never stalls.
 - Field screen zoom corrected to 448 lines (777×544, no distortion). `field_stretch_on.txt` enables full 960×544 stretch.

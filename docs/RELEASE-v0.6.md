@@ -16,6 +16,12 @@ Install `ff7_vita_v0.6.vpk` over any previous version. Game data stays where it 
   pixel); GL texture names are pre-generated on the render thread so `glGenTextures`
   never stalls waiting for the queue.
 
+## Controls
+
+- **Right analog stick rotates the world map camera.** Deflect right to rotate
+  right, left to rotate left — same speed as holding L/R. The buttons still work
+  as before. The stick has no effect outside the world map.
+
 ## Changes
 
 - **Field screen zoom corrected.** The zoom introduced in v0.2 was tracking 464 of 480
