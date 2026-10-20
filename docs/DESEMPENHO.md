@@ -623,3 +623,76 @@ preciso rodar `profile_all.txt` durante o minigame e transferir o
    somavam ~57% da thread. No highway, com `work` de 95–97% e ~44 ms por
    quadro (a 23 fps), o mesmo percentual representa ~22–25 ms — suficiente
    para atingir os 30 fps.
+
+## Perfil do highway (v0.6.0, profile_all.txt) — 8.265 amostras
+
+O profiler rodou durante toda a sessão. Isolando o trecho do modo 6
+(t = 203–375 s no log), 7.162 amostras da thread do jogo (86,7% do total):
+
+| Função | Amostras | % | Callers principais (por LR) |
+|---|---|---|---|
+| `mk_address` | 1.012 | 14,1% | `0x65d9c2` 16%, `0x65d1de` 15% |
+| `func_0x00651a6d` | 682 | 9,5% | si mesma 58%, `__ashldi3` 16% |
+| `func_0x0040b470` | 477 | 6,7% | `0x651a6d` 35%, `__fixunsdfdi` 31% |
+| `func_0x0065d9c2` | 412 | 5,8% | si mesma 58%, `__ashldi3` 41% |
+| `func_0x00651a2b` | 344 | 4,8% | si mesma 56%, `__ashldi3` 32% |
+| `glEnd` | 335 | 4,7% | `__ashldi3` 100% |
+| `func_0x0065caf8` | 287 | 4,0% | si mesma 46%, `0x65d9a9` 16% |
+| `func_0x006519d3` | 258 | 3,6% | `__ashldi3` 62%, `0x651a6d` 16% |
+| `func_0x00661465` | 188 | 2,6% | si mesma 70% |
+| `func_0x0065d1de` | 152 | 2,1% | si mesma 73% |
+| `VIDEO_drawBuffers` | 142 | 2,0% | `__ashldi3` 66% |
+| `func_0x0068e2f9` | 141 | 2,0% | `0x651a6d` 45% |
+| `func_0x0066e272` | 95 | 1,3% | alocador de buffer de vértices |
+| `func_0x006840da` | 84 | 1,2% | si mesma 80% |
+
+**Reatribuindo `mk_address` ao LR:** `0x65d9c2` sobe para ~574 amostras
+(8,0%); `0x65d1de` para ~304 (4,2%). Os helpers de runtime ARM
+(`__ashldi3`, `__fixunsdfdi`, `__muldf3`) acumulam-se dentro de
+`0x651a6d`, `0x65d9c2` etc. — são parte do custo dessas funções.
+
+### O que cada cluster é
+
+O profiler também mostra `C_006A8A3E` (no LR de `glVertex3f`) e
+`C_006A87AC`/`C_006A7DEE` (no LR de `C_0066CE40`). Essas são funções dos
+porters com nome demanglado: **o highway usa um renderizador de triângulos
+diferente do campo** — `C_006A8A3E` em vez de `C_006A8002`. O `ff7_tri`
+instalado não cobre esse renderizador.
+
+| Cluster | Funções | % total | O que é |
+|---|---|---|---|
+| A | `0x651a6d`, `0x40b470`, `0x6519d3`, `0x68e2f9` | **21,8%** | loop de render do highway (equivalente ao `0x75F68C` do mapa) |
+| B | `0x65d9c2` (+mk), `0x65d1de` (+mk), `0x65caf8`, `0x65da4c` | **~22%** | transformação de vértices (equivalente ao `0x75F263`/`0x75F0AD`) |
+| C | `0x651a2b` | **4,8%** | segundo laço de vértice |
+| D | `glEnd` + `VIDEO_drawBuffers` + `VIDEO_enableTex` | **7,2%** | renderer do port por draw |
+
+### `C_006A8A3E` — o triangle renderer do highway
+
+O profiler mostra `glVertex3f <- C_006A8A3E` (39% das amostras de
+`glVertex3f`). `C_006A8A3E` é outra função dos porters — análoga ao
+`C_006A8002` (já coberto por `ff7_tri`) mas para geometria 3D do highway.
+Ela está **fora do hook atual** do `ff7_tri`, que só cobre `C_006A8002`.
+
+### Próximos passos para o highway
+
+1. **`C_006A8A3E`**: verificar prologue e hookear com a mesma lógica de
+   `ff7_tri.c`. O símbolo ARM é
+   `_Z10C_006A8A3EiPtP19t_dx_rend_vertex_20P8t_matrix` — verificar com
+   `arm-vita-eabi-nm`. Se o prologue bater, um hook direto cobre ~23% dos
+   draws (os 0,32% de `glVertex3f` com LR `C_006A8A3E` são o custo
+   residual; o bulk está na própria função).
+
+2. **Cluster B (`0x65d9c2`, `0x65d1de`, `0x65caf8`)**: são as funções de
+   transformação de vértice do highway (~22% + parte do mk_address).
+   Levantar a semântica com o emulador Unicorn e implementar nativas, como
+   feito para `0x75F263`/`0x75F0AD` do mapa.
+
+3. **Cluster A (`0x651a6d`, `0x40b470`, `0x6519d3`, `0x68e2f9`)**: o loop
+   de render propriamente dito (~22%). O endereço `0x651a6d` é quase certo
+   o loop de objetos do highway (chama a si mesmo = laço), com `0x40b470`
+   sendo o per-vértice (cor/normal). Candidato principal para uma versão
+   nativa completa.
+
+Ganho esperado se os três clusters forem nativos: ~45–50% da thread do
+highway. O minigame fica em 94–96% CPU-bound a 21–27 fps; com metade da
+thread liberada, ~30 fps é viável.

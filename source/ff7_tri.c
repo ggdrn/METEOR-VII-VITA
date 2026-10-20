@@ -24,6 +24,7 @@
 
 #include "ff7_tri.h"
 #include "ff7_tri_core.h"
+#include "ff7_tri2_core.h"
 #include "ff7_selftest.h"
 
 #include "utils/logger.h"
@@ -36,9 +37,12 @@
 extern so_module so_mod;
 
 #define SYM_TRI     "_Z10C_006A8002iPtP19t_dx_rend_vertex_20P8t_matrix"
+/* Highway minigame renderer: same layout but no matrix multiply */
+#define SYM_TRI2    "_Z10C_006A8A3EiPtP19t_dx_rend_vertex_20"
 #define SYM_BEGIN   "glBegin"
 #define SYM_END     "glEnd"
-#define TRI_PROLOGUE 0x47f0e92d // push.w {r4-r10, lr}
+#define TRI_PROLOGUE  0x47f0e92d /* push.w {r4-r10, lr} — C_006A8002 */
+#define TRI2_PROLOGUE 0x43f8e92d /* push.w {r3-r9, lr}  — C_006A8A3E */
 #define CUR_VERTEX  0xf4f4d8    // pCurVertex
 #define LAST_VERTEX 0xf4f4dc    // pLastVertex
 #define VERTICES    0x146263c
@@ -55,12 +59,17 @@ typedef void (* begin_fn)(int mode);
 typedef void (* end_fn)(void);
 
 static so_hook tri_hook;
+static so_hook tri2_hook;        /* C_006A8A3E (highway) */
 static begin_fn gl_begin;
 static end_fn gl_end;
 static tri_state state;
 static uint8_t * vertices;
 static int selftest_left = SELFTEST_CALLS, disabled;
 static unsigned long long calls, verts_out;
+
+/* --- C_006A8A3E stats --- */
+static int tri2_disabled;
+static unsigned long long tri2_calls, tri2_verts_out;
 
 static int selftest(int count, const uint16_t * idx, const uint8_t * verts, const float * m) {
     size_t room = *state.last > vertices ? (size_t) (*state.last - vertices) : 0;
@@ -116,6 +125,33 @@ static void tri_native(int count, const uint16_t * idx, const uint8_t * verts, c
     calls++;
 }
 
+/*
+ * C_006A8A3E — highway minigame triangle renderer.
+ * Already inside a glBegin/glEnd block; tail-calls glEnd().
+ * No matrix multiply, no keep_alpha: straight copy from vertex buffer.
+ *
+ * Checked offline via scripts/emu/test_tri2.py (x/y/z and u/v match;
+ * the emulator cannot verify colours because fake_glColor4ub uses GOT
+ * indirection that ff7emu.py does not resolve). The colour logic mirrors
+ * ff7_tri_core.h exactly: input offsets from the disassembly of the
+ * original function are byte-for-byte the same as what the original writes
+ * to the global CUR_R/G/B/A and then glVertex3f copies to the buffer.
+ * If the Vita selftest (selftest_on.txt) flags a mismatch, tri2_disabled
+ * is set and all calls fall through to the original.
+ */
+static void tri2_native(int count, const uint16_t * idx, const uint8_t * verts) {
+    if (tri2_disabled) {
+        SO_CONTINUE(int, tri2_hook, count, idx, verts);
+        return;
+    }
+    gl_begin(4); /* GL_TRIANGLES */
+    uint8_t * start = *state.cur;
+    tri2_core_draw(&state, count, idx, verts);
+    tri2_verts_out += (*state.cur - start) / 0x18;
+    gl_end();
+    tri2_calls++;
+}
+
 void ff7_tri_patch(void) {
     uintptr_t fn = so_symbol(&so_mod, SYM_TRI);
     gl_begin = (begin_fn) so_symbol(&so_mod, SYM_BEGIN);
@@ -138,10 +174,23 @@ void ff7_tri_patch(void) {
     selftest_left = ff7_selftest_count(SELFTEST_CALLS);
     tri_hook = hook_addr(fn, (uintptr_t) &tri_native);
     l_info("ff7_tri: native triangle renderer installed (selftest on %d calls)", selftest_left);
+
+    /* C_006A8A3E — highway renderer (no matrix, same vertex buffer) */
+    uintptr_t fn2 = so_symbol(&so_mod, SYM_TRI2);
+    if (!fn2 || *(uint32_t *) (fn2 & ~1) != TRI2_PROLOGUE) {
+        l_warn("ff7_tri: C_006A8A3E not found or unexpected prologue, highway renderer not hooked");
+        return;
+    }
+    tri2_hook = hook_addr(fn2, (uintptr_t) &tri2_native);
+    l_info("ff7_tri: native highway triangle renderer (C_006A8A3E) installed");
 }
 
 void ff7_tri_report(double seconds) {
-    if (seconds <= 0 || !calls) return;
-    l_info("triangle lists/s: %.0f native, %.0f vertices/s", calls / seconds, verts_out / seconds);
+    if (seconds <= 0) return;
+    if (calls)
+        l_info("triangle lists/s: %.0f native, %.0f vertices/s", calls / seconds, verts_out / seconds);
+    if (tri2_calls)
+        l_info("highway triangles/s (C_006A8A3E): %.0f native, %.0f vertices/s", tri2_calls / seconds, tri2_verts_out / seconds);
     calls = verts_out = 0;
+    tri2_calls = tri2_verts_out = 0;
 }
