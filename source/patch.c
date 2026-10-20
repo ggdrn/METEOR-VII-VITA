@@ -41,6 +41,7 @@ extern "C"
 #include "ff7_ui.h"
 #include "ff7_memmap.h"
 #include "ff7_tri.h"
+#include "ff7_world.h"
 #include "ff7_music.h"
 #include "ff7_screen.h"
 #include "ff7_stack.h"
@@ -96,6 +97,7 @@ void so_patch(void) {
 	ff7_math_patch();
 	ff7_ui_patch();
 	ff7_tri_patch();
+	ff7_world_patch();
 	ff7_music_patch();
 	ff7_screen_patch();
 	ff7_stack_patch();

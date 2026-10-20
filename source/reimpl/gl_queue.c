@@ -14,6 +14,9 @@
  *    points the attribute arrays at that copy. The game only uses client-side
  *    arrays and glDrawArrays, never buffer objects or glDrawElements.
  *  - glTexImage2D, glUniformMatrix4fv and glDeleteTextures copy their data.
+ *  - glGenTextures on the game thread takes names from a pool the render
+ *    thread fills ahead of time. Some fields create 2-3 textures every
+ *    frame, and each glGenTextures used to wait ~1 ms for the queue to drain.
  *  - Calls that return something (glGen*, shader/program queries,
  *    glReadPixels, glGetIntegerv...) wait for the queue to drain and run on
  *    the calling thread. They are rare outside startup and texture loads.
@@ -68,6 +71,8 @@ void glTexParameteri_oes(GLenum target, GLenum pname, GLint param);
 #define SPIN_BEFORE_SLEEP 2000  // ~10 us on cores 1-2 (mostly idle)
 #define CACHE_PROGS 16          // programs / uniform locations tracked for redundant calls
 #define CACHE_LOCS  16
+#define NAME_POOL   64          // texture names generated ahead (power of two)
+#define NAME_REFILL 32          // refill below this many
 
 enum { OP_WRAP = 1, OP_CALL, OP_DRAW };
 
@@ -123,7 +128,7 @@ static struct {
 static GLint unpack_alignment = 4;
 
 static struct {
-    unsigned calls, draws, syncs, wakes, skipped, bare_draws;
+    unsigned calls, draws, syncs, wakes, skipped, bare_draws, pooled_names;
     unsigned long long bytes, game_us, sync_us, stall_us, busy_us, other_us;
     uint32_t peak;
 } st;
@@ -367,13 +372,13 @@ unsigned long long gl_queue_take_game_us(void) {
 
 void gl_queue_report(double seconds) {
     if (!active || seconds <= 0) return;
-    l_info("render thread: busy %.0f%% | %.0f calls/s (%.0f redundant skipped), %.0f draws/s (%u without arrays so far), %.0f wakes/s, %.0f KB/s copied | "
+    l_info("render thread: busy %.0f%% | %.0f calls/s (%.0f redundant skipped), %.0f draws/s (%u without arrays so far), %.0f wakes/s, %.0f KB/s copied, %.1f texture names/s from the pool | "
            "game thread waited: %.0f syncs/s %.1f ms/s, queue full %.1f ms/s | main thread waited %.1f ms/s | peak queue %u KB",
            st.busy_us / 10000.0 / seconds, st.calls / seconds, st.skipped / seconds, st.draws / seconds, st.bare_draws,
-           st.wakes / seconds, st.bytes / 1024.0 / seconds,
+           st.wakes / seconds, st.bytes / 1024.0 / seconds, st.pooled_names / seconds,
            st.syncs / seconds, st.sync_us / 1000.0 / seconds, st.stall_us / 1000.0 / seconds,
            st.other_us / 1000.0 / seconds, st.peak / 1024);
-    st.calls = st.draws = st.syncs = st.wakes = st.skipped = 0;
+    st.calls = st.draws = st.syncs = st.wakes = st.skipped = st.pooled_names = 0;
     st.bytes = st.sync_us = st.stall_us = st.busy_us = st.other_us = 0;
     st.peak = 0;
 }
@@ -676,6 +681,53 @@ GLenum gq_glGetError(void) {
 }
 
 /*
+ * Texture names: the render thread generates them ahead into a ring that only
+ * it fills (pool_head) and only the game thread takes from (pool_tail). The
+ * names are reserved in vitaGL when generated, so nothing else can get them.
+ */
+static GLuint name_pool[NAME_POOL];
+static volatile uint32_t pool_head, pool_tail;
+static volatile int pool_refill_queued;
+
+static void pool_refill(void) {
+    uint32_t room = NAME_POOL - (pool_head - pool_tail);
+    GLuint ids[NAME_POOL] = {0};
+    if (room) glGenTextures(room, ids);
+    uint32_t h = pool_head;
+    for (uint32_t i = 0; i < room; i++)
+        if (ids[i]) name_pool[h++ % NAME_POOL] = ids[i];
+    __sync_synchronize(); // names before the count
+    pool_head = h;
+    pool_refill_queued = 0;
+}
+
+static void pool_check(void) {
+    if (!pool_refill_queued && pool_head - pool_tail < NAME_REFILL) {
+        pool_refill_queued = 1;
+        static const uint32_t no_args[1];
+        queue_call((void *) pool_refill, 0, no_args, NULL, 0, 0);
+    }
+}
+
+void gq_glGenTextures(GLsizei n, GLuint * ids) {
+    if (on_game() && n > 0 && ids) {
+        uint32_t t = pool_tail;
+        if (pool_head - t >= (uint32_t) n) {
+            __sync_synchronize(); // count before the names
+            for (int i = 0; i < n; i++) ids[i] = name_pool[t++ % NAME_POOL];
+            __sync_synchronize();
+            pool_tail = t;
+            st.pooled_names += n;
+        } else {
+            DIRECT(glGenTextures(n, ids));
+        }
+        pool_check();
+        return;
+    }
+    DIRECT(glGenTextures(n, ids));
+}
+
+/*
  * Calls that return something: run directly once the queue is empty
  */
 void gq_glAttachShader(GLuint program, GLuint shader) {
@@ -701,9 +753,6 @@ void gq_glGenFramebuffers(GLsizei n, GLuint * ids) {
 }
 void gq_glGenRenderbuffers(GLsizei n, GLuint * ids) {
     DIRECT(glGenRenderbuffers(n, ids));
-}
-void gq_glGenTextures(GLsizei n, GLuint * ids) {
-    DIRECT(glGenTextures(n, ids));
 }
 void gq_glGetIntegerv(GLenum pname, GLint * data) {
     DIRECT(glGetIntegerv(pname, data));

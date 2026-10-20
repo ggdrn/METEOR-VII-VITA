@@ -151,6 +151,32 @@ static inline void store(uint8_t * d, int dst_bpp, uint32_t conv, uint32_t raw) 
     }
 }
 
+// Paletted rows: the per-pixel switch on the destination depth cost ~10
+// cycles a pixel, and some fields convert 2-3 256x256 textures every frame
+static void blit8_32(uint32_t * d, const uint8_t * s, int w, const uint32_t * lut) {
+    int x = 0;
+    for (; x + 4 <= w; x += 4) {
+        uint32_t i0 = s[x], i1 = s[x + 1], i2 = s[x + 2], i3 = s[x + 3];
+        d[x] = lut[i0];
+        d[x + 1] = lut[i1];
+        d[x + 2] = lut[i2];
+        d[x + 3] = lut[i3];
+    }
+    for (; x < w; x++) d[x] = lut[s[x]];
+}
+
+static void blit8_16(uint16_t * d, const uint8_t * s, int w, const uint16_t * lut) {
+    int x = 0;
+    for (; x + 4 <= w; x += 4) {
+        uint32_t i0 = s[x], i1 = s[x + 1], i2 = s[x + 2], i3 = s[x + 3];
+        d[x] = lut[i0];
+        d[x + 1] = lut[i1];
+        d[x + 2] = lut[i2];
+        d[x + 3] = lut[i3];
+    }
+    for (; x < w; x++) d[x] = lut[s[x]];
+}
+
 // Development self-test: the first conversions of each kind also run the
 // original into a scratch buffer and the outputs are compared byte by byte.
 #ifdef ENABLE_SELFTESTS
@@ -249,10 +275,21 @@ static void convert_image_data(int invert, int raw_index, void * th, void * tf, 
             raw[i] = c;
             conv[i] = encode(&enc, c);
         }
-        for (int y = 0; y < height; y++, dst += pitch) {
-            uint8_t * d = dst;
-            for (int x = 0; x < width; x++, d += dst_bpp, src++)
-                store(d, dst_bpp, conv[*src], raw[*src]);
+        if (dst_bpp == 4 && !(((uintptr_t) dst | (uint32_t) pitch) & 3)) {
+            // The usual case (RGBA8888): one table load and store per pixel
+            for (int y = 0; y < height; y++, dst += pitch, src += width)
+                blit8_32((uint32_t *) dst, src, width, conv);
+        } else if (dst_bpp == 2 && !(((uintptr_t) dst | (uint32_t) pitch) & 1)) {
+            uint16_t conv16[256];
+            for (int i = 0; i < 256; i++) conv16[i] = (uint16_t) conv[i];
+            for (int y = 0; y < height; y++, dst += pitch, src += width)
+                blit8_16((uint16_t *) dst, src, width, conv16);
+        } else {
+            for (int y = 0; y < height; y++, dst += pitch) {
+                uint8_t * d = dst;
+                for (int x = 0; x < width; x++, d += dst_bpp, src++)
+                    store(d, dst_bpp, conv[*src], raw[*src]);
+            }
         }
     } else {
         for (int y = 0; y < height; y++, dst += pitch) {

@@ -343,3 +343,214 @@ segundo, a mesma que na v0.2 ficava em 28–29 fps com a thread do jogo 96%
 ocupada): 615 despertares por segundo em vez de ~4.000, e 30 fps estáveis com
 74–76% de trabalho real. A queda vem principalmente da pilha sem chamada
 (v0.2.04); os despertares agrupados somam pouco.
+
+## Campos que recriam texturas a cada quadro (v0.5.01)
+
+Nos dois trechos lentos dos logs da v0.5 (entrada da base da Shinra e uma
+área que ficava em 25,8 fps), a thread do jogo fica 87–92% ocupada e o
+padrão é o mesmo: o jogo recria 2–3 texturas de 256×256 por quadro
+(44–76 por segundo). Cada uma custava:
+
+| Custo (por segundo, cena a 25,8 fps) | Antes |
+|---|---|
+| Conversão paletada → RGBA (`textures/s: ... ms converting`) | 155 ms |
+| `glGenTextures` esperando a fila GL esvaziar (`game thread waited: 66 syncs/s`) | 63 ms |
+
+Juntos, ~22% da thread do jogo.
+
+- **Conversão** (`source/ff7_texture.c`): o laço por pixel decidia o formato
+  de destino (`switch`) a cada pixel. Agora há laços separados para destino
+  de 32 e 16 bits (uma leitura de tabela e uma escrita por pixel); outros
+  formatos e destinos desalinhados seguem pelo laço antigo.
+- **Nomes de textura** (`source/reimpl/gl_queue.c`): a thread de render gera
+  64 nomes adiantados; o `glGenTextures` da thread do jogo pega do estoque
+  sem esperar a fila. Os nomes já ficam reservados no vitaGL ao serem
+  gerados. A linha `render thread:` mostra `texture names/s from the pool`;
+  o número de `syncs/s` nesses trechos deve cair para perto de zero.
+
+## Faixa preta no campo, de novo (v0.5.01)
+
+O log `drawing area: x 0 y 0 w 640 h 448 - field` mostra que o campo usa 448
+das 480 linhas, não 464: o zoom da v0.2.02 ainda deixava ~18 px pretos
+embaixo. Agora o zoom segue a área de desenho de largura total que o jogo
+define no modo de campo (448 por padrão): o campo ocupa 777×544, sem
+distorção e sem cortar nada nas laterais.
+
+Esticar para 960×544 distorceria a imagem em 23%, e preencher a largura sem
+distorcer cortaria 128 das 544 linhas (diálogos e personagens nas bordas),
+então nenhum dos dois é o padrão. Quem preferir a tela toda esticada pode
+criar `ux0:data/ffvii-vita/field_stretch_on.txt`.
+
+## Batalha sem faixa preta (v0.5.02)
+
+Na batalha, a cena 3D e o menu de comandos também terminam na linha 448.
+O zoom do campo agora vale também quando o modo de jogo do ff7.exe (word em
+`0xCBF9DC`: 1 campo, 2 batalha, 3 mapa-múndi…) é batalha: a imagem preenche
+a altura e o menu fica colado na borda de baixo. A câmera da batalha é a do
+jogo, feita para 448 linhas; mostrar mais cena embaixo do menu exigiria outra
+projeção e mover todas as janelas da batalha, por isso o zoom amplia a imagem
+em vez disso. O log mostra `game mode: N` a cada troca de modo e
+`field zoom: on (battle)`. `field_stretch_on.txt` também estica a batalha.
+
+Na v0.5.03 a batalha passou a usar um zoom mais leve (472 linhas): os
+submenus (Magia, Item…) descem até ~465, abaixo da área 3D, e com 448 a
+última linha deles era cortada. A faixa preta sob o menu principal fica bem
+menor, mas não some de todo.
+
+## Profiler reiniciava o console (v0.5.04, `source/utils/profiler.c`)
+
+Na v0.5.03, com `profile_on.txt`, o console reiniciava logo no boot e o
+`profile.bin` ficava vazio (o log parava no `onResume`: o resto não chegou ao
+cartão). Desde a v0.00.39, última vez em que o profiler rodou, o boot passou a
+reescrever 333 mil pontos do texto da `.so` (`ff7_stack`, v0.2.04) e a
+esvaziar o cache do texto inteiro, na thread do jogo, exatamente quando o
+profiler já tirava e devolvia a permissão de execução desse mesmo texto em
+outro núcleo. Duas operações de kernel sobre os mesmos 15 MB ao mesmo tempo.
+
+- O profiler só começa a amostrar 20 s depois de iniciado (tela-título),
+  depois de todos os patches de boot.
+- As trocas de proteção são uma de cada vez (estado IDLE → ARMING → ARMED →
+  RESTORING): só quem tira o texto de ARMED devolve a execução, e o sampler
+  só arma a partir de IDLE.
+- Quem reescreve o texto em jogo (gancho do swirl, toque, fundo de campo,
+  `ff7_memmap`, `ff7_stack`) chama `profiler_hold()`/`profiler_release()`,
+  que desarmam e seguram o profiler enquanto isso.
+- Só páginas inteiras do texto são protegidas: a última página parcial tem o
+  começo da code cave do so_util (trampolins dos ganchos), que antes podia
+  perder a execução sem estar na faixa tratada pelo handler.
+- Uma falha que não é do profiler aparece no log
+  (`profiler: fault not caused by the profiler at ...`).
+
+## Mapa-múndi: primeiro perfil e profiler preciso (v0.5.05)
+
+Logs da v0.5.04 (save carregado direto no mapa-múndi): 18–22 fps, thread do
+jogo 92–93% ocupada, ~50 ms por quadro, GPU ~3 ms, GL 0%. Por segundo:
+~1.300 desenhos, ~66 mil vértices, 7.260 vértices iluminados, 296 listas de
+triângulos. O GL e a GPU não pesam; é código recompilado do jogo.
+
+O perfil (profile_on.txt) deu metade das amostras do mapa em
+`func_0x0074c85d_ex`, mas essa função é só a espera de quadro do mapa
+(`usleep((alvo - agora) / 100)`, depois `_check_event`). Não é custo: é a
+volta do `usleep`. Com o sampler nos cores 1–2, a nova proteção do texto só
+valia no core 0 quando o TLB dele perdia a entrada antiga (troca de página,
+volta de uma espera). Laços quentes nunca eram amostrados. As ~190 amostras
+restantes ficaram espalhadas demais para apontar uma função.
+
+**Profiler preciso.** O sampler agora roda no core 0, com prioridade maior
+que a da thread do jogo: interrompe o jogo, troca a proteção nesse núcleo e o
+jogo falha exatamente na instrução em que parou. Não arma enquanto a thread
+do jogo dorme ou espera (`game_idle`, marcado em `utils/glstats.c`).
+
+**Amostragem contínua.** `ux0:data/ffvii-vita/profile_all.txt` amostra a
+cada 5 ms sempre que a thread do jogo está rodando, não só em quadros acima
+de 100 ms ou sem pausa por 50 ms (o mapa dorme um pouco a cada quadro, então
+o modo "picos" quase não amostrava).
+
+**`game mode` no mapa.** Com o save carregado direto no mapa, o log ficava em
+`game mode: 0` (o modo só era lido depois do primeiro fundo de campo), e o
+zoom da batalha não ligava. `ff7_screen.c` agora lê a página do modo direto
+da tabela `MEMMAP` assim que ela está mapeada.
+
+## Mapa-múndi nativo, parte 1 (v0.5.06, `source/ff7_world.c`)
+
+Perfil da v0.5.05 com `profile_all.txt` (~5.000 amostras da thread do jogo
+andando no mapa, 19–23 fps, ~50 ms por quadro), com as amostras de
+`mk_address` reatribuídas a quem chama:
+
+| Função | % | O que é |
+|---|---|---|
+| `0x75F68C` | 28,9% | desenha os triângulos de uma malha do terreno (visibilidade, recorte, cor) |
+| `0x75F263` | 11,6% | transforma 126 vértices da malha, projeta 123 e marca os fora da tela |
+| `0x68DAE1` | 9,7% | cor de um vértice (luz × rgb, 0..255); 3 por triângulo |
+| `0x75F0AD` | 8,0% | monta os 122 vértices da malha (int16 → float, z projetado, curvatura do planeta) |
+| `0x66E272`, `0x66CE40`, `_check_event`, `0x7592E0`, `0x760CC4` | ~17% | resto |
+
+O terreno é desenhado malha por malha por `0x751EFC`: para cada malha,
+`0x75F0AD` → `0x75F263` → `0x75F68C`, que chama `0x68DAE1` três vezes por
+triângulo.
+
+Viraram nativas `0x75F263`, `0x68DAE1` e `0x75F0AD` (~29% da thread no
+mapa). A matemática está em `source/ff7_world_core.h` e foi conferida contra
+o código recompilado rodando no emulador (`scripts/emu/test_world.py
+libjni_ff7.so [chamadas] [vértices] ff7_en.exe`): memória escrita,
+EAX/ECX/EDX, ESP/EBP, topo da pilha x87, flag de divisão por zero e C0/C2/C3
+idênticos em ~75 mil vértices de cada função, com infinitos, NaN, `w == 0`,
+conversões que saturam e as bordas de recorte. Detalhes que o recompilador
+impõe:
+
+- `fistp` do x87 vira `vcvt.s32` (trunca e satura, NaN → 0), não arredonda;
+- a divisão por zero não dá infinito: o valor fica como estava e o byte
+  `0x56` do estado x87 (flag ZE) vai a 1;
+- `0x68DAE1` deixa em EDX `m`, `out` ou `rgb` conforme o caminho de cada
+  canal; casos com NaN numa comparação ficam com a função original.
+
+As 4 chamadas do começo de `0x75F0AD` (montagem das matrizes) continuam no
+código recompilado, chamadas pela versão nativa com a mesma pilha x86.
+
+Chaves: `world_off.txt` desliga as três; `selftest_on.txt` confere as
+primeiras 300 chamadas de cada uma contra o original no jogo. O log mostra
+`world map meshes/s: built N native ...; projected N native ... | colored
+vertices/s (0x68DAE1): N native, N original`.
+
+Ganho esperado: ~20–25% da thread no mapa (de ~50 para ~38–40 ms por quadro,
+~25 fps). Para os 30 fps falta `0x75F68C` (29%), a próxima.
+
+O `profile_all.txt` reiniciou o console duas vezes após 20–40 s (~170 trocas
+de proteção do texto inteiro por segundo). Agora amostra a cada 20 ms.
+
+### Resultado da v0.5.06
+
+Mapa-múndi andando: de 19–23 fps para **23–29 fps** (média ~25,5; thread do
+jogo 85–90% ocupada, ~39 ms por quadro). Os três autotestes passaram no Vita
+(`selftest ok`), e nenhuma chamada caiu na versão original (~410 malhas e
+~37 mil vértices coloridos por segundo).
+
+## Mapa-múndi nativo, parte 2: os triângulos (v0.5.07, `source/ff7_world_tri.h`)
+
+`0x75F68C` (~29% no perfil da v0.5.05) desenha os triângulos de uma malha.
+Por triângulo:
+
+1. descarta se nenhum vértice está na área de recorte em x ou em y (flags
+   de `0x75F263`); calcula a área com `0x760CC4`; limpa o slot de seleção
+   `0xE36110` se ele aponta para este triângulo;
+2. descarta faces de costas; escolhe o z mais distante (com as diferenças
+   truncadas, como o x86);
+3. perto da câmera, marca `0xE37520` se o triângulo cruza o centro da tela
+   nos dois eixos (o x86 compara o y com o centro horizontal também);
+4. descarta se algum vértice tem `w` ≤ 0;
+5. névoa: `0x760D1B` ordena os vértices por z; cores e palavras de brilho
+   vêm de tabelas pela faixa de profundidade;
+6. pede espaço no buffer de vértices da textura (`0x66E272`), calcula UV e
+   normais, colore cada vértice com `0x68DAE1` e grava x/w, y/w, z/w, 1/w,
+   cor, u e v.
+
+`0x760CC4`, `0x760D1B`, `0x74C969` e o caminho comum de `0x66E272` (há espaço
+no buffer) viraram código nativo junto. `0x68DAE1` é chamada pela entrada
+enganchada (a versão nativa da v0.5.06), e o caminho lento de `0x66E272`
+(alocar um buffer novo) chama a função original, com a mesma pilha x86.
+
+**Teste.** Como a função chama outras funções do jogo e passa variáveis
+locais da pilha x86 por ponteiro, o teste compila o próprio
+`ff7_world_tri.h` num blob ARM (`scripts/emu/blob_world_tri.c`, com o
+arm-vita-eabi-gcc) e roda o blob e a função recompilada no mesmo emulador,
+a partir do mesmo estado, chamando as mesmas funções recompiladas
+(`scripts/emu/test_world_tri.py libjni_ff7.so ff7_en.exe [malhas]`). Compara
+toda a memória x86 (menos a pilha abaixo da chamada), EAX/ECX/EDX/ESP/EBP/ESI,
+C0/C2/C3, flag de divisão por zero, topo do x87 e o número de chamadas a
+`_check_event`. O caminho lento de `0x66E272` não roda no emulador (aloca
+com funções externas).
+
+Detalhes que só o teste mostrou:
+
+- uma comparação com NaN no `fcomp` recompilado **não muda** C0/C2/C3: o
+  `test ah, 1` seguinte vê o C0 da comparação anterior;
+- os dois primeiros descartes (flags e face de costas) pulam o incremento do
+  4º argumento, e o EDX final depende de qual caminho o último triângulo
+  tomou.
+
+Sem autoteste no jogo: rodar as duas versões alocaria o buffer de vértices
+duas vezes. `world_tri_off.txt` desliga só esta função; `world_off.txt`,
+todas. O log mostra `world map triangles/s: N seen, N drawn (...)`.
+
+Ganho esperado: a maior parte dos ~11 ms que a função custava por quadro na
+v0.5.06, o que deve levar o mapa aos 30 fps.

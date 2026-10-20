@@ -18,6 +18,14 @@
  */
 void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us);
 
+/**
+ * Bracket code that writes to the .so text and flushes the caches (hooks
+ * that restore the original instructions, patching): disarms the sampler and
+ * keeps it off until profiler_release(). No-ops when the profiler is off.
+ */
+void profiler_hold(void);
+void profiler_release(void);
+
 /** Logs sampler counters (diagnostics). */
 void profiler_report(void);
 

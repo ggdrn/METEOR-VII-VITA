@@ -21,6 +21,7 @@
 #include "ff7_bg.h"
 #include "ff7_math.h"
 #include "ff7_tri.h"
+#include "ff7_world.h"
 #include "ff7_stack.h"
 #include "reimpl/gl_variants.h"
 #include "reimpl/gl_queue.h"
@@ -181,7 +182,12 @@ int main() {
     profiler_start(&frame_start_us, 100000);
     profiling = 1;
 #else
-    if (file_exists(DATA_PATH "profile_on.txt")) {
+    // profile_all.txt: every 5 ms while the game thread runs, not only during
+    // slow stretches (for scenes that stay below the game's frame rate)
+    if (file_exists(DATA_PATH "profile_all.txt")) {
+        profiler_start(NULL, 0);
+        profiling = 1;
+    } else if (file_exists(DATA_PATH "profile_on.txt")) {
         profiler_start(&frame_start_us, 100000);
         profiling = 1;
     }
@@ -256,6 +262,7 @@ int main() {
             ff7_bg_report((now - heartbeat_us) / 1000000.0);
             ff7_math_report((now - heartbeat_us) / 1000000.0);
             ff7_tri_report((now - heartbeat_us) / 1000000.0);
+            ff7_world_report((now - heartbeat_us) / 1000000.0);
             ff7_stack_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
             gl_queue_report((now - heartbeat_us) / 1000000.0);
