@@ -554,3 +554,72 @@ todas. O log mostra `world map triangles/s: N seen, N drawn (...)`.
 
 Ganho esperado: a maior parte dos ~11 ms que a função custava por quadro na
 v0.5.06, o que deve levar o mapa aos 30 fps.
+
+## Minigame da moto (highway, modo 6) — diagnóstico dos logs v0.5.07
+
+Logs da sessão de v0.5.07 (bike.webm → modo 6, t ≈ 141–163 s):
+
+| Métrica | Valor |
+|---|---|
+| FPS | 22–23 |
+| Work da thread | 95–97% |
+| Draw/frame | ~72–77 |
+| Verts/frame | ~3.500 |
+| `triangle lists/s native` | 2.100–2.740 |
+| `lit vertices/s` | 0 |
+| `field background tiles/s` | 0 |
+| `cos/sin native/s` | 4.000–8.000 |
+| GPU tail | ~3 ms |
+| GL da thread | 0% |
+
+O padrão é idêntico ao mapa-múndi antes da v0.5.06: CPU-bound, sem ociosidade,
+GPU trivial, sem campo de fundo nem iluminação de vértice.
+
+**`ff7_tri` já cobre o highway**: as 2.100–2.740 listas de triângulos por
+segundo na linha `triangle lists/s native` do log confirmam que `C_006A8002`
+é chamado no highway e a substituição nativa está ativa. O que resta é o
+código recompilado do jogo que prepara a geometria a cada frame — as funções
+equivalentes às que foram nativas no mapa-múndi (`0x75F263`, `0x75F0AD`,
+`0x75F68C`), mas para o módulo highway (endereços provavelmente na faixa
+`0x74xxxx`).
+
+**Não existe perfil do highway ainda.** Para identificar essas funções é
+preciso rodar `profile_all.txt` durante o minigame e transferir o
+`profile.bin` resultante.
+
+## Perfil do minigame da moto — próximos passos
+
+1. **Coletar o perfil**: criar `ux0:data/ffvii-vita/profile_all.txt` antes de
+   entrar no highway. O profiler demora 20 s para armar após o boot, então
+   passar pela tela-título e menu normalmente antes da perseguição. Jogar o
+   minigame por 30–60 s e transferir `profile.bin` e `logs.txt`.
+
+2. **Gerar o ranking**:
+   ```
+   scripts/profile-report.py profile.bin libjni_ff7.so \
+       --from T_ENTRADA --to T_SAIDA --top 30
+   ```
+   Onde `T_ENTRADA` e `T_SAIDA` (em segundos) isolam o trecho do modo 6 no
+   log (`game mode: 6` / próximo `game mode:`). Reatribuir as amostras de
+   `mk_address` ao LR (já feito pelo script) revela as funções recompiladas
+   que dominam o tempo.
+
+3. **Identificar o padrão**: espera-se algo similar ao mapa-múndi:
+   - Uma função de transformação de vértice por frame (~10–15%)
+   - Uma função de desenho de triângulo por objeto (~20–30%)
+   - Possivelmente uma função de cor/iluminação (~8–10%)
+   Todas com símbolo `_Z15func_0x0074XXXXv` na faixa do módulo highway.
+
+4. **Implementar nativo** — mesma metodologia das funções do mapa-múndi:
+   - Levantar a semântica pelo código ARM descompilado + emulador Unicorn
+     (`scripts/emu/ff7emu.py`)
+   - Escrever `source/ff7_highway_core.h` com a matemática
+   - Verificar com script `scripts/emu/test_highway.py` (memória x86,
+     registradores, flags x87 idênticos em dezenas de milhares de casos)
+   - Instalar via `hook_addr` em `source/ff7_highway.c`
+   - Autoteste nas primeiras N chamadas no jogo com `selftest_on.txt`
+
+5. **Ganho esperado**: pelo perfil do mapa-múndi, as 3–4 funções mais quentes
+   somavam ~57% da thread. No highway, com `work` de 95–97% e ~44 ms por
+   quadro (a 23 fps), o mesmo percentual representa ~22–25 ms — suficiente
+   para atingir os 30 fps.
