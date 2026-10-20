@@ -5,14 +5,33 @@
  * (on the main thread) then draws it on the screen as one quad as tall as the
  * screen (725x544 on the Vita, centered), followed by the side borders and the
  * touch UI. In field mode the game leaves the last 16 of the 480 lines empty,
- * which showed as a black strip at the bottom of the screen (18 px).
+ * which showed as a black strip at the bottom of the screen.
+ *
+ * The field's drawing area is 640x448 (gfx_setviewport, logged below): the
+ * last 32 of the 480 lines are empty. v0.2.02 assumed 464 lines, which still
+ * left an 18 px strip. Now the zoom follows the drawing area the game sets
+ * in field mode (448 lines unless a field asks for another full-width area).
  *
  * While the field background renderer runs (ff7_bg_last_us), the frame's quad
- * is scaled by 480/464 around the top center: the field fills the screen
- * height (750 px wide), the empty lines fall below the screen, and the
- * picture keeps its aspect. The side borders are shortened to match. The UI
+ * is scaled by 480/448 around the top center: the field fills the screen
+ * height (777x544 on the Vita), the empty lines fall below the screen, and
+ * the picture keeps its aspect, with nothing cut on the sides. Stretching to
+ * the whole 960x544 would distort it by 23% and filling the width without
+ * distortion would cut 128 of the 544 lines, so neither is the default:
+ * DATA_PATH "field_stretch_on.txt" stretches the field to the full width for
+ * those who prefer it.
+ *
+ * Battles: the 3D scene and the command menu end at line 448, but the
+ * submenus (magic, items...) open lower, down to about line 465. While
+ * ff7.exe's game mode (word at VA GAME_MODE_VA, written by the module switch)
+ * is MODE_BATTLE, a milder zoom keeps BATTLE_LINES lines: the black strip
+ * under the command menu shrinks and the submenus still fit (v0.5.02 used
+ * 448 there and cut their last row). The battle camera
+ * is the game's own (made for 448 lines): showing more of the scene below
+ * would mean a new projection and moving every battle window, so the zoom
+ * enlarges the picture instead. The side borders are shortened to match. The UI
  * ("Encounters ON", "A") is drawn afterwards in its usual place, on top.
- * Battle, menus, movies and the world map are drawn as before.
+ * Menus, movies and the world map are drawn as before.
  *
  * Both quads are patched right after the game builds them:
  *   VIDEO_doQuad (6 vertices: x, y, z, color, u, v; 0x18 bytes each), then
@@ -46,6 +65,7 @@
 extern so_module so_mod;
 
 #define OFF_SWITCH       DATA_PATH "field_zoom_off.txt"
+#define STRETCH_SWITCH   DATA_PATH "field_stretch_on.txt"
 #define SYM_QUAD_TEX     "VIDEO_doQuad_tex_forOffscreen"
 #define SYM_BORDER       "VIDEO_doQuad_color_forBorder"
 #define SYM_VIEWPORT     "_Z15gfx_setviewportjjjjj"
@@ -60,16 +80,41 @@ extern so_module so_mod;
 #define RET_BORDER_RIGHT 0x9537db
 
 #define FRAME_LINES      480.0f
-#define FIELD_LINES      464.0f     // lines the field fills (screenshot: 18 of 544 px empty)
+#define FIELD_LINES      448        // field drawing area: x 0 y 0 w 640 h 448
+#define MIN_FIELD_LINES  400        // full-width areas shorter than this aren't the field's
+#define BATTLE_LINES     472        // battle submenus reach ~line 465 (the 3D area ends at 448)
 #define FIELD_TIMEOUT_US 250000     // field mode ends this long after the last background frame
 #define VERTEX_SIZE      0x18
 #define QUAD_VERTICES    6
 #define MAX_VIEWPORTS    32
+#define GAME_MODE_VA     0xcbf9dc   // uint16_t: 1 field, 2 battle, 3 world map...
+#define MODE_BATTLE      2
 
 static so_hook quad_tex_hook, border_hook, viewport_hook;
 static uint8_t ** cur_vertex;
 static uintptr_t base;
-static int zoom_enabled, zoomed;
+static int zoom_enabled, zoomed, stretch;
+// Lines the picture fills, per mode: set by the game thread, read by the main thread
+static volatile uint32_t field_lines = FIELD_LINES;
+static uint32_t logged_lines;
+static volatile uint16_t * game_mode;
+static int logged_mode = -1;
+
+static const uint32_t * memmap; // ff7.exe's 4 KB page table (see ff7_memmap.c)
+
+// ff7.exe's memory is mapped once the game runs (a mapped page never moves);
+// until then, no mode. Read from MEMMAP directly: mk_address would hand out
+// its dummy page for an unmapped address. A save loaded straight into the
+// world map never runs the field renderer, so that can't be the signal.
+static int current_mode(void) {
+    if (!game_mode) {
+        uint32_t page = memmap ? memmap[GAME_MODE_VA >> 12] : 0;
+        if (!page) return 0;
+        game_mode = (volatile uint16_t *) (page + (GAME_MODE_VA & 0xfff));
+    }
+    return *game_mode;
+}
+
 // Frame quad of the current VIDEO_update, after the zoom (for the borders)
 static float zoom_left, zoom_right, zoom_center;
 
@@ -91,26 +136,41 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     int r = SO_CONTINUE(int, quad_tex_hook, x, y, w, h);
     if ((uintptr_t) __builtin_return_address(0) != base + RET_FRAME_QUAD) return r;
 
-    int field = zoom_enabled && in_field();
-    if (field != zoomed) {
-        zoomed = field;
-        l_info("field zoom: %s", field ? "on" : "off");
+    int mode = current_mode();
+    if (mode != logged_mode) {
+        logged_mode = mode;
+        l_info("game mode: %d", mode);
     }
-    if (!field) {
+    int field = zoom_enabled && in_field();
+    int battle = zoom_enabled && !field && mode == MODE_BATTLE;
+    int on = field ? 1 : battle ? 2 : 0;
+    if (on != zoomed) {
+        zoomed = on;
+        l_info("field zoom: %s", on == 1 ? "on (field)" : on == 2 ? "on (battle)" : "off");
+    }
+    if (!on) {
         zoom_left = zoom_right = 0;
         return r;
     }
 
     // The quad VIDEO_doQuad just wrote: x0..x1 by 0..screen height (y down)
+    uint32_t lines = field ? field_lines : BATTLE_LINES;
+    if (lines != logged_lines) {
+        logged_lines = lines;
+        l_info("field zoom: %u of 480 lines fill the screen%s", lines, stretch ? ", stretched to the full width" : "");
+    }
     uint8_t * end = *cur_vertex;
     float x0 = vertex(end, 0)[0], x1 = vertex(end, 1)[0];
-    const float k = FRAME_LINES / FIELD_LINES;
+    const float k = FRAME_LINES / (float) lines;
     zoom_center = (x0 + x1) * 0.5f;
-    zoom_left = zoom_center - (zoom_center - x0) * k;
-    zoom_right = zoom_center + (x1 - zoom_center) * k;
+    // The quad is centered on the screen: the screen is 2 * center wide
+    float kx = k;
+    if (stretch && x1 > x0) kx = zoom_center / (zoom_center - x0); // edges at 0 and the screen width
+    zoom_left = zoom_center - (zoom_center - x0) * kx;
+    zoom_right = zoom_center + (x1 - zoom_center) * kx;
     for (int i = 0; i < QUAD_VERTICES; i++) {
         float * v = vertex(end, i);
-        v[0] = zoom_center + (v[0] - zoom_center) * k;
+        v[0] = zoom_center + (v[0] - zoom_center) * kx;
         v[1] *= k; // top stays at 0, the empty lines go below the screen
     }
     return r;
@@ -134,6 +194,10 @@ static int border_hooked(int r0, int g0, int b0, int r1, int g1, int b1) {
 
 static int viewport_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t arg) {
     int field = in_field();
+    // The field's own full-width area (smaller ones are windows and effects;
+    // a full 480-line area right at a mode change must not stick)
+    if (field && x == 0 && y == 0 && w == 640 && h >= MIN_FIELD_LINES && h < 480)
+        field_lines = h;
     int i;
     for (i = 0; i < viewport_count; i++)
         if (viewports[i].x == x && viewports[i].y == y && viewports[i].w == w && viewports[i].h == h
@@ -169,8 +233,11 @@ void ff7_screen_patch(void) {
         return;
     }
     cur_vertex = (uint8_t **) (base + CUR_VERTEX);
+    memmap = (const uint32_t *) so_symbol(&so_mod, "MEMMAP");
     quad_tex_hook = hook_addr(quad_tex, (uintptr_t) &quad_tex_hooked);
     border_hook = hook_addr(border, (uintptr_t) &border_hooked);
     zoom_enabled = 1;
-    l_info("ff7_screen: field zoom installed (%.0f of %.0f lines fill the screen)", FIELD_LINES, FRAME_LINES);
+    stretch = file_exists(STRETCH_SWITCH);
+    l_info("ff7_screen: field zoom installed (%u of 480 lines fill the screen%s)", FIELD_LINES,
+           stretch ? ", stretched to the full width by " STRETCH_SWITCH : "");
 }

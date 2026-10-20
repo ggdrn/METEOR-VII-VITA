@@ -38,6 +38,7 @@
 #include "ff7_memmap.h"
 
 #include "utils/logger.h"
+#include "utils/profiler.h"
 #include "utils/utils.h"
 
 #include <stdint.h>
@@ -117,8 +118,10 @@ static uintptr_t decode_bl(const uint16_t * hw) {
 }
 
 static void write_code(void * dst, const void * src, size_t len) {
+    profiler_hold();
     sceClibMemcpy(dst, src, len);
     kuKernelFlushCaches(dst, len);
+    profiler_release();
 }
 
 /*
@@ -240,8 +243,10 @@ static void patch_constant_sites(void) {
         return;
     }
     unsigned unmapped = 0;
+    profiler_hold();
     unsigned patched = walk_sites(1, &unmapped);
     kuKernelFlushCaches((void *) so_mod.text_base, so_mod.text_size);
+    profiler_release();
     l_info("ff7_memmap: %u of %u constant-address mk_address calls removed (%u not matching, %u unmapped) in %llu ms",
            patched, count, bad, unmapped, (sceKernelGetProcessTimeWide() - t0) / 1000);
 }

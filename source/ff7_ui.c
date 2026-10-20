@@ -10,8 +10,10 @@
  * plain key (0x9C Enter/OK, 0x52 cancel, ...) or a web link (0x80/0x81).
  * 0x83 is the floating ESCAPE button of battles: it holds PageUp + PageDown,
  * the PC's L1 + R1, so it goes too (holding L + R on the Vita escapes).
- * Toggle buttons (Encounters ON/OFF), triggered buttons, swipers and the
- * screen itself are untouched.
+ * The toggle next to "Encounters ON/OFF" switches the touch d-pad between
+ * analog and digital; with no d-pad it does nothing, so it goes as well
+ * (recognized by the flag it toggles, TOUCH_MODE_FLAG). The Encounters
+ * toggle, triggered buttons, swipers and the screen itself are untouched.
  *
  * The first touches are logged with the objects of the current layout.
  *
@@ -22,6 +24,7 @@
 #include "ff7_ui.h"
 
 #include "utils/logger.h"
+#include "utils/profiler.h"
 
 #include <stdint.h>
 
@@ -34,6 +37,7 @@ extern so_module so_mod;
 #define TOUCH_LOG_LIMIT 40
 #define MAX_LAYOUT 32
 #define MAX_FILTERED 128
+#define TOUCH_MODE_FLAG 0x1460508 // byte toggled by the d-pad mode button (UI_current - 0x38)
 
 enum { CLS_OTHER = -1, CLS_DPAD = 1, CLS_BUTTON_MAPPED = 8, CLS_TOGGLE = 9 };
 
@@ -60,6 +64,7 @@ static uintptr_t vptrs[NUM_CLASSES];
 static void *** ui_current;     // &UI_current (UIObject **)
 static so_hook touch_began_hook, display_hook;
 static int touches_logged;
+static uint8_t * touch_mode_flag;
 
 typedef void (* touch_fn)(int id, float x, float y);
 typedef int (* contains_fn)(void * self, float x, float y);
@@ -68,11 +73,13 @@ typedef int (* contains_fn)(void * self, float x, float y);
 // arguments to double: call the original with the real prototype instead.
 static void call_original_touch_began(int id, float x, float y) {
     so_hook * h = &touch_began_hook;
+    profiler_hold();
     sceClibMemcpy((void *) h->addr, h->orig_instr, sizeof(h->orig_instr));
     kuKernelFlushCaches((void *) h->addr, sizeof(h->orig_instr));
     ((touch_fn) (h->thumb_addr ? h->thumb_addr : h->addr))(id, x, y);
     sceClibMemcpy((void *) h->addr, h->patch_instr, sizeof(h->patch_instr));
     kuKernelFlushCaches((void *) h->addr, sizeof(h->patch_instr));
+    profiler_release();
 }
 static void * last_logged_layout;
 static void ** filtered[MAX_FILTERED];
@@ -97,6 +104,8 @@ static int is_virtual_gamepad(void * obj) {
         uint32_t key = *(uint32_t *) ((uint8_t *) obj + 40);
         return !(key == 0x82 || key == 0x85); // special actions; ESCAPE (0x83) = L + R
     }
+    if (c == CLS_TOGGLE)
+        return touch_mode_flag && *(uint8_t **) ((uint8_t *) obj + 0x40) == touch_mode_flag;
     return 0;
 }
 
@@ -195,6 +204,10 @@ void ff7_ui_patch(void) {
         vptrs[i] = vt ? vt + 8 : 0; // objects point past offset-to-top and RTTI
     }
     ui_current = (void ***) so_symbol(&so_mod, "UI_current");
+    if ((uintptr_t) ui_current == so_mod.text_base + TOUCH_MODE_FLAG + 0x38)
+        touch_mode_flag = (uint8_t *) (so_mod.text_base + TOUCH_MODE_FLAG);
+    else
+        l_warn("ff7_ui: unexpected .so layout, the d-pad mode button stays");
 
     uintptr_t began = so_symbol(&so_mod, "UI_onTouchBegan");
     uintptr_t display = so_symbol(&so_mod, "_Z10UI_displayPP8UIObject");

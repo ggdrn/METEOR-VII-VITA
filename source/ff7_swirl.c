@@ -31,6 +31,7 @@
 #include "reimpl/gl_queue.h"
 #include "utils/logger.h"
 #include "utils/glstats.h"
+#include "utils/profiler.h"
 
 #include <stdint.h>
 
@@ -173,12 +174,14 @@ static unsigned long long grab_us;
 static int grab_native(int x, int y, int w, int h, int screen_h, int x_scale, int y_scale, int read_buffer,
                        void * dst) {
     if (x_scale > 1 || y_scale > 1 || !dst || w <= 0 || w > 640) {
+        profiler_hold();
         sceClibMemcpy((void *) grab_hook.addr, grab_hook.orig_instr, sizeof(grab_hook.orig_instr));
         kuKernelFlushCaches((void *) grab_hook.addr, sizeof(grab_hook.orig_instr));
         int r = ((grab_fn) (grab_hook.thumb_addr ? grab_hook.thumb_addr : grab_hook.addr))(
             x, y, w, h, screen_h, x_scale, y_scale, read_buffer, dst);
         sceClibMemcpy((void *) grab_hook.addr, grab_hook.patch_instr, sizeof(grab_hook.patch_instr));
         kuKernelFlushCaches((void *) grab_hook.addr, sizeof(grab_hook.patch_instr));
+        profiler_release();
         return r;
     }
     (void) read_buffer; // glReadBuffer is a no-op in the .so

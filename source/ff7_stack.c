@@ -34,6 +34,7 @@
 #include "ff7_stack.h"
 
 #include "utils/logger.h"
+#include "utils/profiler.h"
 #include "utils/utils.h"
 
 #include <stdint.h>
@@ -231,8 +232,10 @@ static void patch_sites(int check) {
     }
 
     unsigned counts[2] = { 0, 0 };
+    profiler_hold();
     unsigned patched = walk_sites(1, veneer, counts);
     kuKernelFlushCaches((void *) so_mod.text_base, so_mod.text_size);
+    profiler_release();
     l_info("ff7_stack: %u of %u stack mk_address calls %s (%u ESP, %u EBP; %u not matching) in %llu ms",
            patched, count, check ? "checked (stack_check.txt)" : "replaced by add.w",
            counts[0], counts[1], bad, (sceKernelGetProcessTimeWide() - t0) / 1000);

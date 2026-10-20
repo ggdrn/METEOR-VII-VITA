@@ -115,6 +115,8 @@ void glClear_stat(GLbitfield mask) {
 
 // Last time the game thread gave up the CPU (sleep or wait), for the profiler
 volatile SceUInt64 game_last_idle_us;
+// Nonzero while the game thread sleeps or waits (the profiler skips those)
+volatile int game_idle;
 
 static inline int on_gl_thread(void) {
     return sceKernelGetThreadId() == gl_thread;
@@ -142,7 +144,9 @@ int usleep_stat(unsigned int usec) {
     ff7_music_poll(); // a track read in the background starts here
     gl_queue_kick();  // the frame's last draws run while the game sleeps
     SceUInt64 t0 = now_us();
+    game_idle = 1;
     int r = precise_usleep(usec);
+    game_idle = 0;
     game_last_idle_us = now_us();
     st.sleep_us += now_us() - t0;
     st.sleep_req_us += usec;
@@ -153,7 +157,9 @@ int usleep_stat(unsigned int usec) {
 int pthread_mutex_lock_stat(void * mutex) {
     if (!on_gl_thread()) return pthread_mutex_lock_soloader(mutex);
     SceUInt64 t0 = now_us();
+    game_idle = 1;
     int r = pthread_mutex_lock_soloader(mutex);
+    game_idle = 0;
     st.lock_us += now_us() - t0;
     st.locks++;
     return r;
@@ -163,7 +169,9 @@ int pthread_cond_wait_stat(void * cond, void * mutex) {
     if (!on_gl_thread()) return pthread_cond_wait_soloader(cond, mutex);
     gl_queue_kick();
     SceUInt64 t0 = now_us();
+    game_idle = 1;
     int r = pthread_cond_wait_soloader(cond, mutex);
+    game_idle = 0;
     SceUInt64 waited = now_us() - t0;
     game_last_idle_us = now_us();
     st.wait_us += waited;
@@ -176,7 +184,9 @@ int sem_wait_stat(int * sem) {
     if (!on_gl_thread()) return sem_wait_soloader(sem);
     gl_queue_kick();
     SceUInt64 t0 = now_us();
+    game_idle = 1;
     int r = sem_wait_soloader(sem);
+    game_idle = 0;
     st.wait_us += now_us() - t0;
     st.waits++;
     return r;

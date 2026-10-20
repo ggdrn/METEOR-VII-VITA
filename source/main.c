@@ -21,6 +21,7 @@
 #include "ff7_bg.h"
 #include "ff7_math.h"
 #include "ff7_tri.h"
+#include "ff7_world.h"
 #include "ff7_stack.h"
 #include "reimpl/gl_variants.h"
 #include "reimpl/gl_queue.h"
@@ -181,7 +182,12 @@ int main() {
     profiler_start(&frame_start_us, 100000);
     profiling = 1;
 #else
-    if (file_exists(DATA_PATH "profile_on.txt")) {
+    // profile_all.txt: every 5 ms while the game thread runs, not only during
+    // slow stretches (for scenes that stay below the game's frame rate)
+    if (file_exists(DATA_PATH "profile_all.txt")) {
+        profiler_start(NULL, 0);
+        profiling = 1;
+    } else if (file_exists(DATA_PATH "profile_on.txt")) {
         profiler_start(&frame_start_us, 100000);
         profiling = 1;
     }
@@ -256,6 +262,7 @@ int main() {
             ff7_bg_report((now - heartbeat_us) / 1000000.0);
             ff7_math_report((now - heartbeat_us) / 1000000.0);
             ff7_tri_report((now - heartbeat_us) / 1000000.0);
+            ff7_world_report((now - heartbeat_us) / 1000000.0);
             ff7_stack_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
             gl_queue_report((now - heartbeat_us) / 1000000.0);
@@ -314,16 +321,75 @@ void controls_handler_touch(int32_t id, float x, float y, ControlsAction action)
 // Left stick doubles as the d-pad
 #define STICK_THRESHOLD 0.5f
 
-void controls_handler_analog(ControlsStickId which, float x, float y, ControlsAction action) {
-    static bool held[4]; // up, left, down, right
-    if (which != CONTROLS_STICK_LEFT) return;
+/*
+ * Right analog stick → world map camera rotation.
+ *
+ * On the world map, L1 (button 8) rotates the camera left and R1 (button 9)
+ * rotates it right.  The game processes those as held keys: each frame it
+ * advances the camera angle by a fixed step while the bit is set.
+ *
+ * We simulate the same: while the right stick is deflected on X, we keep
+ * the matching button held exactly as if the physical L/R button were held.
+ * The deflection magnitude is ignored (the game's own rate is fixed), but
+ * the logic is clean: push stick right → hold R1, release → release R1.
+ *
+ * Game mode word (uint16 at VA 0xCBF9DC): 3 = world map.
+ * MEMMAP is ff7.exe's page table (so_symbol "MEMMAP", see ff7_memmap.c).
+ * We resolve both lazily on first call to avoid order-of-init issues.
+ */
+#define GAME_MODE_VA_MAIN  0xcbf9dc
+#define WORLD_MAP_MODE     3
 
-    const bool now[4] = { y < -STICK_THRESHOLD, x < -STICK_THRESHOLD,
-                          y > STICK_THRESHOLD,  x > STICK_THRESHOLD };
-    for (int i = 0; i < 4; i++) {
-        if (now[i] != held[i]) {
-            held[i] = now[i];
-            ff7_onKey(&jni, FF7_CLASS, i, now[i]);
+static volatile uint16_t * world_mode_ptr = NULL; /* cached pointer into x86 mem */
+
+static int is_world_map(void) {
+    if (!world_mode_ptr) {
+        /* resolve once: ask MEMMAP for the page that holds the mode word */
+        const uint32_t * memmap = (const uint32_t *) so_symbol(&so_mod, "MEMMAP");
+        if (!memmap) return 0;
+        uint32_t page = memmap[GAME_MODE_VA_MAIN >> 12];
+        if (!page) return 0;
+        world_mode_ptr = (volatile uint16_t *)(page + (GAME_MODE_VA_MAIN & 0xfff));
+    }
+    return *world_mode_ptr == WORLD_MAP_MODE;
+}
+
+void controls_handler_analog(ControlsStickId which, float x, float y, ControlsAction action) {
+    /* ---- left stick: d-pad emulation (unchanged) ---- */
+    static bool held[4]; /* up, left, down, right */
+    if (which == CONTROLS_STICK_LEFT) {
+        const bool now[4] = { y < -STICK_THRESHOLD, x < -STICK_THRESHOLD,
+                              y > STICK_THRESHOLD,  x > STICK_THRESHOLD };
+        for (int i = 0; i < 4; i++) {
+            if (now[i] != held[i]) {
+                held[i] = now[i];
+                ff7_onKey(&jni, FF7_CLASS, i, now[i]);
+            }
         }
+        return;
+    }
+
+    /* ---- right stick: world map camera rotation ---- */
+    if (which != CONTROLS_STICK_RIGHT) return;
+
+    static bool rot_held[2]; /* [0] = left (L1/btn 8), [1] = right (R1/btn 9) */
+
+    /* If we leave the world map while a rotation button is held, release it */
+    if (!is_world_map()) {
+        if (rot_held[0]) { rot_held[0] = false; ff7_onKey(&jni, FF7_CLASS, 8, false); }
+        if (rot_held[1]) { rot_held[1] = false; ff7_onKey(&jni, FF7_CLASS, 9, false); }
+        return;
+    }
+
+    bool now_left  = (x < -STICK_THRESHOLD);
+    bool now_right = (x >  STICK_THRESHOLD);
+
+    if (now_left != rot_held[0]) {
+        rot_held[0] = now_left;
+        ff7_onKey(&jni, FF7_CLASS, 8, now_left);   /* L1 = rotate left  */
+    }
+    if (now_right != rot_held[1]) {
+        rot_held[1] = now_right;
+        ff7_onKey(&jni, FF7_CLASS, 9, now_right);  /* R1 = rotate right */
     }
 }

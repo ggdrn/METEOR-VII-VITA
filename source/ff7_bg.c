@@ -30,6 +30,7 @@
 #include "ff7_selftest.h"
 
 #include "utils/logger.h"
+#include "utils/profiler.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -336,8 +337,10 @@ static int verify_log(uint32_t * bad_addr, uint32_t * want, uint32_t * got) {
 
 static void unhook_alloc(void) {
     if (!alloc_hooked) return;
+    profiler_hold();
     sceClibMemcpy((void *) alloc_hook.addr, alloc_hook.orig_instr, sizeof(alloc_hook.orig_instr));
     kuKernelFlushCaches((void *) alloc_hook.addr, sizeof(alloc_hook.orig_instr));
+    profiler_release();
     alloc_hooked = 0;
 }
 
