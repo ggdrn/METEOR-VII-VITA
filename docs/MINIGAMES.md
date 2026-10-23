@@ -1176,3 +1176,41 @@ A iluminação (`light_native`, ~9 ms por quadro) continua igual.
 **Pendente no Vita:** FPS na área depois da corrida e se as texturas
 animadas aparecem iguais (cores e filtro). Se algo sair errado,
 `gpu_palette_off.txt` isola.
+
+## v0.6.32: luz e fundo do campo mais nativos (área da corrida de chocobo)
+
+**Log da v0.6.31.** A paleta na GPU funcionou: ~268 páginas/s como P8, e
+a conversão caiu de 338 para 23 ms/s. A área passou de 15 para 26,8–27,6
+fps, mas a thread do jogo continua 91–95% ocupada. No perfil (trecho curto:
+o profiler ficou pausado no modo 1 até a gravação da cena) aparecem a luz
+(`light_native` ~19%), a criação de textura (`C_006A753A` ~6%), o
+renderizador e as funções do fundo do campo `0x64085C`/`0x6464BA` com seus
+`mk_address`. No perfil maior da v0.6.30, essas funções do fundo somavam
+~7%, o que dá ~11% sem a conversão.
+
+**Luz (`ff7_light.c`).** A luz por vértice (`0x68DD1E`, ~87 mil vértices/s
+nessa área, todos pelos laços da `0x68E92D` que ainda são x86) chamava
+`mk_address` ~8 vezes e `_check_event` 2 vezes por vértice, cada uma uma
+chamada na `.so`. Agora as duas são embutidas, como nos outros nativos
+(`ff7_so_inline_lookup`): entrada da tabela de páginas + deslocamento, e o
+contador com a chamada real a cada 2048. Mesmo resultado, sem chamadas.
+
+**Fundo do campo (`ff7_fieldbg_core.h`, `ff7_fieldbg.c`).**
+
+- `0x64085C (x, y)`: percorre as peças da camada (índices u16 em
+  `[0xCFF3FC]`, peças de 0x105C bytes em `[0xCFFE00]`). Para cada peça
+  dentro da janela (x−0x150..x, y−0x100..y), liberada pelo byte +0x34
+  (tabela `0xCC0E7A`) e fora da camada escondida (`[0xCFF1D8]`), marca
+  +0x1040 e anexa a peça com a posição na tela.
+- `0x6464BA`: grava a peça na lista `[0xD00050] + 0x1804·lista` (posição
+  `[0xCFF204]` + float, em double, guardada como float).
+
+Os registradores finais seguem o x86, inclusive a metade alta do ECX
+debaixo do contador u16. `scripts/emu/test_fieldbg.py`: 200 chamadas com
+peças em cada borda da janela, flags, camada escondida, as duas listas, o
+deslocamento das linhas do topo e escalas que estouram o int16; zero
+divergências. 10 de 10 mutações detectadas. `fieldbg_off.txt` desliga.
+Log: `field background/s: N layers, N tiles looked at, N appended`.
+
+**Pendente no Vita:** FPS e folga (`perf: ... work %`) na mesma cena (a cena
+gravada no menu do port: mapa 511).
