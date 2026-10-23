@@ -1125,3 +1125,54 @@ em `test_engine.py`).
 
 **Pendente no Vita:** `ff7_framecap: chocobo race limiter 0x779CC6 replaced`,
 `chocobo race cadence:` perto de 30 e `perf:` na corrida inteira.
+
+## v0.6.31: paleta na GPU (área da corrida de chocobo a 15 fps)
+
+**Log da v0.6.30.** A corrida ficou cravada em 30 fps (`chocobo race
+cadence: 30.0`). A cena lenta é o campo logo depois da corrida (Chocobo
+Square, mapa 511): 14,8–15 fps, thread do jogo 92% ocupada. Perfil desse
+trecho: `[native] convert_image_data` 33%, `light_native` 14%, `C_006A753A`
+11%, renderizador 5%. Log: ~145 páginas de 256×256 convertidas por segundo
+(~10 por quadro), 338 ms/s convertendo e 37 MB/s de upload de textura; o
+cache incremental quase não ajuda (70% reconversões completas).
+
+**Por quê.** A animação de paleta chama `gfx_write_palette`, que apaga a
+textura GL da paleta (`C_006A74E8` → `glDeleteTextures`). O
+`gfx_palette_changed` seguinte não acha textura em cache e chama
+`gfx_load_texture`: conversão inteira para RGBA na CPU e `C_006A753A`
+(`glGenTextures` + `glTexImage2D`, que copia 256 KB para a fila de render).
+O porte Android tem um caminho de paleta em hardware, mas os
+`glColorTableEXT`/`glGetColorTableParameterivEXT` dele são stubs vazios.
+
+**Paleta na GPU.** O vitaGL cria texturas P8 da GXM: a GPU consulta a
+paleta ao amostrar, inclusive com filtro. Agora, quando o
+`convert_image_data` de uma página de 8 bits vem do `gfx_load_texture` (pelo
+endereço de retorno) e o destino é RGBA8888 contíguo, a conversão fica
+pendente. O `glTexImage2D` seguinte desse buffer (GL_RGBA, mesmo tamanho)
+vira uma textura P8 com os índices da página e, como paleta, as 256 cores
+que a conversão teria produzido. As cores na tela são as mesmas, e o envio
+cai de 256 KB para 64 KB + 1 KB, sem trabalho por pixel na CPU. Qualquer
+outro uso do buffer converte antes, como era (`pend_convert`).
+
+- `ff7_texture.c`: a pendência e `ff7_texture_upload()`, chamada no início
+  do `gq_glTexImage2D`.
+- `gl_queue.c`: `gl_queue_paletted_texture()` grava índices + paleta direto
+  na fila. No render thread, `pal_teximage()` aloca a memória da textura
+  (`gpu_alloc_mapped_aligned_for_gpu`), monta a P8 linear com
+  `vglSetupTexture` e liga a paleta (`sceGxmTextureSetPalette`). O caminho
+  `GL_COLOR_INDEX8_EXT` do próprio vitaGL grava pixel a pixel por callback, e
+  o vitaGL é submódulo (não muda). A textura e os índices são do vitaGL. A
+  paleta é guardada por nome de textura e liberada 8 quadros depois de a
+  textura ser apagada ou especificada de novo, quando a GPU já não a usa. Sem
+  memória, a página vai como RGBA, convertida no render thread.
+
+Logs: `textures/s: N pages to the GPU as indices + palette, N converted after
+all` e `paletted textures/s: N uploaded as P8 (vivas, paletas aguardando)`.
+`gpu_palette_off.txt` desliga (volta à conversão na CPU).
+
+**Estimativa:** −22 ms de conversão e ~−5 ms de cópia por quadro, de 61 ms.
+A iluminação (`light_native`, ~9 ms por quadro) continua igual.
+
+**Pendente no Vita:** FPS na área depois da corrida e se as texturas
+animadas aparecem iguais (cores e filtro). Se algo sair errado,
+`gpu_palette_off.txt` isola.

@@ -162,4 +162,10 @@ static inline void tc_convert(tc_cache * c, uint8_t * dst, const uint8_t * src, 
     c->full++;
 }
 
+// dst no longer holds what the cache recorded (it was left unconverted)
+static inline void tc_forget(tc_cache * c, const uint8_t * dst) {
+    for (int i = 0; i < TC_ENTRIES; i++)
+        if (c->e[i].dst == dst) c->e[i].dst = NULL;
+}
+
 #endif // FF7_TEXTURE_CACHE_H

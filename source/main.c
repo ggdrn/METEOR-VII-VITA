@@ -293,6 +293,7 @@ int main() {
             ff7_stack_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);
             gl_queue_report((now - heartbeat_us) / 1000000.0);
+            gl_queue_palette_report((now - heartbeat_us) / 1000000.0);
             obb_fd_report((now - heartbeat_us) / 1000000.0);
             draw_us = swap_us = 0;
             heartbeat_frame = frame;

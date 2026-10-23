@@ -15,6 +15,19 @@
  * The destination encoding (C_006861EC) is also table-driven. Raw index
  * copies and paletted destinations are forwarded to the original function.
  *
+ * GPU palettes (v0.6.31): gfx_load_texture converts a page into the texture
+ * set's buffer and passes that buffer straight to glTexImage2D (in
+ * C_006A753A). Fields with animated palettes (the chocobo ranch after the
+ * race: ~145 pages of 256x256 a second, 22 ms of a 61 ms frame converting
+ * plus 7 ms copying 256 KB a page into the render queue) redo that on every
+ * palette change. For an 8-bit page converted from there into a contiguous
+ * RGBA8888 buffer, the conversion is left pending: the next glTexImage2D of
+ * that buffer, as GL_RGBA bytes of the same size, becomes a GXM P8 texture of
+ * the indices with the 256 converted colors as its palette
+ * (gl_queue_paletted_texture): the same colors on screen, a quarter of the
+ * data and no per-pixel work on the CPU. Anything else first converts the
+ * pending page as before. DATA_PATH "gpu_palette_off.txt" turns it off.
+ *
  * Field offsets come from the disassembly of v1.0.29 (see PLANO.md).
  *
  * This software may be modified and distributed under the terms
@@ -26,6 +39,7 @@
 #include "ff7_buttons.h"
 #include "ff7_texture_cache.h"
 
+#include "reimpl/gl_queue.h"
 #include "utils/logger.h"
 #include "utils/utils.h"
 
@@ -65,6 +79,19 @@ static tc_cache tcache;      // incremental reconversion (game thread only)
 static int tc_off;           // DATA_PATH "texcache_off.txt"
 
 static so_hook convert_hook;
+
+#define GFX_LOAD_TEXTURE_CALL 0xc33700 // return address of its convert_image_data call
+static uintptr_t load_texture_ret; // in the loaded .so
+static int gpu_palette_off;        // DATA_PATH "gpu_palette_off.txt"
+
+// A page left unconverted for the glTexImage2D that follows (game thread)
+static struct {
+    uint8_t * dst;               // the buffer as passed (what glTexImage2D gets)
+    const uint8_t * src;         // w x h indices
+    int w, h, invert;
+    uint32_t conv[256];
+    unsigned uploads, converted; // stats: as P8, converted after all
+} pend;
 
 static struct {
     unsigned fast, slow, enc_reuse, big;
@@ -235,7 +262,40 @@ static void selftest(int invert, int raw_index, void * th, void * tf, uint8_t * 
     free(ref);
 }
 
+// Converts the pending page into its buffer, as convert_image_data would have
+static void pend_convert(void) {
+    if (!pend.dst) return;
+    int pitch = pend.w * 4;
+    uint8_t * d = pend.dst;
+    if (pend.invert) {
+        d += pitch * (pend.h - 1);
+        pitch = -pitch;
+    }
+    const uint8_t * s = pend.src;
+    for (int y = 0; y < pend.h; y++, d += pitch, s += pend.w) blit8_32((uint32_t *) d, s, pend.w, pend.conv);
+    pend.dst = NULL;
+    pend.converted++;
+}
+
+int ff7_texture_upload(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLenum format,
+                       GLenum type, const void * pixels) {
+    if (!pend.dst) return 0;
+    if (pixels != pend.dst || level || internalformat != GL_RGBA || format != GL_RGBA || type != GL_UNSIGNED_BYTE
+        || w != pend.w || h != pend.h) {
+        pend_convert();
+        return 0;
+    }
+    // row 0 of the buffer is the last row of the page when converted inverted
+    const uint8_t * rows = pend.invert ? pend.src + (size_t) pend.w * (pend.h - 1) : pend.src;
+    gl_queue_paletted_texture(target, w, h, pend.conv, rows, pend.invert ? -pend.w : pend.w);
+    pend.dst = NULL;
+    pend.uploads++;
+    return 1;
+}
+
 static void convert_image_data(int invert, int raw_index, void * th, void * tf, uint8_t * dst) {
+    uintptr_t caller = (uintptr_t) __builtin_return_address(0) & ~1u;
+    pend_convert(); // a page nobody uploaded: as before
     SceUInt64 t0 = sceKernelGetProcessTimeWide();
     uint8_t * dst_base = dst;
     ff7_buttons_font(th); // PlayStation symbols in the menu font, before converting it
@@ -313,7 +373,17 @@ static void convert_image_data(int invert, int raw_index, void * th, void * tf, 
             conv[i] = encode(&enc, c);
         }
         st.setup_us += sceKernelGetProcessTimeWide() - t0;
-        if (dst_bpp == 4 && !(((uintptr_t) dst | (uint32_t) pitch) & 3)) {
+        if (!gpu_palette_off && caller == load_texture_ret && dst_bpp == 4 && S32(tf, 0x08) == width * 4
+            && width > 0 && width <= 1024 && height <= 1024 && !(((uintptr_t) dst_base) & 3)) {
+            // gfx_load_texture uploads this buffer next: as a GPU-paletted texture
+            pend.dst = dst_base;
+            pend.src = src;
+            pend.w = width;
+            pend.h = height;
+            pend.invert = invert;
+            memcpy(pend.conv, conv, sizeof(conv));
+            tc_forget(&tcache, dst);
+        } else if (dst_bpp == 4 && !(((uintptr_t) dst | (uint32_t) pitch) & 3)) {
             // The usual case (RGBA8888): one table load and store per pixel,
             // or only the pixels whose color changed when the same page goes
             // to the same buffer again (animated palettes)
@@ -350,7 +420,7 @@ static void convert_image_data(int invert, int raw_index, void * th, void * tf, 
     }
 
 done:
-    if (src_bpp >= 1 && src_bpp <= 4 && selftest_left[src_bpp] > 0) {
+    if (!pend.dst && src_bpp >= 1 && src_bpp <= 4 && selftest_left[src_bpp] > 0) {
         selftest_left[src_bpp]--;
         selftest(invert, raw_index, th, tf, dst_base, src_bpp);
     }
@@ -389,9 +459,11 @@ void ff7_texture_patch(void) {
     black_flag = *(uint8_t **) (base + FLAG_PC_OFFSET + literal);
 
     tc_off = ff7_switch_off("ff7_texture cache", DATA_PATH "texcache_off.txt");
+    gpu_palette_off = ff7_switch_off("ff7_texture GPU palettes", DATA_PATH "gpu_palette_off.txt");
+    load_texture_ret = base + GFX_LOAD_TEXTURE_CALL;
     convert_hook = hook_addr(convert, (uintptr_t) &convert_image_data);
-    l_info("ff7_texture: fast convert_image_data installed (flag at %p, incremental reconversion %s)", black_flag,
-           tc_off ? "off" : "on");
+    l_info("ff7_texture: fast convert_image_data installed (flag at %p, incremental reconversion %s, GPU palettes %s)",
+           black_flag, tc_off ? "off" : "on", gpu_palette_off ? "off" : "on");
 }
 
 // Port menu A/B test (game thread): back on, the cache starts empty
@@ -409,6 +481,10 @@ void ff7_texture_report(double seconds) {
            " average, %u of %u >= 256x256, largest %dx%d; reconversions: %u full, %u partial, %u unchanged",
            st.fast / seconds, st.slow / seconds, st.us / 1000.0 / seconds, st.setup_us / 1000.0 / seconds, avg,
            st.big, st.fast, st.max_w, st.max_h, tcache.full, tcache.partial, tcache.skipped);
+    if (pend.uploads || pend.converted)
+        l_info("textures/s: %.1f pages to the GPU as indices + palette, %.1f converted after all", pend.uploads / seconds,
+               pend.converted / seconds);
+    pend.uploads = pend.converted = 0;
     memset(&st, 0, sizeof(st));
     tcache.full = tcache.partial = tcache.skipped = 0;
 }

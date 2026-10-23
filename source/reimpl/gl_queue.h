@@ -36,6 +36,17 @@ void gl_queue_kick(void);
 /** 1 if GL calls from the game thread are being queued. */
 int gl_queue_active(void);
 
+/**
+ * Game thread (or any thread): uploads a w x h page of 8-bit indices (rows
+ * `stride` bytes apart, negative to flip it) with its 256 colors (GL_RGBA
+ * bytes) as a GL_COLOR_INDEX8_EXT texture (GXM P8) into the bound texture.
+ */
+void gl_queue_paletted_texture(GLenum target, GLsizei w, GLsizei h, const uint32_t * pal, const uint8_t * rows,
+                               int stride);
+
+/** Logs the paletted texture counts over `seconds`, then resets them. */
+void gl_queue_palette_report(double seconds);
+
 /** Logs render thread statistics over `seconds`, then resets them. */
 void gl_queue_report(double seconds);
 
