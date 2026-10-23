@@ -30,6 +30,7 @@
  */
 
 #include "sles_allinclusive.h"
+#include <psp2/kernel/processmgr.h>
 
 int opensles_mixer_idle(void);
 
@@ -67,6 +68,67 @@ static void bq_rs_free(IBufferQueue *this)
     for (int i = 0; i < BQ_RS_SLOTS; i++)
         if (bq_rs[i].bq == this)
             bq_rs[i].bq = NULL;
+}
+
+/*
+ * Diagnostics (v0.6.23): the snowboard music (the only stereo buffer the
+ * game plays) is silent though its PCM reaches the DirectSound buffer
+ * (ff7_dsound.c). Every 5 s each stereo 16-bit queue that got buffers logs
+ * how many and how loud, and what the mixer will apply to it.
+ */
+#define BQ_DIAG_SLOTS 8
+static struct {
+    IBufferQueue *bq;
+    unsigned enqueues, bytes;
+    int peak;
+} bq_diag[BQ_DIAG_SLOTS];
+static SceUInt64 bq_diag_next;
+static int bq_diag_lines = 200;
+
+static void bq_diag_enqueue(IBufferQueue *this, const void *buf, SLuint32 size)
+{
+    if (this->channels != 2 || this->bps != 16 || bq_diag_lines <= 0)
+        return;
+    int k, free_k = -1;
+    for (k = 0; k < BQ_DIAG_SLOTS; k++) {
+        if (bq_diag[k].bq == this)
+            break;
+        if (!bq_diag[k].bq && free_k < 0)
+            free_k = k;
+    }
+    if (k == BQ_DIAG_SLOTS) {
+        if (free_k < 0)
+            return;
+        k = free_k;
+        bq_diag[k].bq = this;
+    }
+    bq_diag[k].enqueues++;
+    bq_diag[k].bytes += size;
+    const int16_t *pcm = (const int16_t *) buf;
+    for (SLuint32 i = 0; i < size / 2; i += 9) {
+        int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+        if (v > bq_diag[k].peak)
+            bq_diag[k].peak = v;
+    }
+    SceUInt64 now = sceKernelGetProcessTimeWide();
+    if (now < bq_diag_next)
+        return;
+    bq_diag_next = now + 5000000;
+    for (int i = 0; i < BQ_DIAG_SLOTS && bq_diag_lines > 0; i++) {
+        IBufferQueue *q = bq_diag[i].bq;
+        if (!q || !bq_diag[i].enqueues)
+            continue;
+        bq_diag_lines--;
+        CAudioPlayer *ap = SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(q) ? (CAudioPlayer *) q->mThis : NULL;
+        SL_LOGI("bq diag: stereo queue %p, %u Hz: %u buffers, %u bytes in 5 s, peak %d | count %u | player %p"
+                " state %u mute %u level %d mB gains %.3f %.3f track %p",
+                q, (unsigned) (q->samplerate / 1000), bq_diag[i].enqueues, bq_diag[i].bytes, bq_diag[i].peak,
+                (unsigned) q->mState.count, ap, ap ? (unsigned) ap->mPlay.mState : 0,
+                ap ? (unsigned) ap->mVolume.mMute : 0, ap ? (int) ap->mVolume.mLevel : 0,
+                ap ? (double) ap->mGains[0] : 0.0, ap ? (double) ap->mGains[1] : 0.0, ap ? (void *) ap->mTrack : NULL);
+        bq_diag[i].enqueues = bq_diag[i].bytes = 0;
+        bq_diag[i].peak = 0;
+    }
 }
 
 static inline int16_t bq_sample(const void *src, int k, int channels, int bps, int ch)
@@ -176,6 +238,7 @@ SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint
         if (newRear == this->mFront) {
             result = SL_RESULT_BUFFER_INSUFFICIENT;
         } else {
+            bq_diag_enqueue(this, pBuffer, size);
             uint32_t out_rate = (&_opensles_user_freq!=NULL?_opensles_user_freq:44100) * 1000;
             int num_cycles = out_rate / this->samplerate;
             int multiplier = 1;
@@ -420,6 +483,9 @@ void IBufferQueue_init(void *self)
 
 void IBufferQueue_Destroy(IBufferQueue *this)
 {
+    for (int i = 0; i < BQ_DIAG_SLOTS; i++)
+        if (bq_diag[i].bq == this)
+            bq_diag[i].bq = NULL;
     bq_rs_free(this);
     IBufferQueue_ReleaseArrayBuffers(this);
     if ((NULL != this->mArray) && (this->mArray != this->mTypical)) {

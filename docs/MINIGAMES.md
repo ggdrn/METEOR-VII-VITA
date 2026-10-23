@@ -668,3 +668,35 @@ Agora o pico do PCM é lido pela memória x86 (`mk_address`), e o log só mostra
 endereço x86 e o endereço de host correspondente. Os testes da v0.6.21 continuam
 valendo: uma descida normal para o diagnóstico da música (pico do PCM no resumo
 de 5 s) e `natives_off.txt` para as árvores.
+
+## v0.6.23: a música chega ao buffer; diagnóstico no OpenSL
+
+Log da v0.6.22 (com `natives_off.txt`): árvores ainda com glitch e música muda.
+
+**Música: o lado do jogo está certo.**
+
+- O PCM decodificado chega ao buffer da música: pico de 900 a 6.350 (de 32.767)
+  a cada 5 s, ou seja, som de verdade.
+- O jogo faz ~54 `Lock` de 16 KB a cada 5 s, 176 KB/s, exatamente estéreo 16
+  bits a 44,1 kHz.
+- O buffer fica na memória x86. A `.so` cria o player com o endereço de host
+  dele (`mk_address`, memória contígua) e o declara como 16 bits, 44,1 kHz,
+  máscara de canais 3.
+- O volume é 0 dB.
+
+O som some depois, entre o buffer e a saída. A única diferença em relação aos
+efeitos, que tocam, é que este é o único buffer estéreo.
+
+`source/opensles/IBufferQueue.c` agora registra (`bq diag`, a cada 5 s, só
+filas estéreo de 16 bits): buffers e bytes enfileirados, o pico das amostras e,
+do player, estado, mudo, nível em mB, os ganhos que o mixer aplica e a trilha
+do mixer. Assim fica claro se a `.so` entrega a música ao OpenSL e com que
+ganho.
+
+**Árvores.** Com os nativos de desenho e matemática desligados, o glitch
+continua. Sobram as reescritas de endereço do port, que mudam o próprio código
+recompilado: `ff7_memmap` (endereços constantes; `memmap_off.txt`) e
+`ff7_stack` (endereços da pilha x86; `stack_off.txt`). Próximo teste:
+`natives_off.txt` + `memmap_off.txt` + `stack_off.txt` juntos. Se o glitch
+continuar, ele não vem de nenhuma otimização do port; resta o próprio jogo
+(versão Android) ou o vitaGL.
