@@ -622,3 +622,34 @@ depois dos dados. O volume que o código do PC dá ao buffer é a tabela `0x9676
 agora registra `SetVolume`, `SetPan` e `SetFrequency` do buffer da música e
 essas variáveis no resumo de 5 s. A chave de teste `wavmusic_fullvolume.txt`
 força volume cheio no buffer da música.
+
+## v0.6.21: isolar o glitch das árvores; nível do som da música
+
+Log da v0.6.20: o glitch das árvores continua e a música também.
+
+**Música.** O volume não é a causa. O jogo põe o buffer da música (o único
+estéreo) em 0 dB (`SetVolume 0`, mestre 100, atual 127) e nunca muda pan nem
+frequência. O player OpenSL é criado normalmente, e um buffer estéreo de 16 bits
+a 44,1 kHz é enfileirado sem cópia. O stream anda e lê o arquivo em tempo real.
+Sobra o conteúdo do buffer: o `wind.wav` é MS-ADPCM (4 bits), decodificado pelo
+ACM emulado da `.so` e escrito pelo código x86 nos ponteiros que o `Lock` da
+`.so` devolve (endereços de host). O diagnóstico agora registra os `Lock` do
+buffer da música: ponteiros, tamanhos e se o endereço x86 é a mesma memória que
+o host. O resumo de 5 s traz também o pico do PCM no buffer (0 = silêncio).
+
+**Árvores.** A correção do `C_006A8A3E` não resolveu, então a causa está em
+outro lugar. `0x72700C` desenha os blocos de terreno sem textura, não as
+árvores. Para separar um defeito do port de um comportamento do próprio jogo:
+
+- `natives_off.txt` (novo, `source/ff7_switch.h`) desliga todos os nativos de
+  desenho e matemática de uma vez: motor, snowboard, triângulos, seno/cosseno,
+  iluminação, `ftol`, texturas, chocobo e moto;
+- chaves novas por módulo: `tri_off.txt` (`C_006A8002`), `tri2_off.txt`
+  (`C_006A8A3E`), `math_off.txt` (seno/cosseno), `light_off.txt`
+  (iluminação), `texture_off.txt` (conversão de texturas). As antigas
+  continuam (`engine_off.txt`, `snowboard_off.txt`, `ftol_off.txt`,
+  `texcache_off.txt`...).
+
+Com `natives_off.txt`, se o glitch continuar, é do jogo; se sumir, as chaves
+individuais apontam o módulo. O log de cada sessão mostra quais estão
+desligados (`<módulo>: disabled by ...`).

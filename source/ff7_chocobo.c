@@ -32,6 +32,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_chocobo.h"
+#include "ff7_switch.h"
 #include "ff7_chocobo_core.h"
 #include "ff7_anim.h"
 #include "ff7_so_inline.h"
@@ -132,10 +133,7 @@ static const struct {
 };
 
 void ff7_chocobo_patch(void) {
-    if (file_exists(OFF_SWITCH)) {
-        l_info("ff7_chocobo: disabled by %s", OFF_SWITCH);
-        return;
-    }
+    if (ff7_switch_off("ff7_chocobo", OFF_SWITCH)) return;
     uintptr_t tri = so_symbol(&so_mod, SYM_TRI), quad = so_symbol(&so_mod, SYM_QUAD);
     env.mk_address = (uint8_t * (*)(uint32_t)) so_symbol(&so_mod, "mk_address");
     env.check_event = (void (*)(void)) so_symbol(&so_mod, "_Z12_check_eventv");

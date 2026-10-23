@@ -28,6 +28,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_light.h"
+#include "ff7_switch.h"
 #include "ff7_light_core.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
@@ -327,6 +328,7 @@ __attribute__((naked)) static void e92d_loop_stub(void) {
 }
 
 void ff7_light_patch(void) {
+    if (ff7_switch_off("ff7_light", DATA_PATH "light_off.txt")) return;
     uintptr_t fn = so_symbol(&so_mod, SYM_LIGHT);
     check_event = (check_event_fn) so_symbol(&so_mod, SYM_CHECK_EVENT);
     mk_address = (mk_address_fn) so_symbol(&so_mod, SYM_MK_ADDRESS);

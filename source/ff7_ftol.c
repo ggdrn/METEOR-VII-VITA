@@ -5,6 +5,7 @@
  * Equivalence harness: scripts/emu/test_ftol.py, compiled Cortex-A9 core.
  */
 #include "ff7_ftol.h"
+#include "ff7_switch.h"
 #include "ff7_ftol_core.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
@@ -84,10 +85,7 @@ static void ftol_native(void) {
 }
 
 void ff7_ftol_patch(void) {
-    if (file_exists(OFF_SWITCH)) {
-        l_info("ff7_ftol: disabled by %s", OFF_SWITCH);
-        return;
-    }
+    if (ff7_switch_off("ff7_ftol", OFF_SWITCH)) return;
     uintptr_t fn = so_symbol(&so_mod, SYM_FTOL);
     const uint32_t entry[2] = {0x41f0e92du, 0x4c6a4d69u};
     regs = ff7_x86_regs();

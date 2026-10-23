@@ -32,6 +32,12 @@
  * at 0). DATA_PATH "wavmusic_fullvolume.txt" (test) plays the music buffer
  * at full volume whatever the game asks.
  *
+ * v0.6.21: the v0.6.20 log shows the music buffer at full volume (SetVolume
+ * 0, master 100, current 127) and never panned or retuned, still silent. The
+ * diagnostics add the music buffer's Lock: the pointers handed to the x86
+ * code, whether x86 memory at those addresses is the same memory, and the
+ * peak level of the PCM in the buffer (is there sound in it at all).
+ *
  * DATA_PATH "dsound_play_fix_off.txt" turns the fix off,
  * "sound_diag_off.txt" the logs.
  *
@@ -64,6 +70,7 @@ extern so_module so_mod;
 #define SYM_VOLUME  "_Z31fw_IDirectSoundBuffer_SetVolumeji"
 #define SYM_PAN     "_Z28fw_IDirectSoundBuffer_SetPanji"
 #define SYM_FREQ    "_Z34fw_IDirectSoundBuffer_SetFrequencyjj"
+#define SYM_LOCK    "_Z26fw_IDirectSoundBuffer_Lockjjjjjjjj"
 #define FULL_VOLUME DATA_PATH "wavmusic_fullvolume.txt"
 #define VA_STREAM   0xde62d8u // the music stream; +0 its DirectSound buffer
 #define VA_MASTER   0xde6558u
@@ -77,7 +84,10 @@ typedef int (* status_fn)(uint32_t buf, uint32_t status_va);
 static mk_address_fn mk_address;
 static status_fn get_status;
 static volatile uint32_t * regs;
-static so_hook refill_hook, create_hook, play_hook, stop_hook, volume_hook, pan_hook, freq_hook;
+static so_hook refill_hook, create_hook, play_hook, stop_hook, volume_hook, pan_hook, freq_hook, lock_hook;
+// the music buffer's data (from its Lock), for the level check: music_base, music_locks (declared above)
+static uint32_t music_size;
+static unsigned lock_logs;
 static int fix_on, diag_on, full_volume;
 static int logs_left = MAX_LOGS;
 
@@ -109,6 +119,9 @@ static double now_s(void) {
 }
 
 static int is_music(uint32_t buf);
+static int music_peak(void);
+static unsigned music_locks;
+static uint8_t * music_base;
 
 #define DIAG(...) do { if (diag_on && logs_left > 0) { logs_left--; l_info(__VA_ARGS__); } } while (0)
 
@@ -151,8 +164,10 @@ static void refill_native(void) {
     if (now >= st.next_summary) {
         st.next_summary = now + 5000000;
         DIAG("sound diag %.3f: last 5 s: %u refills, %u Play passed on, %u repeated Play skipped; music buffer"
-             " %08x, x86 music volume master %u current %u target %u", now_s(), st.refills, st.plays,
-             st.skipped_plays, rd32(VA_STREAM), rd32(VA_MASTER), rd32(VA_MUSIC), rd32(VA_MUSIC + 4));
+             " %08x, x86 music volume master %u current %u target %u; %u Locks, PCM peak %d of 32767 (data %p)",
+             now_s(), st.refills, st.plays, st.skipped_plays, rd32(VA_STREAM), rd32(VA_MASTER), rd32(VA_MUSIC),
+             rd32(VA_MUSIC + 4), music_locks, music_peak(), music_base);
+        music_locks = 0;
         log_stream("stream now", stream, r);
         st.refills = st.plays = st.skipped_plays = 0;
     }
@@ -203,6 +218,41 @@ static int stop_native(uint32_t buf) {
 
 static int is_music(uint32_t buf) {
     return buf && buf == rd32(VA_STREAM);
+}
+
+// Lock (buf, offset, bytes, &p1, &n1, &p2, &n2, flags): the porters' code
+// writes host pointers into the x86 out-parameters
+static int lock_native(uint32_t buf, uint32_t off, uint32_t bytes, uint32_t p1_va, uint32_t n1_va, uint32_t p2_va,
+                       uint32_t n2_va, uint32_t flags) {
+    int r = SO_CONTINUE_HELD(int, lock_hook, buf, off, bytes, p1_va, n1_va, p2_va, n2_va, flags);
+    if (is_music(buf)) {
+        music_locks++;
+        uint32_t p1 = rd32(p1_va), n1 = rd32(n1_va), p2 = p2_va ? rd32(p2_va) : 0, n2 = n2_va ? rd32(n2_va) : 0;
+        if (p1 && off <= 0x1000000) {
+            music_base = (uint8_t *) (uintptr_t) (p1 - off);
+            music_size = rd32(VA_STREAM + 0xc);
+        }
+        if (lock_logs < 12) {
+            lock_logs++;
+            uint8_t * x = p1 ? mk_address(p1) : NULL;
+            DIAG("sound diag %.3f: music Lock %08x offset %u bytes %u flags %u -> %d: p1 %08x n1 %u p2 %08x n2 %u;"
+                 " x86 address p1 is host %p (%s)", now_s(), buf, off, bytes, flags, r, p1, n1, p2, n2, x,
+                 x == (uint8_t *) (uintptr_t) p1 ? "same memory" : "OTHER memory: the x86 writes miss the buffer");
+        }
+    }
+    return r;
+}
+
+// Peak |sample| of the music buffer (16-bit PCM), 0 = silence
+static int music_peak(void) {
+    if (!music_base || !music_size || music_size > 0x100000) return -1;
+    int peak = 0;
+    const int16_t * pcm = (const int16_t *) music_base;
+    for (uint32_t i = 0; i < music_size / 2; i += 7) {
+        int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+        if (v > peak) peak = v;
+    }
+    return peak;
 }
 
 // The music buffer's volume, pan and frequency: every change is logged
@@ -265,6 +315,8 @@ void ff7_dsound_patch(void) {
         if (freq && diag_on) freq_hook = hook_addr(freq, (uintptr_t) &freq_native);
     }
     if (diag_on) {
+        uintptr_t lock = so_symbol(&so_mod, SYM_LOCK);
+        if (lock) lock_hook = hook_addr(lock, (uintptr_t) &lock_native);
         refill_hook = hook_addr(refill, (uintptr_t) &refill_native);
         create_hook = hook_addr(create, (uintptr_t) &create_native);
     }

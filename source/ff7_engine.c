@@ -34,6 +34,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_engine.h"
+#include "ff7_switch.h"
 #include "ff7_engine_core.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
@@ -186,10 +187,7 @@ static void vector_native(void) { native(&fns[2]); }
 static void alloc_native(void) { native(&fns[3]); }
 
 void ff7_engine_patch(void) {
-    if (file_exists(OFF_SWITCH)) {
-        l_info("ff7_engine: disabled by %s", OFF_SWITCH);
-        return;
-    }
+    if (ff7_switch_off("ff7_engine", OFF_SWITCH)) return;
     env.mk_address = (uint8_t * (*)(uint32_t)) so_symbol(&so_mod, SYM_MK_ADDRESS);
     env.check_event = (void (*)(void)) so_symbol(&so_mod, SYM_CHECK_EVENT);
     env.regs = ff7_x86_regs();

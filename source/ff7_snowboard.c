@@ -36,6 +36,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_snowboard.h"
+#include "ff7_switch.h"
 #include "ff7_snowboard_core.h"
 #include "ff7_anim.h"
 #include "ff7_so_inline.h"
@@ -124,10 +125,7 @@ static void frame_cap_patch(void) {
 
 void ff7_snowboard_patch(void) {
     frame_cap_patch();
-    if (file_exists(OFF_SWITCH)) {
-        l_info("ff7_snowboard: disabled by %s", OFF_SWITCH);
-        return;
-    }
+    if (ff7_switch_off("ff7_snowboard", OFF_SWITCH)) return;
     uintptr_t xform = so_symbol(&so_mod, SYM_XFORM), tri = so_symbol(&so_mod, SYM_TRI);
     uintptr_t tri3 = so_symbol(&so_mod, SYM_TRI3);
     env.mk_address = (uint8_t * (*)(uint32_t)) so_symbol(&so_mod, "mk_address");

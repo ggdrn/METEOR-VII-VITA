@@ -23,6 +23,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_tri.h"
+#include "ff7_switch.h"
 #include "ff7_tri_core.h"
 #include "ff7_tri2_core.h"
 #include "ff7_selftest.h"
@@ -153,6 +154,8 @@ static void tri2_native(int count, const uint16_t * idx, const uint8_t * verts) 
 }
 
 void ff7_tri_patch(void) {
+    int tri_off = ff7_switch_off("ff7_tri (C_006A8002)", DATA_PATH "tri_off.txt");
+    int tri2_off = ff7_switch_off("ff7_tri (C_006A8A3E)", DATA_PATH "tri2_off.txt");
     uintptr_t fn = so_symbol(&so_mod, SYM_TRI);
     gl_begin = (begin_fn) so_symbol(&so_mod, SYM_BEGIN);
     gl_end = (end_fn) so_symbol(&so_mod, SYM_END);
@@ -172,8 +175,11 @@ void ff7_tri_patch(void) {
     state.keep_alpha = (const uint32_t *) (b + KEEP_ALPHA);
     vertices = (uint8_t *) (b + VERTICES);
     selftest_left = ff7_selftest_count(SELFTEST_CALLS);
-    tri_hook = hook_addr(fn, (uintptr_t) &tri_native);
-    l_info("ff7_tri: native triangle renderer installed (selftest on %d calls)", selftest_left);
+    if (!tri_off) {
+        tri_hook = hook_addr(fn, (uintptr_t) &tri_native);
+        l_info("ff7_tri: native triangle renderer installed (selftest on %d calls)", selftest_left);
+    }
+    if (tri2_off) return;
 
     /* C_006A8A3E — highway renderer (no matrix, same vertex buffer) */
     uintptr_t fn2 = so_symbol(&so_mod, SYM_TRI2);

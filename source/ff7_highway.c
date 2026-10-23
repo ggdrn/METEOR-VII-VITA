@@ -27,6 +27,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_highway.h"
+#include "ff7_switch.h"
 #include "ff7_highway_core.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
@@ -112,10 +113,7 @@ static void color_native(void) {
 }
 
 void ff7_highway_patch(void) {
-    if (file_exists(OFF_SWITCH)) {
-        l_info("ff7_highway: disabled by %s", OFF_SWITCH);
-        return;
-    }
+    if (ff7_switch_off("ff7_highway", OFF_SWITCH)) return;
     uintptr_t fn = so_symbol(&so_mod, SYM_COLOR);
     env.mk_address = (uint8_t * (*)(uint32_t)) so_symbol(&so_mod, SYM_MK_ADDRESS);
     env.check_event = (void (*)(void)) so_symbol(&so_mod, SYM_CHECK_EVENT);

@@ -22,6 +22,7 @@
  */
 
 #include "ff7_texture.h"
+#include "ff7_switch.h"
 #include "ff7_buttons.h"
 #include "ff7_texture_cache.h"
 
@@ -370,6 +371,7 @@ original:
 }
 
 void ff7_texture_patch(void) {
+    if (ff7_switch_off("ff7_texture", DATA_PATH "texture_off.txt")) return;
     uintptr_t base = so_mod.text_base;
     uintptr_t convert = so_symbol(&so_mod, SYM_CONVERT_IMAGE);
     palette_color = (palette_color_fn) so_symbol(&so_mod, SYM_PALETTE_COLOR);
@@ -386,7 +388,7 @@ void ff7_texture_patch(void) {
     uint32_t literal = *(uint32_t *) (base + FLAG_LITERAL_OFFSET);
     black_flag = *(uint8_t **) (base + FLAG_PC_OFFSET + literal);
 
-    tc_off = file_exists(DATA_PATH "texcache_off.txt");
+    tc_off = ff7_switch_off("ff7_texture cache", DATA_PATH "texcache_off.txt");
     convert_hook = hook_addr(convert, (uintptr_t) &convert_image_data);
     l_info("ff7_texture: fast convert_image_data installed (flag at %p, incremental reconversion %s)", black_flag,
            tc_off ? "off" : "on");
