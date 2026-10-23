@@ -1214,3 +1214,33 @@ Log: `field background/s: N layers, N tiles looked at, N appended`.
 
 **Pendente no Vita:** FPS e folga (`perf: ... work %`) na mesma cena (a cena
 gravada no menu do port: mapa 511).
+
+## v0.6.33: renderizadores de listas de triângulos do porte nativos
+
+O porte desenha triângulos já projetados com quatro funções C++ irmãs. Cada
+uma, entre `glBegin(GL_TRIANGLES)` e `glEnd()`, chama por vértice as funções
+da emulação de GL 1.x (`fake_glColor4ub`, `glTexCoord2f`, `glVertex3f`), e
+cada chamada relê as globais pelo GOT:
+
+| Função | Cor | u, v |
+|---|---|---|
+| `C_006A8242` | do 1º vértice (plana) | as atuais |
+| `C_006A83AE` | de cada vértice | as atuais |
+| `C_006A8A3E` | do 1º vértice (plana) | de cada vértice (nativa desde a v0.6.20) |
+| `C_006A8BFC` | de cada vértice | de cada vértice |
+
+No perfil da v0.6.31 (sessão com a corrida de chocobo), `C_006A83AE` com
+seus `glVertex3f`/`fake_glColor4ub` somava ~8% da thread do jogo. Agora as
+quatro são um laço só, `tri2_core_draw_mode()` em `ff7_tri2_core.h`: copia
+x, y, z do vértice para o `VERTICES` com a cor e o u/v atuais, para quando o
+buffer enche e deixa a cor e o u/v atuais como o original deixa.
+`scripts/emu/test_tri2_exact.py` roda as quatro funções da `.so`, com os
+GOT resolvidos, contra o núcleo: 800 chamadas, saída inteira, `pCurVertex`,
+cor e u/v atuais idênticos. Mutações detectadas: cor plana × por vértice,
+u/v quando não deve, ordem dos bytes da cor, limite do buffer e cor atual
+final. `trilists_off.txt` desliga as três novas. Log: `pre-projected
+triangle lists/s`.
+
+`VIDEO_drawBuffers` (~4%) foi olhado e não muda: só liga três atributos e
+chama `glDrawArrays`, e o tempo atribuído a ele é a cópia dos vértices na
+fila de render, que é necessária.

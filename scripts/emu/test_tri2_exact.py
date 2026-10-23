@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Compares source/ff7_tri2_core.h (native C_006A8A3E, the triangle renderer of
-the highway and snowboard minigames) with the .so function under emulation,
+the highway and snowboard minigames, and its siblings C_006A8242, C_006A83AE
+and C_006A8BFC: flat or smooth color, with or without u/v) with the .so
+functions under emulation,
 everything included: the whole VERTICES output (x, y, z, color bytes, u, v),
 pCurVertex, and the current color and u/v globals left behind (later
 glVertex3f calls use them). The .so's GOT entries for its own symbols are
@@ -23,7 +25,10 @@ from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_AR
     UC_ARM_REG_LR, UC_ARM_REG_PC
 from ff7emu import Emu, B, HSTACK, END
 
-FUNC, GLBEGIN, GLEND = 0x942344, 0x95316c, 0x953424
+GLBEGIN, GLEND = 0x95316c, 0x953424
+# tri2_core_draw_mode modes: 0 flat, 1 smooth, 2 flat + u/v, 3 smooth + u/v
+FUNCS = {0: (0x941f24, 'C_006A8242'), 1: (0x941f8c, 'C_006A83AE'), 2: (0x942344, 'C_006A8A3E'),
+         3: (0x9423c4, 'C_006A8BFC')}
 CUR, LAST, VERTICES = 0xf4f4d8, 0xf4f4dc, 0x146263c
 CR, CG, CB, CA = 0x1462587, 0x1462586, 0x1462585, 0x1462584
 CU, CV = 0x146258c, 0x1462588
@@ -37,8 +42,9 @@ C = r'''
 #include "ff7_tri_core.h"
 #include "ff7_tri2_core.h"
 __attribute__((section(".text.entry"), used))
-void entry(const tri_state * s, int count, const uint16_t * idx, const uint8_t * verts) {
-    tri2_core_draw(s, count, idx, verts);
+void entry(const tri_state * s, int count, const uint16_t * idx, const uint8_t * verts, int mode) {
+    if (mode == 2) tri2_core_draw(s, count, idx, verts);
+    else tri2_core_draw_mode(s, mode, count, idx, verts);
 }
 void * memcpy(void * d, const void * s, unsigned n) {
     unsigned char * dd = d; const unsigned char * ss = s;
@@ -78,8 +84,9 @@ def main():
     calls = int(sys.argv[2]) if len(sys.argv) > 2 else 600
     random.seed(9)
     specials = [0.0, -0.0, 1e-30, 1e30, math.inf, -math.inf, math.nan]
-    bad = 0
+    bad = {m: 0 for m in FUNCS}
     for it in range(calls):
+        mode = it % 4
         nverts = random.randrange(3, 60)
         count = random.choice([0, -1, 1, 2, 4]) if it % 20 == 0 else 3 * random.randrange(1, 40)
         ntri = -(-count // 3) if count > 0 else 0
@@ -106,10 +113,12 @@ def main():
             if run == 0:
                 uc.reg_write(UC_ARM_REG_R0, count & 0xffffffff)
                 uc.reg_write(UC_ARM_REG_R1, IDX); uc.reg_write(UC_ARM_REG_R2, VTX)
-                uc.emu_start(B + FUNC | 1, END, count=5000000)
+                uc.emu_start(B + FUNCS[mode][0] | 1, END, count=5000000)
             else:
                 uc.reg_write(UC_ARM_REG_R0, STATE); uc.reg_write(UC_ARM_REG_R1, count & 0xffffffff)
                 uc.reg_write(UC_ARM_REG_R2, IDX); uc.reg_write(UC_ARM_REG_R3, VTX)
+                sp = HSTACK + 0xff000 - 8
+                uc.mem_write(sp, struct.pack('<I', mode)); uc.reg_write(UC_ARM_REG_SP, sp)
                 uc.emu_start(entry | 1, END, count=5000000)
             outs.append((emu.r32(B + CUR) - (B + VERTICES), bytes(uc.mem_read(B + VERTICES, 0x18 * NV)),
                          bytes(uc.mem_read(B + CA, 4)), bytes(uc.mem_read(B + CV, 8))))
@@ -122,11 +131,13 @@ def main():
         if ocol != ncol: problems.append('current color %s / %s' % (ncol.hex(), ocol.hex()))
         if ouv != nuv: problems.append('current u/v %s / %s' % (nuv.hex(), ouv.hex()))
         if problems:
-            bad += 1
-            if bad <= 5: print('MISMATCH call %d (count %d, room %d): %s' % (it, count, room, '; '.join(problems)))
-    print('C_006A8A3E: %d mismatches in %d calls (vertices with colors, pCurVertex, current color and u/v)'
-          % (bad, calls))
-    sys.exit(1 if bad else 0)
+            bad[mode] += 1
+            if sum(bad.values()) <= 5:
+                print('MISMATCH %s call %d (count %d, room %d): %s' % (FUNCS[mode][1], it, count, room, '; '.join(problems)))
+    for m in FUNCS:
+        print('%s: %d mismatches in %d calls (vertices with colors, pCurVertex, current color and u/v)'
+              % (FUNCS[m][1], bad[m], len(range(m, calls, 4))))
+    sys.exit(1 if sum(bad.values()) else 0)
 
 if __name__ == '__main__':
     main()

@@ -1,5 +1,6 @@
 /*
- * Native renderer for C_006A8A3E (highway minigame triangle renderer),
+ * Native renderers for C_006A8A3E (highway minigame triangle renderer) and
+ * its siblings C_006A8242, C_006A83AE, C_006A8BFC (tri2_core_draw_mode),
  * shared by ff7_tri.c and the offline test.
  *
  * C_006A8A3E(count, indices, verts) — called from within a glBegin/glEnd
@@ -47,46 +48,63 @@
 #include <stdint.h>
 #include <string.h>
 
-// glTexCoord2f + glVertex3f for one vertex; the color is the current one
-static inline void tri2_core_emit(const uint8_t * vtx, uint8_t ** cur, const uint8_t * last,
-                                  const uint8_t col[4], uint32_t * cur_u, uint32_t * cur_v) {
-    memcpy(cur_u, vtx + 24, 4);
-    memcpy(cur_v, vtx + 28, 4);
-    uint8_t * p = *cur;
-    if (p >= last) return;
-    memcpy(p, vtx, 12); // x, y, z
-    memcpy(p + 12, col, 4);
-    memcpy(p + 16, cur_u, 4);
-    memcpy(p + 20, cur_v, 4);
-    *cur = p + 0x18;
-}
-
 /*
- * The loop between glBegin(GL_TRIANGLES) and glEnd() for C_006A8A3E.
- * `s` is the same tri_state as used by tri_core_draw (shares pCurVertex,
- * pLastVertex and the current color and u/v).
+ * The porters' four renderers of pre-projected triangle lists, each
+ * (count, indices, verts) with its own glBegin(GL_TRIANGLES) / glEnd():
+ *
+ *              color                     u, v
+ *   C_006A8242 first vertex (flat)       -                (the current ones)
+ *   C_006A83AE every vertex (smooth)     -
+ *   C_006A8A3E first vertex (flat)       every vertex
+ *   C_006A8BFC every vertex (smooth)     every vertex
+ *
+ * fake_glColor4ub(+18, +17, +16, +19) sets the current r, g, b, a,
+ * glTexCoord2f(+24, +28) the current u, v, and glVertex3f(+0, +4, +8) writes
+ * x, y, z with the current color and u, v (nothing when the buffer is full).
+ * The loop runs while count > 0, 3 indices a triangle. `s` is the tri_state
+ * of tri_core_draw (pCurVertex, pLastVertex, the current color and u/v).
  */
-static inline void tri2_core_draw(const tri_state * s, int count,
-                                   const uint16_t * idx,
-                                   const uint8_t * verts) {
+enum { TRI2_FLAT = 0, TRI2_SMOOTH = 1, TRI2_NO_UV = 0, TRI2_UV = 2 };
+
+static inline void tri2_core_draw_mode(const tri_state * s, int mode, int count, const uint16_t * idx,
+                                       const uint8_t * verts) {
     uint8_t * cur = *s->cur;
     const uint8_t * last = *s->last;
     uint32_t * cur_u = (uint32_t *) s->u, * cur_v = (uint32_t *) s->v;
+    uint8_t col[4] = { *s->r, *s->g, *s->b, *s->a };
 
     for (; count > 0; count -= 3, idx += 3) {
-        const uint8_t * v0 = verts + 32u * idx[0];
-        const uint8_t * v1 = verts + 32u * idx[1];
-        const uint8_t * v2 = verts + 32u * idx[2];
-        const uint8_t col[4] = { v0[18], v0[17], v0[16], v0[19] }; // r, g, b, a
-        *s->r = col[0];
-        *s->g = col[1];
-        *s->b = col[2];
-        *s->a = col[3];
-        tri2_core_emit(v0, &cur, last, col, cur_u, cur_v);
-        tri2_core_emit(v1, &cur, last, col, cur_u, cur_v);
-        tri2_core_emit(v2, &cur, last, col, cur_u, cur_v);
+        for (int k = 0; k < 3; k++) {
+            const uint8_t * v = verts + 32u * idx[k];
+            if (k == 0 || (mode & TRI2_SMOOTH)) {
+                col[0] = v[18]; // r, g, b, a
+                col[1] = v[17];
+                col[2] = v[16];
+                col[3] = v[19];
+            }
+            if (mode & TRI2_UV) {
+                memcpy(cur_u, v + 24, 4);
+                memcpy(cur_v, v + 28, 4);
+            }
+            if (cur < last) {
+                memcpy(cur, v, 12); // x, y, z
+                memcpy(cur + 12, col, 4);
+                memcpy(cur + 16, cur_u, 4);
+                memcpy(cur + 20, cur_v, 4);
+                cur += 0x18;
+            }
+        }
     }
+    *s->r = col[0];
+    *s->g = col[1];
+    *s->b = col[2];
+    *s->a = col[3];
     *s->cur = cur;
+}
+
+// C_006A8A3E (the highway and snowboard minigames)
+static inline void tri2_core_draw(const tri_state * s, int count, const uint16_t * idx, const uint8_t * verts) {
+    tri2_core_draw_mode(s, TRI2_FLAT | TRI2_UV, count, idx, verts);
 }
 
 #endif /* FF7_TRI2_CORE_H */
