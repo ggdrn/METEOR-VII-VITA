@@ -7,6 +7,7 @@
  * of the MIT license. See the LICENSE file for details.
  */
 
+#include "port_menu.h"
 #include "reimpl/gl_queue.h"
 #include "utils/glutil.h"
 
@@ -52,6 +53,7 @@ void gl_init() {
 
 void gl_swap() {
     gl_queue_lock();
+    port_menu_draw(); // over the game's frame (no-op while closed)
     vglSwapBuffers(GL_FALSE);
     gl_queue_unlock();
     readpixels_invalidate();

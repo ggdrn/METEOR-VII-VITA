@@ -24,6 +24,7 @@ MEMMAP = 0x101de5c
 REGS = 0x1492c48
 FPU = 0x1492bc0
 CHECK_EVENT = 0xadb9f4
+EVCOUNT = 0x1492b78     # _check_event's call counter (natives bump it inline)
 
 class Emu:
     def __init__(self, so_path):
@@ -47,6 +48,7 @@ class Emu:
         uc.hook_add(UC_HOOK_CODE, self._stub, begin=B + CHECK_EVENT, end=B + CHECK_EVENT + 1)
         uc.hook_add(UC_HOOK_CODE, self._mk, begin=B + 0x93d714, end=B + 0x93d715)
         self.calls = 0
+        self.ev_at = []
         self.unmapped = set()
         # ff7.exe constants used by the lighting code (page 0x7b7000): 255.0f at 0x7b7b44
         uc.mem_map(0x50000000, 0x1000)
@@ -72,8 +74,12 @@ class Emu:
             self.unmapped.add(va)
 
     def _stub(self, uc, addr, size, user):
-        # _check_event(): return
+        # _check_event(): counts the call (natives bump the counter themselves
+        # and call it only on every 2048th: ev_at keeps the counts it ran at)
+        n = (self.r32(B + EVCOUNT) + 1) & 0xffffffff
+        self.w32(B + EVCOUNT, n)
         lr = uc.reg_read(UC_ARM_REG_LR)
+        self.ev_at.append((n, lr))
         uc.reg_write(UC_ARM_REG_PC, lr)
 
     def w32(self, a, v): self.uc.mem_write(a, struct.pack('<I', v & 0xffffffff))

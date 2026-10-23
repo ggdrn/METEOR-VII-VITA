@@ -25,6 +25,11 @@
  *
  * This backend keeps a list of engines and one output thread that mixes the
  * output mix of every registered engine.
+ *
+ * opensles_mixing is 1 while the output thread mixes (IOutputMixExt_FillBuffer
+ * of every engine). Play::SetPlayState(STOPPED) and BufferQueue::Clear use it
+ * to finish a stop or a clear at once instead of waiting for the next mix
+ * (see IPlay.c, IBufferQueue.c).
  */
 
 #include "sles_allinclusive.h"
@@ -38,6 +43,14 @@ void movie_mix_audio(int16_t *stream, int frames);
 #define FRAMES (SndFile_BUFSIZE / 4) // stereo 16-bit frames per output buffer
 
 static IEngine *engines[MAX_ENGINES];
+static volatile int opensles_mixing;
+
+/** 1 if the output thread is not mixing right now. Called with a player's
+ *  object lock held: a mix pass that starts afterwards skips that player
+ *  (track_check only try-locks it), so its track can be changed safely. */
+int opensles_mixer_idle(void) {
+	return !__atomic_load_n(&opensles_mixing, __ATOMIC_SEQ_CST);
+}
 static SceKernelLwMutexWork engines_lock;
 static int engines_lock_ready;
 
@@ -74,6 +87,7 @@ static void fill_output_buffer(int16_t *stream) {
 	sceClibMemset(stream, 0, sizeof(out_buf[0]));
 
 	lock_engines();
+	__atomic_store_n(&opensles_mixing, 1, __ATOMIC_SEQ_CST);
 	for (int e = 0; e < MAX_ENGINES; e++) {
 		if (NULL == engines[e] || NULL == engines[e]->mOutputMix)
 			continue;
@@ -87,6 +101,7 @@ static void fill_output_buffer(int16_t *stream) {
 				stream[i] = clamp16(stream[i] + mix_buf[i]);
 		}
 	}
+	__atomic_store_n(&opensles_mixing, 0, __ATOMIC_SEQ_CST);
 	unlock_engines();
 
 	movie_mix_audio(stream, FRAMES);

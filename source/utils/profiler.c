@@ -80,6 +80,9 @@ static unsigned arms, flushed;
 static volatile SceUInt64 * spike_frame_start;
 static SceUInt64 spike_threshold_us;
 static SceUInt32 period_us = SAMPLE_PERIOD_US;
+// Port menu (port_menu.c): start without the boot delay, pause and resume
+static SceUInt64 start_delay_us = START_DELAY_US;
+static volatile int paused;
 
 // Spike mode: only sample frames that are already slow, or while the game
 // thread is CPU-bound (has not slept or waited for 50 ms: frames dropping
@@ -170,11 +173,12 @@ static int sampler_thread(SceSize args, void * argp) {
         return 0;
     }
 
-    SceUInt64 start = sceKernelGetProcessTimeWide() + START_DELAY_US;
+    SceUInt64 start = sceKernelGetProcessTimeWide() + start_delay_us;
     SceUInt32 since_flush = 0;
     while (1) {
         sceKernelDelayThread(period_us);
-        if (sceKernelGetProcessTimeWide() >= start && !holds && should_sample() && cas(&state, IDLE, ARMING)) {
+        if (!paused && sceKernelGetProcessTimeWide() >= start && !holds && should_sample()
+            && cas(&state, IDLE, ARMING)) {
             if (holds) { // profiler_hold() started meanwhile
                 __atomic_store_n(&state, IDLE, __ATOMIC_RELEASE);
             } else {
@@ -222,6 +226,31 @@ void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us) {
     if (thid >= 0) sceKernelStartThread(thid, 0, NULL);
     if (thid >= 0) cpu_register_thread("profiler", thid);
     l_info("profiler: sampling .so text 0x%08x-0x%08x every %d us into %s, starting in %d s%s",
-           text_lo, text_hi, frame_start ? SAMPLE_PERIOD_US : ALL_PERIOD_US, PROFILE_PATH, START_DELAY_US / 1000000,
+           text_lo, text_hi, frame_start ? SAMPLE_PERIOD_US : ALL_PERIOD_US, PROFILE_PATH, (int) (start_delay_us / 1000000),
            frame_start ? " (only frames slower than the spike threshold)" : " (whenever the game thread runs)");
+}
+
+// Port menu: profile_all mode at once (the boot patching is long over)
+void profiler_start_now(void) {
+    if (text_lo) {
+        paused = 0;
+        return;
+    }
+    start_delay_us = 0;
+    paused = 0;
+    profiler_start(NULL, 0);
+}
+
+void profiler_set_paused(int p) {
+    if (!text_lo) return;
+    paused = p;
+    if (p) { // give execute back now rather than at the next fault
+        profiler_hold();
+        profiler_release();
+    }
+    l_info("profiler: %s", p ? "paused" : "sampling");
+}
+
+int profiler_active(void) {
+    return text_lo && !paused;
 }

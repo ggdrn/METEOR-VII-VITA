@@ -310,7 +310,13 @@ static void close_container(void) {
     mv.audio_rate = 0;
 }
 
+// Height of the playing video, 0 when none: one word written by the game
+// thread (START / RESET) and read by the main thread for the screen zoom,
+// instead of the decoder state, which the game thread keeps changing
+static volatile int active_height;
+
 void movie_stop(void) {
+    active_height = 0;
     if (mv.playing) {
         l_info("MyDecoder: stop %s at %d ms (%d frames shown, %u dropped)", mv.name, position_ms(), mv.shown, ms.dropped);
         if (ms.decoded)
@@ -322,6 +328,14 @@ void movie_stop(void) {
     mv.playing = 0;
     mv.paused = 0;
     close_container();
+}
+
+bool movie_is_playing(void) {
+    return active_height != 0;
+}
+
+int movie_video_height(void) {
+    return active_height;
 }
 
 bool movie_start(const char * fname) {
@@ -406,6 +420,7 @@ bool movie_start(const char * fname) {
     mv.start_us = now_us();
     mv.paused = 0;
     mv.playing = 1;
+    active_height = mv.has_video ? mv.height : 0;
     l_info("MyDecoder.START(\"%s\"): %d ms, video %dx%d%s, audio %d Hz", fname, mv.duration_ms,
            mv.width, mv.height, mv.has_video ? "" : " (none)", mv.has_audio ? mv.audio_rate : 0);
     return true;

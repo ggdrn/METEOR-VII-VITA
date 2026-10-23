@@ -23,6 +23,7 @@
 
 #include "ff7_ui.h"
 
+#include "ff7_unhook.h"
 #include "utils/logger.h"
 #include "utils/profiler.h"
 
@@ -146,7 +147,7 @@ static void filter_layout(void ** list) {
 // UI_display(UIObject ** list): draws a layout every frame
 static void ui_display(void ** list) {
     filter_layout(list);
-    SO_CONTINUE(int, display_hook, list);
+    SO_CONTINUE_HELD(int, display_hook, list);
 }
 
 // UI_onTouchBegan's conversion to the 640x480 UI space (non-rotated surface)

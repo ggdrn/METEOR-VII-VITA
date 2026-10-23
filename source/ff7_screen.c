@@ -31,7 +31,11 @@
  * would mean a new projection and moving every battle window, so the zoom
  * enlarges the picture instead. The side borders are shortened to match. The UI
  * ("Encounters ON", "A") is drawn afterwards in its usual place, on top.
- * Menus, movies and the world map are drawn as before.
+ * A 640x448 movie uses the same final quad. The MyDecoder state is the
+ * authoritative signal that an FMV is playing, so it is zoomed like a field
+ * without relying on a game mode shared by menus and transitions. A movie at
+ * any other height keeps the original presentation. Menus and the world map
+ * are drawn as before.
  *
  * Both quads are patched right after the game builds them:
  *   VIDEO_doQuad (6 vertices: x, y, z, color, u, v; 0x18 bytes each), then
@@ -49,7 +53,9 @@
  */
 
 #include "ff7_screen.h"
+#include "ff7_unhook.h"
 #include "ff7_bg.h"
+#include "reimpl/movie.h"
 
 #include "utils/logger.h"
 #include "utils/utils.h"
@@ -133,7 +139,7 @@ static inline float * vertex(uint8_t * end, int i) {
 // Float arguments in core registers (softfp), passed on as raw bits:
 // SO_CONTINUE calls through an unprototyped pointer, which would widen floats
 static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
-    int r = SO_CONTINUE(int, quad_tex_hook, x, y, w, h);
+    int r = SO_CONTINUE_HELD(int, quad_tex_hook, x, y, w, h);
     if ((uintptr_t) __builtin_return_address(0) != base + RET_FRAME_QUAD) return r;
 
     int mode = current_mode();
@@ -142,11 +148,12 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
         l_info("game mode: %d", mode);
     }
     int field = zoom_enabled && in_field();
-    int battle = zoom_enabled && !field && mode == MODE_BATTLE;
-    int on = field ? 1 : battle ? 2 : 0;
+    int movie = zoom_enabled && !field && movie_is_playing() && movie_video_height() == FIELD_LINES;
+    int battle = zoom_enabled && !field && !movie && mode == MODE_BATTLE;
+    int on = field ? 1 : movie ? 2 : battle ? 3 : 0;
     if (on != zoomed) {
         zoomed = on;
-        l_info("field zoom: %s", on == 1 ? "on (field)" : on == 2 ? "on (battle)" : "off");
+        l_info("field zoom: %s", on == 1 ? "on (field)" : on == 2 ? "on (movie)" : on == 3 ? "on (battle)" : "off");
     }
     if (!on) {
         zoom_left = zoom_right = 0;
@@ -154,7 +161,7 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     }
 
     // The quad VIDEO_doQuad just wrote: x0..x1 by 0..screen height (y down)
-    uint32_t lines = field ? field_lines : BATTLE_LINES;
+    uint32_t lines = field ? field_lines : movie ? FIELD_LINES : BATTLE_LINES;
     if (lines != logged_lines) {
         logged_lines = lines;
         l_info("field zoom: %u of 480 lines fill the screen%s", lines, stretch ? ", stretched to the full width" : "");
@@ -177,7 +184,7 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
 }
 
 static int border_hooked(int r0, int g0, int b0, int r1, int g1, int b1) {
-    int r = SO_CONTINUE(int, border_hook, r0, g0, b0, r1, g1, b1);
+    int r = SO_CONTINUE_HELD(int, border_hook, r0, g0, b0, r1, g1, b1);
     uintptr_t ret = (uintptr_t) __builtin_return_address(0);
     if (!zoomed || zoom_left == zoom_right || (ret != base + RET_BORDER_LEFT && ret != base + RET_BORDER_RIGHT))
         return r;
@@ -208,7 +215,7 @@ static int viewport_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint3
         l_info("drawing area: x %u y %u w %u h %u (bottom at line %u of 480) - %s", x, y, w, h, y + h,
                field ? "field" : "not field");
     }
-    return SO_CONTINUE(int, viewport_hook, x, y, w, h, arg);
+    return SO_CONTINUE_HELD(int, viewport_hook, x, y, w, h, arg);
 }
 
 void ff7_screen_patch(void) {

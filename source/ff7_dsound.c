@@ -1,0 +1,206 @@
+/*
+ * DirectSound fixes for the streamed WAV music, and diagnostics.
+ *
+ * Four tracks always play as WAV files instead of the porters' .akb player:
+ * SATO (15), WIND (65, the snowboard), SENSUI (88, the submarine) and HEART
+ * (97) - 0x7416A3 classifies them. ff7.exe streams them itself: 0x7478BD
+ * opens <name>.wav, and a multimedia timer (timeSetEvent, 80 ms, callback
+ * 0x74656C, run by the porters' timeEvent_step from _check_event) calls
+ * 0x748950 (stream) to refill a looping DirectSound buffer from the play
+ * position (GetCurrentPosition) on.
+ *
+ * Fix: Play on a buffer that is already playing does nothing (DirectSound).
+ * The snowboard sends the sound command "resume" every frame: resume_sound
+ * (0x745995) calls Play on every buffer whose position isn't 0, the music
+ * stream included (v0.6.18 log: Play on the stream and on an effect each
+ * frame). The porters' fw_IDirectSoundBuffer_Play passes every call to
+ * SL_startPlayer with the position it kept from the last GetCurrentPosition
+ * (16 KB steps), so the music restarted from stale positions every frame:
+ * stutter, and positions the refill could not follow. Now Play is passed on
+ * only when the porters' GetStatus says the buffer isn't playing, or its
+ * looping flag changes.
+ *
+ * Diagnostics (v0.6.18-19, at most 600 lines a session): buffers created,
+ * Play/Stop that reach the porters' code, the stream's refills (first 20
+ * calls, every end-flag change, the end) and a stream summary every 5 s.
+ *
+ * DATA_PATH "dsound_play_fix_off.txt" turns the fix off,
+ * "sound_diag_off.txt" the logs.
+ *
+ * This software may be modified and distributed under the terms
+ * of the MIT license. See the LICENSE file for details.
+ */
+
+#include "ff7_dsound.h"
+#include "ff7_anim.h"
+#include "ff7_unhook.h"
+
+#include "utils/logger.h"
+#include "utils/utils.h"
+
+#include <stdint.h>
+#include <string.h>
+
+#include <psp2/kernel/processmgr.h>
+#include <so_util/so_util.h>
+
+extern so_module so_mod;
+
+#define FIX_OFF     DATA_PATH "dsound_play_fix_off.txt"
+#define DIAG_OFF    DATA_PATH "sound_diag_off.txt"
+#define SYM_REFILL  "_Z15func_0x00748950v"
+#define SYM_CREATE  "_Z33fw_IDirectSound_CreateSoundBufferjjjj"
+#define SYM_PLAY    "_Z26fw_IDirectSoundBuffer_Playjjjj"
+#define SYM_STOP    "_Z26fw_IDirectSoundBuffer_Stopj"
+#define SYM_STATUS  "_Z31fw_IDirectSoundBuffer_GetStatusjj"
+#define MAX_LOGS    600
+#define MAX_BUFS    64
+
+typedef uint8_t * (* mk_address_fn)(uint32_t va);
+typedef int (* status_fn)(uint32_t buf, uint32_t status_va);
+
+static mk_address_fn mk_address;
+static status_fn get_status;
+static volatile uint32_t * regs;
+static so_hook refill_hook, create_hook, play_hook, stop_hook;
+static int fix_on, diag_on;
+static int logs_left = MAX_LOGS;
+
+// Looping flag of the last Play passed on, per buffer
+static struct { uint32_t buf, flags; } bufs[MAX_BUFS];
+
+static struct {
+    uint32_t stream, calls, last_flags;
+    unsigned refills, skipped_plays, plays;
+    SceUInt64 next_summary;
+} st = { .last_flags = 0xffffffffu };
+
+static uint32_t rd32(uint32_t va) {
+    uint8_t * p = va ? mk_address(va) : NULL;
+    uint32_t v = 0;
+    if (p) memcpy(&v, p, 4);
+    return v;
+}
+
+static uint16_t rd16(uint32_t va) {
+    uint8_t * p = va ? mk_address(va) : NULL;
+    uint16_t v = 0;
+    if (p) memcpy(&v, p, 2);
+    return v;
+}
+
+static double now_s(void) {
+    return sceKernelGetProcessTimeWide() / 1000000.0;
+}
+
+#define DIAG(...) do { if (diag_on && logs_left > 0) { logs_left--; l_info(__VA_ARGS__); } } while (0)
+
+static int buf_slot(uint32_t buf) {
+    int free_slot = -1;
+    for (int i = 0; i < MAX_BUFS; i++) {
+        if (bufs[i].buf == buf) return i;
+        if (!bufs[i].buf && free_slot < 0) free_slot = i;
+    }
+    return free_slot;
+}
+
+static void log_stream(const char * what, uint32_t stream, uint32_t r) {
+    uint32_t info = rd32(stream + 0x4);
+    DIAG("sound diag %.3f: %s %08x call %u -> %u | mode %u playing %u +18 %u read-end %u loop %u end %u |"
+         " size %u play %u write %u, left %d, +20 %u, chunk %u | loop %u..%u, %u Hz %u ch %u bit",
+         now_s(), what, stream, st.calls, r, rd32(stream + 0x8), rd32(stream + 0x14), rd32(stream + 0x18),
+         rd32(stream + 0x1c), rd32(stream + 0x30), rd32(stream + 0x34), rd32(stream + 0xc), rd32(stream + 0x2c),
+         rd32(stream + 0x28), (int32_t) rd32(stream + 0x24), rd32(stream + 0x20), rd32(stream + 0x10),
+         rd32(info + 0x10), rd32(info + 0x14), rd32(info + 0x18) ? rd32(rd32(info + 0x18) + 4) : 0,
+         rd32(info + 0x18) ? rd16(rd32(info + 0x18) + 2) : 0, rd32(info + 0x18) ? rd16(rd32(info + 0x18) + 14) : 0);
+}
+
+static void refill_native(void) {
+    uint32_t stream = rd32(regs[4] + 4);
+    if (stream != st.stream) {
+        st.stream = stream;
+        st.calls = 0;
+        st.last_flags = 0xffffffffu;
+    }
+    SO_CONTINUE_HELD(int, refill_hook);
+    uint32_t r = regs[0];
+    st.calls++;
+    st.refills++;
+    uint32_t flags = rd32(stream + 0x14) | rd32(stream + 0x18) << 4 | rd32(stream + 0x1c) << 8
+                   | rd32(stream + 0x30) << 12 | rd32(stream + 0x34) << 16;
+    if (st.calls <= 20 || r || flags != st.last_flags) log_stream(r ? "refill END" : "refill", stream, r);
+    st.last_flags = flags;
+    SceUInt64 now = sceKernelGetProcessTimeWide();
+    if (now >= st.next_summary) {
+        st.next_summary = now + 5000000;
+        DIAG("sound diag %.3f: last 5 s: %u refills, %u Play passed on, %u repeated Play skipped", now_s(),
+             st.refills, st.plays, st.skipped_plays);
+        log_stream("stream now", stream, r);
+        st.refills = st.plays = st.skipped_plays = 0;
+    }
+}
+
+static int create_native(uint32_t ds, uint32_t desc, uint32_t out, uint32_t unk) {
+    int r = SO_CONTINUE_HELD(int, create_hook, ds, desc, out, unk);
+    uint32_t fmt = rd32(desc + 0x10);
+    DIAG("sound diag %.3f: CreateSoundBuffer -> %d, buffer %08x: flags %08x, %u bytes, format %u, %u ch, %u Hz,"
+         " %u bit", now_s(), r, rd32(out), rd32(desc + 4), rd32(desc + 8), rd16(fmt), rd16(fmt + 2),
+         rd32(fmt + 4), rd16(fmt + 14));
+    return r;
+}
+
+static int play_native(uint32_t buf, uint32_t a, uint32_t b, uint32_t flags) {
+    int slot = buf ? buf_slot(buf) : -1;
+    if (fix_on && slot >= 0 && bufs[slot].buf == buf && bufs[slot].flags == (flags & 1)) {
+        // the porters' status: playing (1) or not (0); scratch status word on
+        // the x86 stack below the caller's frame (dead)
+        uint32_t status_va = regs[4] - 0x200;
+        get_status(buf, status_va);
+        if (rd32(status_va) & 1) {
+            st.skipped_plays++;
+            return 0; // DS_OK: already playing
+        }
+    }
+    int r = SO_CONTINUE_HELD(int, play_hook, buf, a, b, flags);
+    if (slot >= 0) {
+        bufs[slot].buf = buf;
+        bufs[slot].flags = flags & 1;
+    }
+    st.plays++;
+    DIAG("sound diag %.3f: Play %08x flags %u -> %d", now_s(), buf, flags, r);
+    return r;
+}
+
+static int stop_native(uint32_t buf) {
+    int r = SO_CONTINUE_HELD(int, stop_hook, buf);
+    int slot = buf ? buf_slot(buf) : -1;
+    if (slot >= 0 && bufs[slot].buf == buf) bufs[slot].buf = 0; // the next Play goes through
+    DIAG("sound diag %.3f: Stop %08x -> %d", now_s(), buf, r);
+    return r;
+}
+
+void ff7_dsound_patch(void) {
+    fix_on = !file_exists(FIX_OFF);
+    diag_on = !file_exists(DIAG_OFF);
+    if (!fix_on && !diag_on) {
+        l_info("ff7_dsound: disabled by %s and %s", FIX_OFF, DIAG_OFF);
+        return;
+    }
+    mk_address = (mk_address_fn) so_symbol(&so_mod, "mk_address");
+    get_status = (status_fn) so_symbol(&so_mod, SYM_STATUS);
+    regs = ff7_x86_regs();
+    uintptr_t refill = so_symbol(&so_mod, SYM_REFILL), create = so_symbol(&so_mod, SYM_CREATE);
+    uintptr_t play = so_symbol(&so_mod, SYM_PLAY), stop = so_symbol(&so_mod, SYM_STOP);
+    if (!mk_address || !get_status || !regs || !refill || !create || !play || !stop) {
+        l_warn("ff7_dsound: symbols not found, off");
+        return;
+    }
+    play_hook = hook_addr(play, (uintptr_t) &play_native);
+    stop_hook = hook_addr(stop, (uintptr_t) &stop_native);
+    if (diag_on) {
+        refill_hook = hook_addr(refill, (uintptr_t) &refill_native);
+        create_hook = hook_addr(create, (uintptr_t) &create_native);
+    }
+    l_info("ff7_dsound: repeated Play %s, diagnostics %s", fix_on ? "ignored while playing (fix on)" : "passed on",
+           diag_on ? "on" : "off");
+}

@@ -6,6 +6,7 @@
  */
 
 #include "reimpl/controls.h"
+#include "port_menu.h"
 
 #include <math.h>
 #include <psp2/ctrl.h>
@@ -62,8 +63,10 @@ void poll_accel();
 void poll_stick(ControlsStickId which, float raw_x, float raw_y, float * readings_x, float * readings_y, float deadzone);
 
 void controls_poll() {
-    poll_touch();
-    poll_rear_touch();
+    if (!port_menu_is_open()) { // the port menu takes every input while open
+        poll_touch();
+        poll_rear_touch();
+    }
     poll_pad();
     //poll_accel();
 }
@@ -169,7 +172,8 @@ void poll_pad() {
 
     // Gamepad buttons
     old_buttons = current_buttons;
-    current_buttons = pad.buttons;
+    current_buttons = port_menu_input(pad.buttons); // Start + L + R: port menu
+    if (port_menu_is_open()) pad.lx = pad.ly = pad.rx = pad.ry = 128;
     pressed_buttons = current_buttons & ~old_buttons;
     released_buttons = ~current_buttons & old_buttons;
 

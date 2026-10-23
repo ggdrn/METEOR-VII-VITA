@@ -28,6 +28,7 @@
 
 #include "ff7_lzss.h"
 #include "ff7_anim.h"
+#include "ff7_buttons.h"
 
 #include "utils/logger.h"
 
@@ -177,6 +178,7 @@ static void lzss_native(void) {
 
     if (disabled) {
         SO_CONTINUE(int, lzss_hook);
+        ff7_buttons_lzss(dst);
         return;
     }
 
@@ -201,6 +203,7 @@ static void lzss_native(void) {
                    selftest_left == 0 ? " (selftest finished)" : "");
         }
         free(o.host);
+        ff7_buttons_lzss(dst);
         return;
     }
 
@@ -210,6 +213,7 @@ static void lzss_native(void) {
     regs[EAX] = r.eax;
     regs[ECX] = r.ecx;
     regs[EDX] = r.edx;
+    ff7_buttons_lzss(dst); // field text: PlayStation symbols
     check_event();
     regs[ESP] = esp + 4; // ret
     time_us += sceKernelGetProcessTimeWide() - t0;

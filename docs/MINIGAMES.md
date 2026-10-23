@@ -1,0 +1,592 @@
+# Mini-games 3D: mapa e plano de otimização
+
+Levantamento estático do `ff7_en.exe` (o código que a `libjni_ff7.so`
+recompila), feito em 22/10/2026 para aplicar aos outros mini-games o que foi
+feito na moto (`docs/DESEMPENHO.md`, v0.6.x).
+
+## Como os modos foram achados
+
+O modo de jogo é a word em `0xCBF9DC`. A troca de modo (`0x409C5A`, tabela
+de saltos de 28 entradas) registra, para cada módulo, uma estrutura de
+ponteiros (inicialização, laço principal, saída…) e a passa a `0x666CF2`.
+Os arquivos de dados confirmam cada módulo (`high-us.lgp` é referenciado em
+`0x6507C9`, `coaster.lgp` em `0x5E9339`, `snowboard-us.lgp` em `0x72311F`).
+
+| Modo | Mini-game | Laço principal | Init | Faixa do módulo | Dados |
+|---|---|---|---|---|---|
+| 6 | Moto (highway / G-Bike) | `0x650412` | `0x650310` | `0x650000–0x660000` | `high-us.lgp` |
+| 7 | Corrida de chocobo | `0x76DBD1` | `0x76D597` | `0x76Dxxx–` | `chocobo.lgp` |
+| 8 e 14 | Snowboard | `0x722CCF` | `0x722C10` | `0x722xxx–` | `snowboard-us.lgp` |
+| 9 | Fort Condor | `0x5F4A47` | `0x5F47B5` | `0x5F4xxx–` | `condor.lgp` |
+| 10 | Submarino | `0x77DF72` | `0x77D030` | `0x77Dxxx–` | `sub.lgp` |
+| 11 | Montanha-russa (Speed Square) | `0x5E8E7E` | `0x5E8D49` | `0x5E8xxx–` | `coaster.lgp` |
+
+Para comparação: campo (modo 1) `0x60E5B7`, batalha (modo 2) `0x41BAB3`,
+mapa-múndi (modo 3) `0x74BE49`. (Uma primeira versão deste documento trocou
+campo e batalha; a coluna "batalha" da tabela abaixo é, na verdade, o
+campo.)
+
+## O que já vale para todos
+
+Pelo grafo de chamadas x86 a partir de cada laço (chamadas diretas e
+ponteiros de função gravados no código; callbacks indiretos não aparecem):
+
+- **`_ftol` nativo** (`ff7_ftol.c`): alcançado por todos os mini-games.
+- **Renderizadores de triângulos** (`C_006A8002`, `C_006A8A3E`, `ff7_tri.c`)
+  e **cos/sin** (`ff7_math.c`): estão no driver gráfico dos porters, comum
+  a todos os modos.
+- **`d2ulz`**: helper do libgcc, usado por qualquer código.
+
+Ou seja, todo mini-game já ganhou alguma coisa com o trabalho da moto. O que
+não está coberto é o código próprio de cada módulo e algumas funções do motor
+comum.
+
+## Funções do motor comum (`0x660000–0x6B0000`) usadas por vários
+
+Alcance estático a partir dos laços principais.
+
+| Função | Moto | Chocobo | Snowboard | Condor | Submarino | M.-russa | O que é | Peso na moto (v0.6.0) |
+|---|---|---|---|---|---|---|---|---|
+| `0x66C984` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | multiplicação de matrizes 4×4 (x87) | 0,9% |
+| `0x66E272` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | espaço no buffer de vértices (caminho rápido já nativo dentro do `0x75F68C`) | 1,8% |
+| `0x661465` | ✓ | ✓ |  | ✓ | ✓ | ✓ | matriz de ponto fixo → float (9 divisões; usa `0x6611DA`) | 3,3% |
+| `0x6611DA` | ✓ | ✓ |  | ✓ | ✓ | ✓ | auxiliar de `0x661465` (fild/fdiv) | 0,7% |
+| `0x661098` | ✓ | ✓ |  | ✓ | ✓ |  | vetor de ponto fixo → float | 0,6% |
+| `0x6840DA` | ✓ | ✓ |  |  |  |  | — | 1,7% |
+| `0x683B33` |  | ✓ |  |  |  |  | — | (1,7% na moto, por callback) |
+
+São matemática pura, fáceis de fazer nativas e de conferir no emulador (mesmo
+método do `0x651A6D`), e ajudam vários mini-games de uma vez. O peso em cada
+um só um perfil diz.
+
+## Plano
+
+1. **Medir cada mini-game.** Sem perfil não dá para saber o que pesa em cada
+   módulo (na moto, o maior custo era um callback chamado por ponteiro, que
+   a análise estática não enxerga). Para cada um: criar
+   `ux0:data/ffvii-vita/profile_all.txt`, jogar 30–60 s, sair e enviar
+   `logs.txt` + `profile.bin` (um mini-game por sessão; o log mostra
+   `game mode: N`). Disponibilidade no jogo:
+   - Gold Saucer (disco 1): G-Bike (moto), Speed Square (montanha-russa),
+     corrida de chocobo;
+   - Fort Condor (disco 1);
+   - submarino e snowboard (disco 2; o snowboard também fica no Gold Saucer
+     depois).
+   Anotar também o FPS sem o profiler (linhas `perf:`), para saber quais
+   ficam abaixo dos 30.
+2. **Motor comum** (pode começar já): versões nativas de `0x66C984`,
+   `0x661465`/`0x6611DA`/`0x661098` e do caminho rápido de `0x66E272` como
+   gancho próprio. Ganho pequeno por função, mas vale para todos os modos,
+   inclusive batalha e mapa.
+3. **Código próprio de cada mini-game**, na ordem do que estiver mais longe
+   dos 30 fps, com o mesmo processo da moto: perfil → função mais pesada →
+   núcleo em C → teste no emulador (blob ARM ao lado do original) → gancho
+   com `*_off.txt` e autoteste.
+
+## v0.6.7: funções comuns do motor nativas (`source/ff7_engine.c`)
+
+Lendo o ARM recompilado, `0x66C984` (matrizes 4×4) já tinha sido reescrita
+pelos porters em `float` comum: fica como está. Viraram nativas as
+conversões de ponto fixo que passam pelo x87 emulado:
+
+| Função | O que é | Chamadas diretas no exe |
+|---|---|---|
+| `0x661465` | matriz PSX (`int16 r[9]` + `int32 t[3]` em +0x12, empacotados) → matriz 4×4 float: `r / 4096`, `t` por `0x6611DA`, última linha (0,0,0,1) | 31 |
+| `0x6611DA` | `(double) x / [0x7B7A54]` (1,0), devolvido na pilha x87 | 3 + 6 |
+| `0x661098` | `int16[3]` → `float[3]` | 8 |
+
+Núcleo em `source/ff7_engine_core.h`; teste
+`scripts/emu/test_engine.py libjni_ff7.so ff7_en.exe [chamadas]`, com o
+header compilado em blob ARM rodando ao lado das funções recompiladas:
+9.000 chamadas idênticas (registradores, estado x87, valor empilhado,
+memória, `_check_event`), incluindo divisão por zero e valores cruzando
+páginas; quatro mutações detectadas. Chaves: `engine_off.txt` desliga;
+`selftest_on.txt` confere as primeiras 500 chamadas de cada uma no jogo. O
+log mostra `engine conversions/s`.
+
+`0x66E272` (espaço no buffer de vértices) ficou de fora como gancho próprio:
+o caminho lento aloca, e chamar o original por `SO_CONTINUE` a cada alocação
+reescreveria o código centenas de vezes por segundo. O caminho rápido já é
+nativo dentro do `0x75F68C` (mapa).
+
+## Como o jogo inicia um mini-game
+
+Pela instrução de script de campo **0x20 (`MINIGAME`)**, tratador `0x6134C0`
+(tabela de instruções em `0x9055A0`). Argumentos (11 bytes): mapa de volta,
+x, y, z, parâmetro, tipo. Primeira passagem: grava no bloco de controle do
+campo (`[0xCBF9D8]`): +2 mapa, +4 x, +6 y, +0x22 z, +0x24 parâmetro, +0xF2
+tipo, zera +0x26 e põe o estado de saída +1 = 0xC; o motor do campo troca de
+modo. Segunda passagem (de volta, com +0x26 = 2): limpa +1 e avança o script.
+
+Tipos: 0 moto, 1 chocobo, 2 snowboard, 3 Fort Condor, 4 submarino, 5
+montanha-russa, 6 snowboard do Gold Saucer. Extraindo as instruções 0x20
+dos scripts do `flevel.lgp` (só as que voltam para o próprio campo, que é o
+padrão dos mini-games; o snowboard da geleira volta para `hyou1`):
+
+| Mini-game | Tipo | Parâmetro | Campo | Volta para (x, y, z) |
+|---|---|---|---|---|
+| G-Bike | 0 | 0 | `games_2` (507) | 507 (243, 176, 92) |
+| Corrida de chocobo | 1 | 0 | `crcin_1` (511) | 511 (−372, 33, 81) |
+| Snowboard (geleira) | 2 | 64 | `snow` (654) | 658 `hyou1` (−201, 3116, 71) |
+| Fort Condor | 3 | 128 | `convil_2` (356) | 356 (9, 114, 17) |
+| Submarino | 4 | 0 | `subin_1b` (406) | 406 (−101, −156, 8) |
+| Montanha-russa | 5 | 0 | `jetin1` (487) | 487 (411, −12, 50) |
+| Snowboard (fliperama) | 6 | 0 | `games_2` (507) | 507 (−37, 273, 26) |
+
+A moto da fuga de Midgar usa o mesmo módulo (modo 6) que o G-Bike.
+
+## Menu do port (v0.6.7, `source/port_menu.c`)
+
+**Segure L + R e aperte Start** (com o menu aberto, o jogo não recebe
+nenhum botão; O ou Start + L + R fecha).
+
+- **Mini-games:** os sete acima. Funcionam a partir de qualquer campo (modo
+  1): o menu preenche o bloco de controle como a primeira passagem da
+  instrução 0x20, na thread do jogo, entre quadros (`usleep` do limitador).
+  Terminado o mini-game, o jogo vai para o mapa de volta da tabela. Se o
+  bloco ainda estiver no estado do mini-game com +0x26 = 2, o menu o limpa
+  como a segunda passagem faria. Se o campo estiver ocupado (evento, menu),
+  o pedido espera até ~20 s e desiste (log: `not launched`).
+- **Perfil automático nos mini-games** (ligado por padrão): liga o profiler
+  no modo `profile_all` quando um mini-game começa e pausa quando termina.
+- **Profiler agora:** liga ou pausa à mão (sem a espera de 20 s do boot).
+
+O log marca cada passo (`port menu: launching ...`, `profiler on
+(automatic)`, `profiler paused`), para recortar o `profile.bin` por trecho.
+
+**Como medir um mini-game:** em qualquer campo, abrir o menu, escolher o
+mini-game, jogar 30–60 s, sair do jogo e enviar `logs.txt` e `profile.bin`.
+O `profile.bin` é recriado a cada boot em que o profiler é ligado: um
+mini-game por sessão, ou vários seguidos na mesma sessão (o log separa).
+
+O desenho é uma única chamada do pipeline fixo do vitaGL (retângulos
+coloridos; fonte 5×7 própria), feita na thread principal com a fila GL
+travada, logo antes do swap; o estado GL alterado (programa, blend,
+profundidade, cull, scissor, viewport, framebuffer, textura) é salvo e
+restaurado.
+
+**Ainda não testado no Vita.** Pontos a observar no primeiro teste: se cada
+mini-game abre, se a volta cai no lugar certo e se o campo não reabre o
+mini-game sozinho.
+
+## Medição dos mini-games (v0.6.7, pelo menu do port)
+
+Os sete atalhos do menu funcionaram (o log mostra `port menu: launching ...`
+e o modo certo). Observação: havia um `profile_on.txt` no cartão, então o
+profiler já começou no modo "picos" e o perfil automático do menu não trocou
+para o contínuo; os perfis valem para os trechos sem folga da thread do jogo
+(o caso que interessa). FPS com o profiler ligado:
+
+| Mini-game | Modo | FPS | Thread do jogo | Situação |
+|---|---|---|---|---|
+| Fort Condor | 9 | ~58 | 10–30% | ok |
+| Submarino | 10 | ~14 | 60% + espera do limitador | no ritmo do motor (~15 fps, como a batalha) |
+| Corrida de chocobo | 7 | 16–18 | 95% | limitada pela CPU |
+| Montanha-russa | 11 | 15–33 | 94% | limitada pela CPU; ~218 mil `_ftol`/s |
+| Snowboard (geleira) | 8 | 11–13 | 80% + espera do áudio | limitada pela CPU |
+| Snowboard (fliperama) | 14 | 26–36 | 60–79% | trecho curto |
+
+Ranking da thread do jogo (amostras de `mk_address`/helpers atribuídas a quem chama):
+
+| Mini-game | Funções |
+|---|---|
+| Snowboard | `0x73488D` 23%, `0x7335FB` 21%, `SL_startPlayer` 16% (ver abaixo), `0x66E272` 11%, `0x7334DA` 7% |
+| Chocobo | `0x77B9D4` 25%, `0x66E272` 19%, `0x77BCA4` 12%, `0x66CE40` 8% |
+| Montanha-russa | `0x5F04D7` 18%, `0x5F2639` 16%, `0x5F2759` 12%, `0x66E272` 11%, `_check_event` 8%, `0x5F2897` 6%, `0x5F2838` 5% |
+| Submarino | `0x79F903` 24%, `0x79FB20` 19%, `0x79A61E` 11% |
+
+## v0.6.8: duas correções que valem para vários modos
+
+**`0x66E272` nativa** (`source/ff7_engine.c`, 11–19% em três mini-games): o
+caminho comum (o buffer de vértices da textura é o do quadro atual e tem
+espaço) é nativo; reiniciar o buffer num quadro novo ou alocar um novo quando
+enche continuam no original (poucas vezes por textura e quadro; o log mostra
+quantas em `engine/s: ... buffer allocations by the original`). Teste:
+`scripts/emu/test_engine.py` (caminho comum idêntico ao original; nos casos
+que precisam do original, a versão nativa recusa sem mexer em nada; duas
+mutações detectadas).
+
+**Espera do áudio (snowboard).** As amostras em `SL_startPlayer` caíam no
+retorno de duas chamadas ao nosso OpenSL ES: `BufferQueue::Clear` e
+`Play::SetPlayState(STOPPED)`. As duas esperavam o mixer confirmar na passagem
+seguinte (até um período de saída, ~23 ms), e o snowboard para e reinicia
+efeitos sonoros o tempo todo: a thread do jogo passava ~16–20% esperando. O
+mixer só tenta (`trylock`) o lock de cada player e pula o que está ocupado;
+então, com o lock do player na mão e o mixer parado (`opensles_mixer_idle`,
+flag publicada pela thread de áudio em volta da mixagem), a thread do jogo
+faz na hora os mesmos passos que o mixer faria (`source/opensles/IPlay.c`,
+`source/opensles/IBufferQueue.c`, `source/opensles/Vita.c`). Se o mixer
+estiver no meio de uma passagem, a espera antiga continua. Vale também para
+os efeitos sonoros de todos os outros modos.
+
+## Próximos alvos (funções próprias)
+
+| Mini-game | Função | Tamanho (x86) | O que tem |
+|---|---|---|---|
+| Montanha-russa | `0x5F04D7` | 339 instr. | desenho; chama `0x5F2897` (3 `_ftol`), `0x5F26EB`, `0x5F2639`, `0x66E272` |
+| Montanha-russa | `0x5F2639`, `0x5F2759`, `0x5F2838`, `0x5F2897` | 28–60 | transformação/projeção x87, pequenas |
+| Chocobo | `0x77B9D4`, `0x77BCA4` | 126, 164 | desenho de primitiva: 3–4 vértices por `0x66CE40` + `0x66E272` |
+| Snowboard | `0x7334DA` | 59 | x87 puro |
+| Snowboard | `0x73488D`, `0x7335FB` | 235, 775 | desenho; `0x7335FB` chama `0x73404C` 4× |
+
+Ordem sugerida: montanha-russa (funções pequenas e puras), chocobo, snowboard
+(a maior). Antes, medir a v0.6.8: a `0x66E272` e o áudio já mexem nos três.
+
+## v0.6.9: o gancho esquecido em `0x66E272` (causa do custo e dos reinícios)
+
+Log da v0.6.8 na corrida de chocobo: 16–18 fps, e `ff7_engine: unexpected code
+at 0x66E272, left alone` — a versão nativa nem chegou a ser instalada. Causa:
+`ff7_bg.c` instalava a cada boot um gancho de gravação em `0x66E272` para o
+autoteste e, com autotestes desligados (o padrão), nunca o removia. Toda
+chamada a `0x66E272`, em todos os modos, passava por `SO_CONTINUE` (duas
+reescritas da entrada e dois flushes de cache): é o "`0x66E272` 11–19%" dos
+perfis. Essas milhares de reescritas por segundo também disputavam com o
+profiler (sem `profiler_hold`), o padrão que já reiniciou o console antes —
+provável causa dos reinícios ao usar o menu com o profiler ligado.
+
+Correções: `ff7_bg` só engancha `0x66E272` se o autoteste for rodar; com isso
+a versão nativa da v0.6.8 passa a ser instalada. Os ganchos permanentes que
+chamam o original a cada quadro (`ff7_screen`, `ff7_ui`) agora usam
+`SO_CONTINUE_HELD` (sob `profiler_hold`).
+
+Perfil da corrida (v0.6.8, antes da correção): `0x77B9D4` 25%, `0x66E272`
+20%, `0x77BCA4` 12%, `0x66CE40` 8%. Próximo passo: medir a v0.6.9 (sem
+`profile_on.txt` no cartão para o FPS real) e então fazer `0x77B9D4` e
+`0x77BCA4` nativas.
+
+## v0.6.10: primitivas da corrida de chocobo nativas (`source/ff7_chocobo.c`)
+
+`0x77B9D4` (triângulo) e `0x77BCA4` (quadrilátero), 25% e 12% da thread do
+jogo na corrida: transformam 3 ou 4 vértices pela matriz da câmera
+(`0x66CE40`), descartam a primitiva se um vértice está atrás da câmera
+(`w ≤ [0x7B7F50]` = 0,0, `test ah, 0x41`), pedem espaço com `0x66E272` e gravam
+x/w, y/w, z/w, 1/w e a cor no buffer da textura. Núcleo único em
+`source/ff7_chocobo_core.h`; teste `scripts/emu/test_chocobo.py`
+(blob ARM ao lado das funções recompiladas, com o `0x66E272` recompilado no
+caminho comum): 6.000 primitivas idênticas (registradores, x87, memória,
+`_check_event`), com NaN, infinitos, vértices atrás da câmera e textura nula;
+três mutações detectadas (a quarta trocava a ordem de uma soma: equivalente).
+Chave: `chocobo_off.txt`. Log: `chocobo race primitives/s`.
+
+Junto com a correção do `0x66E272` da v0.6.9, as duas maiores fatias do perfil
+da corrida (~57%) deixam de ser código recompilado. Para medir: log da corrida
+sem `profile_on.txt`, conferindo `engine/s: ... vertex buffer room native` e
+`chocobo race primitives/s` (ambos > 0).
+
+### Resultado da v0.6.10 e v0.6.11
+
+Corrida de chocobo na v0.6.10 (log com o profiler automático ligado): **29,3
+fps (o limite) na primeira metade**, antes 16–18; no meio, 18–24 fps. As
+versões nativas rodam (até 61 mil triângulos e 32 mil quadriláteros/s, 75 mil
+`0x66E272`/s, nenhuma volta ao original). Nos trechos de 21–22 fps o trabalho
+é ~36 ms por quadro — logo acima dos 33 ms — e o limitador do jogo espera o
+degrau seguinte (~45 ms), por isso aparece espera ativa abaixo de 30 fps: pouca
+economia já devolve os 30. Aos 123 s a cena é a mais pesada (77 mil primitivas
+desenhadas/s, thread 95%).
+
+No perfil desse trecho, 45% das amostras caíram em `mk_address`: o profiler só
+amostra código da `.so`, então o tempo gasto no código nativo do port aparece
+na próxima função da `.so` que ele chama — `mk_address`, chamada pelo nativo a
+cada palavra lida ou escrita (milhões de vezes por segundo). **v0.6.11:** o
+núcleo do chocobo e o `0x66E272` resolvem o endereço uma vez por bloco
+contíguo (argumentos, matriz, vértice, estrutura da textura, vértice gravado)
+quando ele não cruza página; mesmo resultado (testes do emulador repetidos:
+0 divergências), muito menos chamadas.
+
+Restante do perfil da corrida: `_check_event` 6%, `0x770767` 4%,
+`0x770305` 4%, `0x77BB50` 4%, `C_006A83AE` 4%, `glEnd` 4%, `0x6840DA` 3,5%,
+`0x77BE95` 2,4%, `0x7706D7` 2%.
+
+## v0.6.12: lista de desenho da corrida inteira em nativo
+
+Medição da v0.6.11 (sem profiler): 19–22 fps em boa parte da corrida. O
+limitador (`0x779CC6`) roda dois passos de lógica por quadro desenhado quando um
+quadro passa de 33 ms, então qualquer quadro acima disso derruba o desenho para
+~21 fps com a lógica ainda a 30. No perfil, a cadeia que leva até as primitivas
+ainda era x86 recompilado: `0x770305` 4,5%, `0x77BB50` 4,3%, `0x770767` 3,6%,
+`0x77BE95` 2,9%, `0x7706D7` 2,8%, além de boa parte dos 24,7% de `mk_address`
+(cada `push`/local da pilha x86 dessas funções resolve um endereço).
+
+Agora essa cadeia roda em C (`ff7_chocobo_core.h`):
+
+- `0x770305 (primeira, última)`: percorre as listas de objetos
+  (`[0xE7112C]+0x20/+0x1c`, separadores negativos, flag em
+  `[0xE715FC][0x18 lista + 0x13] & 0x80`, total em `[0xE71108]`). O tipo do
+  objeto (byte 2 da entrada) escolhe triângulo (0), quadrilátero (1) ou
+  `0x770434` (0x21, continua x86, chamado com a mesma pilha e os mesmos
+  registradores). A flag da primeira lista é o lixo de pilha que o original lê;
+  o nativo lê o mesmo lugar e deixa o quadro da pilha como o original deixa.
+- `0x770767` / `0x7706D7`: escolhem a textura (`[0xE71C28]`/`[0xE71C44]`,
+  `[0xE71BF0]`/`[0xE71C0C]`) e marcam a usada (`+0x14`).
+- `0x77BB50` / `0x77BE95`: montam os argumentos e chamam o núcleo das
+  primitivas direto, sem passar argumentos pela pilha x86.
+
+A página de globais `0xE71000` é resolvida uma vez por chamada. Ficam como
+chamadas x86 só `0x66E272` (nativo do `ff7_engine`) e `0x770434`.
+
+Teste: `scripts/emu/test_chocobo_list.py` (listas aleatórias com os três tipos,
+tipos desconhecidos, separadores, flags, textura nula, vértices atrás da
+câmera; `0x770434` trocado por um stub que lê argumentos e registradores nos
+dois lados): 3.000 chamadas, 0 divergências em registradores, x87, memória,
+quadro da pilha, globais, `_check_event` e chamadas a `0x770434`; sete
+mutações, todas detectadas. `test_chocobo.py` repetido após a refatoração: 0
+divergências. Log: `chocobo race/s: ... lists, ... objects`.
+
+Próximos alvos se ainda faltar: `C_006A83AE` (renderizador de triângulos do
+port, ~4%, ainda fora do `ff7_tri`) e `0x6840DA` (~4,5%).
+
+## v0.6.13: `mk_address` e `_check_event` embutidos no nativo
+
+Medição da v0.6.12: a lista nativa roda (até 78 mil triângulos e 79 mil
+objetos/s, nenhuma volta ao original), mas a corrida ficou em 22–25 fps.
+Separando o perfil pelo endereço de retorno das amostras (o código do eboot não
+é amostrado: o tempo dele cai na próxima função da `.so` que ele chama), as
+amostras em `mk_address` (36%) e `_check_event` (16%) vieram quase todas do
+nativo: `list_native` 20%, `chocobo_prim_do` 20%, `wrap_tri_native` 4%,
+`engine_alloc_run` 5%. O nativo chamava as duas funções da `.so` ~40 vezes por
+primitiva.
+
+Agora as duas são embutidas em `ff7_chocobo_core.h` e `ff7_engine_core.h`:
+
+- `mk_address(va)`: entrada da tabela de páginas (array estático em
+  `.so + 0x101DE5C`) + deslocamento; página não mapeada ou `va` 0 vão para a
+  função real (log / página padrão).
+- `_check_event()`: incrementa o contador de chamadas (`.so + 0x1492B78`); só a
+  2048ª chamada, a que avança os timers, vai para a função real. A sequência de
+  eventos é a mesma.
+
+Os endereços são lidos dos `ldr` relativos ao PC no início das duas funções e
+conferidos (`source/ff7_so_inline.h`); se não baterem, os nativos ficam
+desligados com aviso no log. Testes: o stub de `_check_event` do emulador agora
+conta como o real, e os testes conferem o contador final e que o nativo só
+chama a função na 2048ª contagem (`test_chocobo.py`, `test_chocobo_list.py`,
+`test_engine.py`: 0 divergências; mutações no contador e no endereço
+detectadas). Log novo: `draw list X ms/s` (tempo dentro de `0x770305`).
+
+## v0.6.14: correção da v0.6.13 (que desligou os nativos)
+
+A v0.6.13 não melhorou nada porque **não rodou**: o log do Vita mostra
+`ff7_engine: unexpected .so layout` e `ff7_chocobo: unexpected .so layout`, e a
+corrida ficou sem nenhum nativo (17–19 fps, trabalho 85–95%). A busca da tabela
+de páginas em `ff7_so_inline.h` somava 4 bytes a mais ao PC do `add r3, pc` do
+`mk_address`, então a conferência falhava e cada módulo se desligava inteiro. Os
+testes do emulador não pegaram: recebem os ponteiros prontos e não rodavam a
+busca.
+
+Correções:
+
+- O cálculo do endereço (`mk + 6 + 4` + literal).
+- `scripts/emu/test_so_inline.py`: roda a busca de verdade (blob ARM sobre a
+  `.so` carregada) e confere a tabela e o contador.
+- Uma falha da busca não desliga mais os nativos: eles voltam a chamar
+  `mk_address` / `_check_event` (como na v0.6.12), com o aviso
+  `mk_address/_check_event not as expected, calling them (slower)`.
+
+No log da v0.6.14 não deve aparecer nenhum `unexpected .so layout` nem esse
+aviso, e a linha `chocobo race/s` deve voltar com o `draw list X ms/s`.
+
+## v0.6.15: caminho lento do `0x66E272` sem `SO_CONTINUE`; área da corrida
+
+**Corrida (log da v0.6.14).** Os nativos voltaram: 29,3 fps na maior parte da
+corrida, caindo para ~22 nas cenas mais cheias. Nelas a lista de desenho
+custa 300–430 ms/s (`draw list`), com ~77 mil objetos/s. O `0x66E272` cai no
+caminho lento (buffer novo) ~2.800 vezes/s, e cada vez voltava ao original
+via `SO_CONTINUE`: duas reescritas da entrada e duas limpezas de cache. Agora
+um trampolim (`alloc_original` em `ff7_engine.c`) faz o que os 8 bytes cobertos
+pelo hook fariam (`push {r3-r5, lr}`; r4 = literal + PC do `add r4, pc`) e
+salta para `entrada + 8`, sem reescrever código. As instruções são conferidas
+ao instalar (senão volta ao `SO_CONTINUE`; o log diz qual). Teste:
+`scripts/emu/test_alloc_tramp.py` (entrada sobrescrita como pelo hook,
+chamada pelo trampolim × função intacta: 400 chamadas, 0 divergências; erro de
+4 bytes no r4 detectado).
+
+**Área depois da corrida (campo, 16 fps parado).** Trabalho 88%, e o log
+mostra `textures/s: 156 fast, 227 K pixels, 273 ms converting`: ~10 texturas
+por quadro reconvertidas (paleta animada) e reenviadas (`tex 156 uploads,
+40 MB, 190 ms`). No perfil manual, `convert_image_data` tem 27,5%. Os pixels
+são poucos (~1.450 por textura); o custo era por chamada:
+
+- a tabela de cores do destino (1.024 divisões em software) era refeita a cada
+  textura: agora só quando o formato muda;
+- as 256 entradas da paleta passavam por `C_006865F0` (um `mk_address` cada):
+  agora a paleta é lida direto (mesma regra: entrada `stride × paleta + i`,
+  `0xffff0000` fora do tamanho ou sem paleta). Conferido contra a função
+  original no emulador: 3.000 chamadas, 0 divergências.
+
+O log ganhou `ms 8-bit setup`, `format reuses`, `>= 256x256` e `largest WxH`,
+para medir quanto sobra e se o resto está no envio das texturas
+(`gl/s: tex ... uploads`).
+
+## v0.6.16: cenas gravadas no menu do port (marcador + profiler)
+
+Dois itens novos no menu (Start + L + R):
+
+- **GRAVAR CENA (MARCADOR + PROFILER)**: salva onde o jogador está e liga o
+  profiler; apertar de novo pausa o profiler. O log marca o início e o fim com o
+  número da cena (`port menu: scene N recording ...` / `... stopped`), e eu
+  recorto o `profile.bin` por esses tempos. Basta mandar `profile.bin` e
+  `logs.txt` da sessão. O `profile.bin` é recriado a cada sessão do jogo; as
+  cenas ficam.
+- **IR PARA CENA < N/M >**: escolhe a cena com esquerda/direita e X leva até
+  ela, para medir de novo depois de uma mudança.
+
+As cenas ficam em `ux0:data/ffvii-vita/cenas.txt`, uma por linha (`cena modo
+mapa x y triângulo direção`), e podem ser apagadas ou editadas à mão (até 16).
+
+Como funciona:
+
+- **Posição do jogador:** é lida da entidade do jogador (`[bloco + 0x2A]`,
+  gravada pelo opcode `PC`). As entidades ficam em `[0xCC0B60]`, 0x88 bytes
+  cada: x/y/z com <<12 em +0xC/+0x10/+0x14, direção em +0x38 e triângulo do
+  walkmesh em +0x78, como os opcodes `XYZI` e `DIR` escrevem. O mapa atual vem
+  de `[0xCC15D0]`.
+- **Ida a um campo:** faz o que o opcode `MAPJUMP` (0x60, handler 0x6131C4)
+  faz: grava mapa, x, y, triângulo e direção no bloco de controle (+2, +4, +6,
+  +0x22, +0x24), +0x26 = 0 e estado de saída +1 = 1. Quando o pulo termina
+  (+0x26 = 2), limpa o estado, como o segundo passo do opcode.
+- **Ida a uma cena de mini-game:** abre o mini-game pelo atalho que já existia.
+- **Restrições:** só funciona a partir de um campo. Mapa-múndi e batalha
+  podem ser gravados (o profiler liga), mas não dá para voltar a eles.
+- **Só o lugar é restaurado**, não o estado do jogo: história, grupo e itens
+  continuam os do save atual, então NPCs e eventos podem estar diferentes.
+
+**Ainda não testado no Vita.** Observar se o pulo cai na posição certa e se
+o campo continua respondendo depois dele.
+
+## v0.6.17: rancho de chocobos (paleta animada) e snowboard
+
+### Rancho de chocobos: reconversão incremental das texturas
+
+Log da v0.6.16 parado na área do rancho: 16 fps, com o jogo trabalhando 85% do
+tempo. São ~155 conversões de páginas de 256×256 por segundo (~10 por quadro),
+238 ms/s convertendo (só 15 ms disso na preparação). O perfil mostra
+`gfx_palette_changed`: a paleta animada muda o conteúdo das cores, e
+`gfx_palette_changed` → `gfx_load_texture` reconverte a página inteira no mesmo
+buffer (`+0xD8` do conjunto de texturas) e cria uma textura GL nova. O envio
+(`glTexImage2D`, 190 ms/s) roda na thread de render, em outro núcleo.
+
+`source/ff7_texture_cache.h`: para cada buffer de destino guarda as 256 cores
+da última conversão, um hash dos índices e quantos pixels usam cada índice.
+Quando a mesma página volta ao mesmo buffer (mesma origem, tamanho, pitch e
+hash) e uma amostra de 32 pixels confirma que o buffer ainda tem a última
+conversão:
+
+- só os pixels cujas cores mudaram são reescritos;
+- nada é escrito se nenhuma cor usada mudou;
+- se a mudança atinge mais de 1/4 da página, a conversão é completa.
+
+O resultado é sempre o da conversão completa. Teste no Mac
+(`scripts/test_texture_cache.c`): 20.000 conversões com animação de poucas e de
+muitas cores, índices alterados, buffer reescrito por fora, páginas invertidas
+e mais buffers que entradas do cache, 0 divergências; 4 mutações detectadas.
+Chave: `texcache_off.txt`. O log `textures/s` agora mostra pixels médios por
+conversão e as reconversões completas / parciais / sem mudança.
+
+### Snowboard: transformação e recorte de triângulos nativos (`source/ff7_snowboard.c`)
+
+No perfil de uma descida inteira da v0.6.16 (thread do jogo 96% ocupada, 16–24
+fps), três funções e os `mk_address` delas somavam ~65% da thread:
+
+- `0x7335FB` (recorte do triângulo no plano z = 0,5): 14,5% + 12,9%;
+- `0x73488D` (recorte + gravação no buffer da textura): 13,1% + 13,6%;
+- `0x7334DA` (vértice × matriz): 8,3% + 2,9%.
+
+Agora rodam em C (`ff7_snowboard_core.h`), assim como o invólucro `0x734CAB`
+(2,2% + 0,9%):
+
+- `0x73488D` faz o recorte de `0x7335FB` (0, 1, 2 ou 3 vértices atrás do
+  plano), a interpolação de cores de `0x73404C` com o `_ftol` do jogo e grava 1
+  ou 2 triângulos (x/w, y/w, z/w, 1/w, cor) com espaço pedido ao `0x66E272`.
+- `0x7334DA` multiplica em double, como o x87 recompilado, e grava em float.
+
+Teste: `scripts/emu/test_snowboard.py` (blob ARM ao lado das funções
+recompiladas): 6.000 chamadas, 0 divergências em registradores, x87, memória e
+`_check_event`, com todos os casos de recorte, NaN, infinitos, w = 0 e textura
+nula. 14 de 16 mutações detectadas; as 2 restantes são equivalentes. Chave:
+`snowboard_off.txt`. Log: `snowboard/s: ... transforms, ... triangles (...
+clipped, ... drawn) native`.
+
+Próximos candidatos se ainda faltar: `0x7322D6` (2,8%), `0x72700C` (2,3% +
+1,2%, também chama `0x73488D`) e `0x732159` (1,9%).
+
+## v0.6.18: áudio do snowboard (diagnóstico)
+
+Log enviado com o áudio do snowboard travando e sem música: é da **v0.6.16**,
+então sem os nativos da v0.6.17.
+
+**Como a música do snowboard toca.** Quatro faixas sempre tocam como WAV, e
+não pelo player `.akb` do Android (`SND_play`): `SATO` (15), `WIND` (65, o
+snowboard), `SENSUI` (88, o submarino) e `HEART` (97). Quem classifica é
+`0x7416A3`. O próprio código do PC faz o streaming:
+
+- `0x7478BD` abre `<nome>.wav` (`wind.wav`, ADPCM, convertido pelo ACM
+  emulado);
+- um timer multimídia (`timeSetEvent` de 80 ms, callback `0x74656C`, avançado
+  pelo `timeEvent_step` dentro do `_check_event`) chama `0x748950(stream)`
+  para reabastecer um buffer DirectSound em loop;
+- se `0x748950` devolve ≠ 0, o callback desliga o timer e o arquivo não é mais
+  lido.
+
+**O que o log mostra.** `wind.wav` foi lido por ~9 s (540 KB de 1,36 MB) e
+depois nunca mais (`obb/s: 0 KB` até o fim da descida). O stream terminou cedo.
+`0x748950` dá o stream por acabado quando liga `[stream + 0x34]`; ela calcula o
+avanço pela posição de reprodução do buffer (`GetCurrentPosition`, que na
+`.so` vem de `SL_getCurrentPosition` sobre o nosso OpenSL) e pelos pontos de
+loop. A suspeita é uma posição que não avança ou volta errado.
+
+`source/ff7_sound_diag.c` (ligado nesta versão; `sound_diag_off.txt`
+desliga) registra no log, com até 400 linhas por sessão:
+
+- cada buffer criado (flags, tamanho, formato), `Play` e `Stop`;
+- as primeiras 40 chamadas de `0x748950` de cada stream e toda chamada que
+  muda as flags ou encerra o stream: modo, flags de loop e fim, tamanho,
+  posição, loop e formato;
+- posições do `GetCurrentPosition` que voltam sem dar a volta no buffer.
+
+Com um log de uma descida dá para ver em que passo o stream acaba e corrigir.
+
+**Glitches gráficos** (mesmo log, v0.6.16): os nativos que rodam no snowboard
+são o renderizador de triângulos, o `0x66E272` do `ff7_engine` (~900 caminhos
+lentos/s, pelo trampolim desde a v0.6.15) e, a partir da v0.6.17, os do
+snowboard. Para isolar: repetir com `snowboard_off.txt`, depois com
+`engine_off.txt`, depois com `highway_off.txt` em `ux0:data/ffvii-vita/`.
+
+## v0.6.19: música do snowboard, 30 fps no snowboard
+
+Log da v0.6.18: com os nativos o snowboard chega a 60 fps; a música continua
+travando.
+
+**O diagnóstico mostrou a causa provável do travamento.**
+
+- O buffer do stream (`wind.wav` decodificado: 90.112 bytes, estéreo, 44,1
+  kHz, 16 bits) é criado e tocado em loop.
+- Durante a descida, o jogo envia o comando de som "resume" a cada quadro.
+  `resume_sound` (`0x745995`) chama `Play` em todo buffer cuja posição não é 0
+  (`0x74A758` = `GetCurrentPosition`): o da música e o de um efeito, a cada
+  quadro.
+- No DirectSound, `Play` num buffer que já toca não faz nada. O
+  `fw_IDirectSoundBuffer_Play` da `.so` passa toda chamada ao `SL_startPlayer`
+  com a posição guardada do último `GetCurrentPosition` (degraus de 16 KB), e a
+  música recomeçava de posições velhas.
+
+**Correção** (`source/ff7_dsound.c`): o `Play` só chega ao código da `.so`
+quando o `GetStatus` dela diz que o buffer não está tocando, ou quando a flag de
+loop muda; um `Stop` libera o próximo `Play`. Chave:
+`dsound_play_fix_off.txt`. O diagnóstico continua ligado (`sound_diag_off.txt`
+desliga), agora sem as linhas dos `Play` ignorados, com o fim do stream (`refill
+END`) e um resumo a cada 5 s (refills, `Play` repassados e ignorados, estado do
+stream).
+
+**30 fps no snowboard** (`ff7_snowboard.c`). O quadro do snowboard
+(`0x72381C`) roda passos fixos de lógica de 60 Hz pelo tempo medido
+(`0x723960`: tempo × 60 em `[[0x926290] + 0x268]`, até 32 passos) e desenha uma
+vez. Desenhando a 30 fps, são 2 passos por quadro e a velocidade do jogo é a
+mesma. A entrada de `0x72381C` espera até completar 33,3 ms do quadro anterior.
+Chave para voltar a 60: `snowboard_60fps.txt`. Log: `snowboard cap: N
+frames/s, N ms/s waiting`.
+
+**Árvores** (prints): a árvore "deitada" aparece com o Cloud caído depois de
+bater, e a câmera entra na pedra. O nativo do snowboard reproduz o recorte do
+original bit a bit (teste do emulador), e glitches já tinham sido vistos na
+v0.6.16, sem ele. Para confirmar se é do jogo: repetir a cena com
+`snowboard_off.txt`.

@@ -41,10 +41,18 @@ extern "C"
 #include "ff7_ui.h"
 #include "ff7_memmap.h"
 #include "ff7_tri.h"
+#include "ff7_d2ulz.h"
+#include "ff7_ftol.h"
+#include "ff7_highway.h"
+#include "ff7_engine.h"
+#include "ff7_chocobo.h"
+#include "ff7_snowboard.h"
+#include "ff7_dsound.h"
 #include "ff7_world.h"
 #include "ff7_music.h"
 #include "ff7_screen.h"
 #include "ff7_stack.h"
+#include "ff7_buttons.h"
 #include "ff7_selftest.h"
 #include "utils/utils.h"
 #include <stdbool.h>
@@ -97,10 +105,18 @@ void so_patch(void) {
 	ff7_math_patch();
 	ff7_ui_patch();
 	ff7_tri_patch();
+	ff7_d2ulz_patch();
+	ff7_ftol_patch();
+	ff7_highway_patch();
+	ff7_engine_patch();
+	ff7_chocobo_patch();
+	ff7_snowboard_patch();
 	ff7_world_patch();
 	ff7_music_patch();
+	ff7_dsound_patch();
 	ff7_screen_patch();
 	ff7_stack_patch();
+	ff7_buttons_patch();
 	ff7_memmap_patch(); // last: its site checks must see the other hooks
 	// Sample hook with symbol name
 	// hook_addr((uintptr_t)so_symbol(&so_mod, "_ZN6glitch2os7Printer5printEPKcz"), (uintptr_t)&hookedFunction);

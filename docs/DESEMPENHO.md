@@ -696,3 +696,204 @@ Ela está **fora do hook atual** do `ff7_tri`, que só cobre `C_006A8002`.
 Ganho esperado se os três clusters forem nativos: ~45–50% da thread do
 highway. O minigame fica em 94–96% CPU-bound a 21–27 fps; com metade da
 thread liberada, ~30 fps é viável.
+
+## Plano de ação novo para o highway (perfil de 20/10/2026)
+
+Esta sequência foi reavaliada a partir de `build/VPK/logs.txt`,
+`build/VPK/profile.bin` e `build/VPK/logs_moto_erro.txt`. O log antigo mostra
+a moto em 22–23 fps; no perfil mais recente, o modo 6 mantém a thread do jogo
+em 95–97%, com GPU tail de 3,2–3,4 ms. Os travamentos de 1,3 s aparecem ao
+abrir `high-us.lgp` e são custo de carregamento; não entram na otimização por
+quadro.
+
+1. **Reduzir conversões double→uint64** (`__fixunsdfdi` / `__aeabi_d2ulz`). O
+   chamador `func_0x00651a6d` ocupa 9,6% do perfil e o helper de conversão
+   aparece diretamente em 2,65%, além das rotinas de aritmética double da
+   mesma cadeia. Implementado em
+   `source/ff7_d2ulz.c`: decomposição IEEE-754 por inteiros substitui a cadeia
+   de multiplicações, subtrações e conversões double do libgcc. A semântica de
+   NaN, negativos e overflow é comparada com o original no autoteste opcional
+   (`ux0:data/ffvii-vita/selftest_on.txt`, primeiras 512 chamadas). Para
+   desligar sem rebuild, criar `ux0:data/ffvii-vita/d2ulz_off.txt`.
+2. **Reperfilar a moto com o autoteste ligado**. Se houver divergência, o hook
+   volta ao original automaticamente. Medir FPS e `unsigned double
+   conversions/s` em um trecho repetível do highway, e comparar com o mesmo
+   trecho sem `d2ulz_off.txt`.
+3. **Atacar transformação de vértices** (`0x65d9c2`, `0x65d1de`, `0x65caf8`,
+   ~22% incluindo `mk_address`). Antes de substituir, mapear os arrays e
+   estado x87 que essas rotinas modificam; então fazer core C bit-exato e
+   emulador com comparação de memória, registradores e flags x87. Hook só após
+   essa equivalência.
+4. **Atacar o loop de render do highway** (`0x651a6d` e helpers, ~22%).
+   Preservar ordem dos eventos GL e estado de pilha/FPU; instrumentar amostras
+   separadas por função antes de escolher o primeiro loop nativo.
+
+O primeiro item reduz trabalho repetido de conversão sem reescrever a lógica
+do minigame. O ganho real ainda depende da medição no Vita; os percentuais do
+perfil indicam teto de custo removível, não uma previsão de FPS.
+
+## v0.6.2: conversão x87 `_ftol` nativa
+
+O usuário relatou 27 fps na moto com a primeira alteração. Ainda não há log ou
+perfil dessa execução: os arquivos disponíveis continuam sendo os de antes
+do patch. Para esta etapa foi reanalisado o intervalo 205–375 s do perfil
+original, com 7.102 amostras da thread do jogo. `0x40B470` aparece diretamente
+em 477 amostras (6,72%). Isso orienta a escolha do alvo, mas não mede seu peso
+na execução que chegou a 27 fps.
+
+A desmontagem confirma que `0x40B470` é o helper MSVC `_ftol`, que retira um
+double da pilha x87 e devolve o inteiro em EDX:EAX. A hipótese anterior nesta
+documentação de que ele seria uma operação de cor/normal não se confirmou.
+O helper não é exclusivo da moto; seus outros chamadores também usam a nova
+implementação.
+
+`source/ff7_ftol.c` substitui o wrapper inteiro. O core compartilhado em
+`source/ff7_ftol_core.h` converte pelos bits IEEE-754, preservando os
+comportamentos particulares do binário até em overflow, infinitos e NaNs.
+Mantém os 16 bytes de escrita temporária na pilha x86, a normalização da
+palavra de controle, o TOP e as demais flags/slots x87. `_check_event` continua
+sendo chamado uma vez, antes de incrementar ESP para o retorno. Frames que
+cruzam páginas não contíguas ou um TOP inesperado seguem pelo original.
+
+Validação offline com `scripts/emu/test_ftol.py`, compilando o mesmo header
+C para ARM Cortex-A9 e executando junto do código original em Unicorn:
+
+- 27.288 entradas em cada helper (signed e unsigned), todas idênticas;
+  incluem ambos os sinais, todos os expoentes, payloads NaN e valores de
+  coordenadas. A conversão unsigned da etapa anterior também foi conferida.
+- 12.000 estados de `_ftol`, comparando todo o bloco de registradores/flags,
+  estado x87 e região da pilha, inclusive no instante de `_check_event`.
+  Inclui pilha desalinhada, fronteiras de página, TOP 0–7 e callback alterando
+  ESP para conferir a ordem do retorno.
+- Build Vita e `check-vpk` concluídos. Arquivo novo:
+  `build/VPK/ff7_vita_v0.6.2.vpk`; a numeração pula a tentativa 0.6.1 descartada.
+
+No aparelho, as primeiras 64 chamadas são comparadas com o original
+automaticamente (512 com `selftest_on.txt`). O log deve registrar
+`ff7_ftol selftest ok` e depois `x87 integer conversions/s`. Em divergência,
+o resultado original é mantido e a substituição é desativada. As chamadas
+ao original suspendem o profiler enquanto o hook altera permissões/código.
+
+Para A/B, repetir o mesmo trecho com e sem
+`ux0:data/ffvii-vita/ftol_off.txt`, reiniciando o jogo entre execuções. Esse
+arquivo desliga apenas `_ftol`; a conversão unsigned anterior permanece
+ativa. O aumento de FPS desta etapa ainda precisa ser medido no Vita.
+
+## Vídeos pré-renderizados e zoom (v0.6.3)
+
+A queda contínua para 15 fps no trecho 102--143 s do `logs.txt` é a FMV
+`bike.webm`, identificada por `MyDecoder.START`. Há somente 45 draws/s, GPU
+tail de 2,2 ms e a thread `movie` ocupa 42--53% de um núcleo. Assim, ampliar
+a imagem não altera o FPS dessa sequência: o custo é a decodificação VP8.
+
+`ff7_screen` passa a consultar o estado do próprio `MyDecoder` entre `START`
+e `RESET`. Se o vídeo tiver 448 linhas, recebe o mesmo zoom proporcional
+480/448 do cenário de campo: preenche a altura do Vita sem distorcer. Vídeos
+em outra resolução mantêm a apresentação original. O log marca
+`field zoom: on (movie)` durante a FMV e volta para `field zoom: off` ao fim.
+
+## Relatório consolidado: trabalho recente de desempenho
+
+| Área | Alteração | Evidência disponível | Resultado e estado |
+|---|---|---|---|
+| Moto / highway | `ff7_d2ulz.c`: conversão double→uint64 por operações inteiras | Perfil original: cadeia do chamador em 9,6%; helper em 2,65% | Integrada; o usuário mediu melhora para cerca de 27 fps. `d2ulz_off.txt` permite A/B. |
+| Moto / highway | `ff7_ftol.c`: substituição do helper x87 `_ftol` em `0x0040B470` | 477 de 7.102 amostras da thread do jogo (6,72%) | Integrada na v0.6.2; validação offline e autoteste no aparelho. Falta medir o ganho isolado. |
+| Moto / highway | Render de triângulos `C_006A8A3E` | O log confirma execução nativa durante a moto; FPS atual varia perto de 24--30 | Já estava no projeto antes deste ciclo; foi mantido, sem reutilizar a implementação descartada como base para as duas conversões. |
+| Campo com fogo | Diagnóstico do trecho 602--668 s de `logs_anterior.txt` | 17 fps, 94--95% da thread do jogo, ~250 conversões de textura/s, 6,3 milhões de pixels/s; GPU em 3,5 ms | É um gargalo de CPU independente da moto. O próximo perfil deve ser capturado nesse trecho. |
+| Vídeos pré-renderizados | Detecção pelo estado do `MyDecoder` e zoom de vídeos 640×448 | `MyDecoder.START`/`RESET` são sinais diretos de reprodução | Integrada na v0.6.3. O zoom preserva proporção e usa a altura inteira; não acelera a decodificação VP8. |
+
+### Garantias aplicadas às mudanças da moto
+
+- A conversão unsigned preserva NaN, valores negativos e overflow, com
+  autoteste opcional nas primeiras 512 chamadas.
+- `_ftol` preserva registradores, flags, pilha x86, estado x87 e a chamada a
+  `_check_event`. A comparação offline cobriu 27.288 entradas dos helpers e
+  12.000 estados completos de `_ftol`; a primeira execução no Vita compara
+  mais 64 chamadas com o original.
+- A v0.6.3 foi compilada e o pacote passou em `check-vpk`.
+
+### Próxima medição necessária
+
+Para a cena de fogo, criar `profile_all.txt`, entrar no trecho que fica em
+17 fps por pelo menos 20 segundos, sair do jogo e enviar o novo `profile.bin`
+junto do `logs.txt`. Depois remover `profile_all.txt`: o profiler reduz o
+desempenho enquanto está ativo. Esse perfil separará o custo de montar o efeito
+do custo já medido de converter e enviar as texturas.
+
+## v0.6.5: cor de vértice do highway nativa (`source/ff7_highway.c`)
+
+Medição de referência: `logs.txt` da v0.6.2 (o `logs_moto_erro.txt` é da
+v0.5.07 e o `profile.bin` disponível é da v0.6.0, anterior a `d2ulz`,
+`_ftol` e `C_006A8A3E`). No modo 6: 23–32 fps (média ~26), thread do jogo
+94–96% ocupada, ~38 ms por quadro; **~231 mil `_ftol` por segundo**, três por
+vértice colorido.
+
+Reatribuindo o perfil da v0.6.0 (7.162 amostras da thread do jogo,
+203–375 s), depois de descontar o que já virou nativo (`_ftol` 7,4%,
+`__fixunsdfdi` 5,2% e o `__muldf3` que ele chamava):
+
+| Função | % | O que é |
+|---|---|---|
+| `0x651A6D` | 10,5% | cor do vértice (callback) |
+| `0x65D9C2` | 8,0% | transformação de vértices |
+| `0x651A2B` | 6,0% | z do vértice (chamada por `0x651A6D` e `0x65CAF8`) |
+| `0x65CAF8` | 4,7% | transformação (chama `0x651A2B`/`0x6519D3`) |
+| `0x65D1DE` | 4,2% | transformação |
+| `0x6519D3` | 3,7% | fator de névoa (chamada por `0x651A6D` e `0x65CAF8`) |
+| `0x661465` | 3,3% | — |
+
+`0x651A6D (src, v, out)` é um callback por vértice: `0x659B40` guarda o
+endereço numa estrutura e o highway o chama por ponteiro (`_call_func`), o
+que o gancho na entrada ARM também pega. Ele calcula z pela matriz da câmera
+(`0x651A2B`), o fator de névoa entre os planos perto/longe (`0x6519D3`) e cada
+canal = byte × fator, saturado em 255, por três `_ftol`. A versão nativa
+(`source/ff7_highway_core.h`) faz a cadeia inteira de uma vez: some uma
+chamada x86 a `0x651A2B`, uma a `0x6519D3` e três a `_ftol` por vértice, mais
+todo o x87 emulado entre elas.
+
+**Teste.** Igual ao de `0x75F68C`: o header vira um blob ARM
+(`scripts/emu/blob_highway.c`) que roda no emulador ao lado da função
+recompilada, que chama os helpers recompilados de verdade
+(`scripts/emu/test_highway.py libjni_ff7.so ff7_en.exe [vértices]`):
+registradores x86, estado x87 (palavra de controle, flags de exceção, C0–C3,
+TOP), memória e chamadas a `_check_event` idênticos em 20.000 vértices, com
+NaN, infinitos, `far == near`, palavras de controle fora do padrão e o
+caminho saturado. Cinco mutações do núcleo foram todas detectadas. Detalhes
+que o teste mostrou:
+
+- o `fnstsw ax` recompilado grava a palavra de status no EAX **inteiro**
+  (extensão de zero), não só em AX;
+- o primeiro teste de névoa é `test ah, 0x41` (C0 ou C3);
+- `fidiv` por zero mantém o dividendo e marca ZE.
+
+Chaves: `highway_off.txt` desliga; `selftest_on.txt` confere os primeiros
+2.000 vértices contra o original no jogo. O log mostra
+`highway colored vertices/s: N native, 0 original`.
+
+Ganho esperado: a maior parte dos ~27% que a cadeia somava na v0.6.0 (hoje
+menos, porque `_ftol` já é nativo). Precisa ser medido no Vita.
+
+### Correções da revisão
+
+- **Fallback sem reescrever o código a cada chamada.** `_ftol` e `d2ulz`,
+  ao se desligarem por divergência no autoteste, chamavam o original por
+  `SO_CONTINUE` em toda chamada: duas escritas no texto e dois flushes de
+  cache por chamada (até ~230 mil por segundo). Agora o gancho é removido uma
+  vez (`source/ff7_unhook.h`) e as chamadas seguintes vão direto ao original.
+- **`d2ulz` sob `profiler_hold`.** O `SO_CONTINUE` do autoteste reescreve a
+  entrada da função enquanto o profiler pode estar trocando a proteção do
+  texto em outro núcleo; agora fica protegido, como já era no `_ftol`.
+  Observação: `__fixunsdfdi` é libgcc dentro da `.so` e pode ser chamado por
+  outras threads (áudio); o autoteste dele só deve ser usado para
+  diagnóstico (`selftest_on.txt`).
+- **Estado do vídeo entre threads.** `ff7_screen` (thread principal) lia
+  `mv.playing`/`mv.height`, escritos pela thread do jogo. Agora lê uma
+  palavra `volatile` (`active_height`), publicada no fim de `movie_start` e
+  zerada no começo de `movie_stop`.
+
+### Próximos alvos do highway
+
+Transformação de vértices: `0x65D9C2` (8%), `0x65CAF8` (4,7%, que também
+chama `0x651A2B`/`0x6519D3`) e `0x65D1DE` (4,2%). Um perfil novo com a v0.6.5
+(`profile_all.txt`, agora a cada 20 ms) mostra o peso real de cada uma
+depois desta etapa.

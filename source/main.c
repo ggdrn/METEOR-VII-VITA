@@ -21,6 +21,13 @@
 #include "ff7_bg.h"
 #include "ff7_math.h"
 #include "ff7_tri.h"
+#include "ff7_d2ulz.h"
+#include "ff7_ftol.h"
+#include "ff7_highway.h"
+#include "ff7_engine.h"
+#include "ff7_chocobo.h"
+#include "ff7_snowboard.h"
+#include "port_menu.h"
 #include "ff7_world.h"
 #include "ff7_stack.h"
 #include "reimpl/gl_variants.h"
@@ -175,6 +182,7 @@ int main() {
 
     // ux0:data/ffvii-vita/profile_on.txt: spike profiler without a special build
     int profiling = 0;
+    (void) profiling;
 #if defined(ENABLE_PROFILER)
     profiler_start(NULL, 0);
     profiling = 1;
@@ -194,6 +202,7 @@ int main() {
 #endif
 
     log_memory();
+    port_menu_init();
     cpu_set_self(CPU_MASK_SECONDARY); // core 0 is the game thread's
     cpu_register_thread("main", sceKernelGetThreadId());
     l_success("Entering main loop.");
@@ -253,7 +262,7 @@ int main() {
             glstats_report((now - heartbeat_us) / 1000000.0);
             cpu_report((now - heartbeat_us) / 1000000.0);
             perf_report(frames * 1000000.0 / (double) (now - heartbeat_us), cpu_last_pct("game"));
-            if (profiling) profiler_report();
+            profiler_report(); // no-op unless started (at boot or from the port menu)
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
             ff7_lzss_report((now - heartbeat_us) / 1000000.0);
@@ -262,6 +271,12 @@ int main() {
             ff7_bg_report((now - heartbeat_us) / 1000000.0);
             ff7_math_report((now - heartbeat_us) / 1000000.0);
             ff7_tri_report((now - heartbeat_us) / 1000000.0);
+            ff7_d2ulz_report((now - heartbeat_us) / 1000000.0);
+            ff7_ftol_report((now - heartbeat_us) / 1000000.0);
+            ff7_highway_report((now - heartbeat_us) / 1000000.0);
+            ff7_engine_report((now - heartbeat_us) / 1000000.0);
+            ff7_chocobo_report((now - heartbeat_us) / 1000000.0);
+            ff7_snowboard_report((now - heartbeat_us) / 1000000.0);
             ff7_world_report((now - heartbeat_us) / 1000000.0);
             ff7_stack_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);

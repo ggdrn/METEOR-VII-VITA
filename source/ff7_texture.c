@@ -22,8 +22,11 @@
  */
 
 #include "ff7_texture.h"
+#include "ff7_buttons.h"
+#include "ff7_texture_cache.h"
 
 #include "utils/logger.h"
+#include "utils/utils.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -57,11 +60,15 @@ typedef void * (* mk_address_fn)(uint32_t addr);
 static palette_color_fn palette_color;
 static mk_address_fn mk_address;
 static uint8_t * black_flag; // global byte read by convert_image_data
+static tc_cache tcache;      // incremental reconversion (game thread only)
+static int tc_off;           // DATA_PATH "texcache_off.txt"
+
 static so_hook convert_hook;
 
 static struct {
-    unsigned fast, slow;
-    unsigned long long pixels, us;
+    unsigned fast, slow, enc_reuse, big;
+    unsigned long long pixels, us, setup_us;
+    int max_w, max_h;
 } st;
 
 // Alpha/black rules applied by convert_image_data to every source color.
@@ -89,6 +96,20 @@ typedef struct {
 
 // ARM register shifts by >= 32 yield 0; C leaves them undefined
 static inline uint32_t shl(uint32_t v, uint32_t s) { return s < 32 ? v << s : 0; }
+
+// The destination format rarely changes: the 1,024 divisions (software on
+// the Vita's CPU) only run when it does
+static uint32_t enc_key[9];
+static int enc_valid;
+
+static int encoder_reuse(const void * tf) {
+    uint32_t k[9] = { U32(tf, 0x70), U32(tf, 0x74), U32(tf, 0x78), U32(tf, 0x7c), U32(tf, 0x50), U32(tf, 0x54),
+                      U32(tf, 0x58), U32(tf, 0x5c), U32(tf, 0x3c) != 0 };
+    if (enc_valid && !memcmp(k, enc_key, sizeof(k))) return 1;
+    memcpy(enc_key, k, sizeof(k));
+    enc_valid = 1;
+    return 0;
+}
 
 static void encoder_init(encoder_t * e, const void * tf) {
     uint32_t mr = U32(tf, 0x70), mg = U32(tf, 0x74), mb = U32(tf, 0x78), ma = U32(tf, 0x7c);
@@ -216,6 +237,7 @@ static void selftest(int invert, int raw_index, void * th, void * tf, uint8_t * 
 static void convert_image_data(int invert, int raw_index, void * th, void * tf, uint8_t * dst) {
     SceUInt64 t0 = sceKernelGetProcessTimeWide();
     uint8_t * dst_base = dst;
+    ff7_buttons_font(th); // PlayStation symbols in the menu font, before converting it
 
     // th: t_ff7_tex_header, source t_texture_format embedded at +0x3c
     // tf: destination t_texture_format (must not be paletted)
@@ -258,14 +280,28 @@ static void convert_image_data(int invert, int raw_index, void * th, void * tf, 
 
     const uint8_t black_is_transparent = *black_flag;
     static encoder_t enc;
-    encoder_init(&enc, tf);
+    if (encoder_reuse(tf)) st.enc_reuse++;
+    else encoder_init(&enc, tf);
 
     if (src_bpp == 1) {
         // Everything depends only on the index: build the 256 results once
         uint32_t raw[256], conv[256];
         const uint32_t palette = U32(th, 0xd0);
+        // C_006865F0 for a paletted format: entry stride * palette + i of the
+        // palette at [fmt + 0x24] (one mk_address, as it does), 0xffff0000
+        // past [fmt + 0x1c] entries or without a palette
+        const uint32_t * pal = NULL;
+        uint32_t pal_base = 0, pal_n = 0;
+        if (U32(src_fmt, 0x10) && U32(src_fmt, 0x24)) {
+            pal = mk_address(U32(src_fmt, 0x24));
+            pal_base = U32(src_fmt, 0x20) * palette;
+            pal_n = U32(src_fmt, 0x1c);
+        }
         for (int i = 0; i < 256; i++) {
-            uint32_t c = palette_color(i, palette, src_fmt);
+            uint32_t c;
+            if (pal) c = pal_base + i < pal_n ? pal[pal_base + i] : 0xffff0000u;
+            else if (U32(src_fmt, 0x10)) c = 0xffff0000u;
+            else c = palette_color(i, palette, src_fmt);
             uint32_t a = c >> 24;
             if (color_key && i == 0) {
                 c &= 0x00ffffff;
@@ -275,10 +311,17 @@ static void convert_image_data(int invert, int raw_index, void * th, void * tf, 
             raw[i] = c;
             conv[i] = encode(&enc, c);
         }
+        st.setup_us += sceKernelGetProcessTimeWide() - t0;
         if (dst_bpp == 4 && !(((uintptr_t) dst | (uint32_t) pitch) & 3)) {
-            // The usual case (RGBA8888): one table load and store per pixel
-            for (int y = 0; y < height; y++, dst += pitch, src += width)
-                blit8_32((uint32_t *) dst, src, width, conv);
+            // The usual case (RGBA8888): one table load and store per pixel,
+            // or only the pixels whose color changed when the same page goes
+            // to the same buffer again (animated palettes)
+            if (tc_off) {
+                for (int y = 0; y < height; y++, dst += pitch, src += width)
+                    blit8_32((uint32_t *) dst, src, width, conv);
+            } else {
+                tc_convert(&tcache, dst, src, width, height, pitch, conv);
+            }
         } else if (dst_bpp == 2 && !(((uintptr_t) dst | (uint32_t) pitch) & 1)) {
             uint16_t conv16[256];
             for (int i = 0; i < 256; i++) conv16[i] = (uint16_t) conv[i];
@@ -312,6 +355,11 @@ done:
     }
     st.fast++;
     st.pixels += (unsigned long long) width * (height > 0 ? height : 0);
+    if (width * height > st.max_w * st.max_h) {
+        st.max_w = width;
+        st.max_h = height;
+    }
+    if (width >= 256 && height >= 256) st.big++;
     st.us += sceKernelGetProcessTimeWide() - t0;
     return;
 
@@ -338,13 +386,19 @@ void ff7_texture_patch(void) {
     uint32_t literal = *(uint32_t *) (base + FLAG_LITERAL_OFFSET);
     black_flag = *(uint8_t **) (base + FLAG_PC_OFFSET + literal);
 
+    tc_off = file_exists(DATA_PATH "texcache_off.txt");
     convert_hook = hook_addr(convert, (uintptr_t) &convert_image_data);
-    l_info("ff7_texture: fast convert_image_data installed (flag at %p)", black_flag);
+    l_info("ff7_texture: fast convert_image_data installed (flag at %p, incremental reconversion %s)", black_flag,
+           tc_off ? "off" : "on");
 }
 
 void ff7_texture_report(double seconds) {
     if (seconds <= 0) return;
-    l_info("textures/s: %.1f fast, %.1f original, %.0f K pixels, %.1f ms converting",
-           st.fast / seconds, st.slow / seconds, st.pixels / 1000.0 / seconds, st.us / 1000.0 / seconds);
+    unsigned avg = st.fast ? (unsigned) (st.pixels / st.fast) : 0;
+    l_info("textures/s: %.1f fast, %.1f original, %.1f ms converting (%.1f ms 8-bit setup); %u pixels each on"
+           " average, %u of %u >= 256x256, largest %dx%d; reconversions: %u full, %u partial, %u unchanged",
+           st.fast / seconds, st.slow / seconds, st.us / 1000.0 / seconds, st.setup_us / 1000.0 / seconds, avg,
+           st.big, st.fast, st.max_w, st.max_h, tcache.full, tcache.partial, tcache.skipped);
     memset(&st, 0, sizeof(st));
+    tcache.full = tcache.partial = tcache.skipped = 0;
 }
