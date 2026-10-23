@@ -13,5 +13,7 @@ void ff7_texture_patch(void);
 
 /** Logs conversion statistics accumulated over `seconds`, then resets them. */
 void ff7_texture_report(double seconds);
+/** Port menu A/B test, on the game thread. */
+void ff7_texture_cache_set(int on);
 
 #endif // FF7_TEXTURE_H

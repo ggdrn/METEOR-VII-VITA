@@ -56,6 +56,8 @@ extern so_module so_mod;
 
 static snowboard_env env;
 static so_hook xform_hook, tri_hook, tri3_hook;
+static uintptr_t xform_addr, tri_addr, tri3_addr;
+static int installed, enabled;
 static unsigned long long fallbacks;
 
 
@@ -102,11 +104,31 @@ void ff7_snowboard_patch(void) {
         env.ev_count = NULL;
         l_warn("ff7_snowboard: mk_address/_check_event not as expected, calling them (slower)");
     }
-    xform_hook = hook_addr(xform, (uintptr_t) &xform_native);
-    tri_hook = hook_addr(tri, (uintptr_t) &tri_native);
-    tri3_hook = hook_addr(tri3, (uintptr_t) &tri3_native);
+    xform_addr = xform;
+    tri_addr = tri;
+    tri3_addr = tri3;
+    installed = 1;
+    ff7_snowboard_set(1);
     l_info("ff7_snowboard: native snowboard transform and triangle clip (0x7334DA, 0x73488D + 0x7335FB, 0x734CAB)"
            " installed");
+}
+
+// A/B test from the port menu (game thread, between frames)
+void ff7_snowboard_set(int on) {
+    if (!installed || on == enabled) return;
+    if (on) {
+        profiler_hold(); // the profiler changes the text's permissions from another core
+        xform_hook = hook_addr(xform_addr, (uintptr_t) &xform_native);
+        tri_hook = hook_addr(tri_addr, (uintptr_t) &tri_native);
+        tri3_hook = hook_addr(tri3_addr, (uintptr_t) &tri3_native);
+        profiler_release();
+    } else {
+        ff7_unhook(&xform_hook);
+        ff7_unhook(&tri_hook);
+        ff7_unhook(&tri3_hook);
+    }
+    enabled = on;
+    l_info("ff7_snowboard: natives %s", on ? "on" : "off (port menu)");
 }
 
 void ff7_snowboard_report(double seconds) {

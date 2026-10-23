@@ -40,6 +40,8 @@ extern so_module so_mod;
 
 #define FRAME_US 33333 // 30 fps
 
+static volatile int cap_on = 1; // port menu A/B test
+
 typedef struct {
     const char * name, * sym, * off_switch;
     so_hook hook;
@@ -53,7 +55,14 @@ static capped_t caps[] = {
 };
 #define NUM_CAPS ((int) (sizeof(caps) / sizeof(caps[0])))
 
+void port_menu_apply_ab(void);
+
 static void cap_wait(capped_t * c) {
+    port_menu_apply_ab(); // between two frames of the minigame: a safe point
+    if (!cap_on) {
+        c->next = 0;
+        return;
+    }
     SceUInt64 now = sceKernelGetProcessTimeWide();
     if (c->next && now < c->next) {
         SceUInt64 wait = c->next - now;
@@ -94,6 +103,11 @@ void ff7_framecap_patch(void) {
         c->hook = hook_addr(fn, (uintptr_t) natives[i]);
         l_info("ff7_framecap: %s drawn at 30 fps at most (logic stays 60 Hz)", c->name);
     }
+}
+
+void ff7_framecap_set(int on) {
+    if (on != cap_on) l_info("ff7_framecap: 30 fps cap %s", on ? "on" : "off (port menu)");
+    cap_on = on;
 }
 
 void ff7_framecap_report(double seconds) {

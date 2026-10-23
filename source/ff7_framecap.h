@@ -10,5 +10,7 @@
 
 void ff7_framecap_patch(void);
 void ff7_framecap_report(double seconds);
+/** Port menu A/B test. */
+void ff7_framecap_set(int on);
 
 #endif // FF7_FRAMECAP_H

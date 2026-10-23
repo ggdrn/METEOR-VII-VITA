@@ -20,6 +20,11 @@
  * only when the porters' GetStatus says the buffer isn't playing, or its
  * looping flag changes.
  *
+ * v0.6.25: only looping buffers (the music stream) get this. A one-shot
+ * effect that ended can still read as playing in the porters' state (it is
+ * updated when its position is asked), so ignoring its next Play lost menu
+ * and save-load sounds the first time they played again.
+ *
  * Diagnostics (v0.6.18-19, at most 600 lines a session): buffers created,
  * Play/Stop that reach the porters' code, the stream's refills (first 20
  * calls, every end-flag change, the end) and a stream summary every 5 s.
@@ -184,7 +189,7 @@ static int create_native(uint32_t ds, uint32_t desc, uint32_t out, uint32_t unk)
 
 static int play_native(uint32_t buf, uint32_t a, uint32_t b, uint32_t flags) {
     int slot = buf ? buf_slot(buf) : -1;
-    if (fix_on && slot >= 0 && bufs[slot].buf == buf && bufs[slot].flags == (flags & 1)) {
+    if (fix_on && (flags & 1) && slot >= 0 && bufs[slot].buf == buf && bufs[slot].flags == 1) {
         // the porters' status: playing (1) or not (0); scratch status word on
         // the x86 stack below the caller's frame (dead)
         uint32_t status_va = regs[4] - 0x200;

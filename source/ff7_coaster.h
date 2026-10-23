@@ -10,5 +10,7 @@
 
 void ff7_coaster_patch(void);
 void ff7_coaster_report(double seconds);
+/** Port menu A/B test, on the game thread between frames. */
+void ff7_coaster_set(int on);
 
 #endif // FF7_COASTER_H

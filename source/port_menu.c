@@ -37,6 +37,13 @@
  * at [0xCC0B60]: x, y, z (<< 12) at +0xC/+0x10/+0x14, direction +0x38,
  * triangle +0x78 (opcodes XYZI and DIR). The current field is [0xCC15D0].
  *
+ * A/B tests (v0.6.25): the minigame natives (coaster, snowboard), the
+ * 30 fps cap and the texture reconversion cache can be turned off and on in
+ * game, to see which one a visual problem comes from without restarting.
+ * The change is applied on the game thread between frames
+ * (port_menu_apply_ab: from the frame limiter's sleep, and from the
+ * minigames' frame entry in ff7_framecap.c, since they never sleep).
+ *
  * Drawing: one fixed-function vitaGL draw of colored rectangles (a 5x7
  * font drawn as runs of pixels), on the main thread with GL locked, right
  * before the swap. Every piece of GL state it changes is saved and restored
@@ -47,6 +54,10 @@
  */
 
 #include "port_menu.h"
+#include "ff7_coaster.h"
+#include "ff7_framecap.h"
+#include "ff7_snowboard.h"
+#include "ff7_texture.h"
 
 #include "utils/logger.h"
 #include "utils/profiler.h"
@@ -95,7 +106,8 @@ static const minigame games[] = {
     { "SNOWBOARD (FLIPERAMA)",      6,   0, 507,  -37,  273, 26 }, // games_2
 };
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
-enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_AUTO, ITEM_PROFILER, ITEM_CLOSE, NUM_ITEMS };
+enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
+       ITEM_CLOSE, NUM_ITEMS };
 
 static const uint32_t * memmap;
 
@@ -109,6 +121,9 @@ static volatile int goto_request = -1; // scene to return to
 static volatile int recording = -1; // scene being profiled
 static volatile int jumping;        // map jump written, waiting for it to end
 static scene scenes[MAX_SCENES];
+// A/B tests: wanted (main thread) and applied (game thread) states
+static volatile int ab_want[3] = { 1, 1, 1 }; // minigame natives, 30 fps cap, texture cache
+static int ab_applied[3] = { 1, 1, 1 };
 static volatile int num_scenes;
 static int scene_cursor; // main thread
 
@@ -222,8 +237,25 @@ void port_menu_init(void) {
 
 // ---------------------------------------------------------------- game thread
 
+void port_menu_apply_ab(void) {
+    for (int i = 0; i < 3; i++) {
+        int w = ab_want[i];
+        if (w == ab_applied[i]) continue;
+        ab_applied[i] = w;
+        if (i == 0) {
+            ff7_coaster_set(w);
+            ff7_snowboard_set(w);
+        } else if (i == 1) {
+            ff7_framecap_set(w);
+        } else {
+            ff7_texture_cache_set(w);
+        }
+    }
+}
+
 void port_menu_game_tick(void) {
     static int tries, seen_other, auto_started, last_mode = -1;
+    port_menu_apply_ab();
     int mode = read_mode();
     game_mode = mode;
 
@@ -394,6 +426,14 @@ static void activate(int item) {
             open = 0;
             wait_release = 1;
         }
+    } else if (item >= ITEM_AB_NATIVES && item <= ITEM_AB_TEXCACHE) {
+        int k = item - ITEM_AB_NATIVES;
+        ab_want[k] = !ab_want[k];
+        static const char * const what[3] = { "NATIVOS DOS MINI-GAMES", "LIMITE DE 30 FPS", "CACHE DE TEXTURAS" };
+        char m[64];
+        snprintf(m, sizeof(m), "%s: %s", what[k], ab_want[k] ? "LIGADO" : "DESLIGADO");
+        set_message(m);
+        l_info("port menu: A/B %s %s (mode %d)", what[k], ab_want[k] ? "on" : "off", game_mode);
     } else if (item == ITEM_AUTO) {
         auto_profile = !auto_profile;
         l_info("port menu: automatic profiling %s", auto_profile ? "on" : "off");
@@ -482,7 +522,7 @@ static const glyph font[] = {
 
 #define SCALE   3
 #define ADVANCE (6 * SCALE)
-#define LINE_H  (10 * SCALE)
+#define LINE_H  26 // 15 items fit in 544 lines
 #define MAX_VERTICES 30000
 
 static float verts[MAX_VERTICES * 2];
@@ -588,7 +628,7 @@ void port_menu_draw(void) {
 
     char line[64];
     if (open) {
-        const float x0 = 120, y0 = 16, x1 = 840; // 12 items: the box ends at ~526 of 544 lines
+        const float x0 = 120, y0 = 16, x1 = 840; // 15 items: the box ends at ~540 of 544 lines
         const float y1 = y0 + 30 + (NUM_ITEMS + 4) * LINE_H;
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
@@ -613,6 +653,12 @@ void port_menu_draw(void) {
                 else
                     snprintf(line, sizeof(line), "IR PARA CENA < %d/%d > MODO %d", scene_cursor + 1, num_scenes,
                              scenes[scene_cursor].mode);
+            } else if (i == ITEM_AB_NATIVES) {
+                snprintf(line, sizeof(line), "A/B NATIVOS DOS MINI-GAMES: %s", ab_want[0] ? "SIM" : "NAO");
+            } else if (i == ITEM_AB_CAP) {
+                snprintf(line, sizeof(line), "A/B LIMITE DE 30 FPS: %s", ab_want[1] ? "SIM" : "NAO");
+            } else if (i == ITEM_AB_TEXCACHE) {
+                snprintf(line, sizeof(line), "A/B CACHE DE TEXTURAS: %s", ab_want[2] ? "SIM" : "NAO");
             } else if (i == ITEM_AUTO) snprintf(line, sizeof(line), "PERFIL AUTOMATICO NOS MINI-GAMES: %s", auto_profile ? "SIM" : "NAO");
             else if (i == ITEM_PROFILER) snprintf(line, sizeof(line), "PROFILER AGORA: %s", profiler_active() ? "PAUSAR" : "INICIAR");
             else label = "FECHAR";

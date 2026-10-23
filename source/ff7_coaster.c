@@ -62,6 +62,8 @@ static const struct {
     { "_Z15func_0x005f2897v", 0xb083b5f0 },
 };
 static so_hook hooks[NUM_F];
+static uintptr_t addrs[NUM_F];
+static int installed, enabled;
 
 /*
  * 0x5F04D7's original without SO_CONTINUE (its clipping path runs whenever a
@@ -146,12 +148,31 @@ void ff7_coaster_patch(void) {
         l_warn("ff7_coaster: mk_address/_check_event not as expected, calling them (slower)");
     }
     tri_tramp_ok = tri_tramp_setup(addr[F_TRI]);
-    static void (* const natives[NUM_F])(void) = { tri_native, project_native, depth_native, fade_native,
-                                                   color_native };
-    for (int i = 0; i < NUM_F; i++) hooks[i] = hook_addr(addr[i], (uintptr_t) natives[i]);
+    for (int i = 0; i < NUM_F; i++) addrs[i] = addr[i];
+    installed = 1;
+    ff7_coaster_set(1);
     l_info("ff7_coaster: native roller coaster triangle, projection, depth, fade and color (0x5F04D7, 0x5F2639,"
            " 0x5F2759, 0x5F2838, 0x5F2897) installed; clipping path by %s",
            tri_tramp_ok ? "trampoline" : "SO_CONTINUE");
+}
+
+// A/B test from the port menu: the hooks put in or taken out (game thread,
+// between frames: none of these functions is running)
+void ff7_coaster_set(int on) {
+    static void (* const natives[NUM_F])(void) = { tri_native, project_native, depth_native, fade_native,
+                                                   color_native };
+    if (!installed || on == enabled) return;
+    for (int i = 0; i < NUM_F; i++) {
+        if (on) {
+            profiler_hold(); // the profiler changes the text's permissions from another core
+            hooks[i] = hook_addr(addrs[i], (uintptr_t) natives[i]);
+            profiler_release();
+        } else {
+            ff7_unhook(&hooks[i]);
+        }
+    }
+    enabled = on;
+    l_info("ff7_coaster: natives %s", on ? "on" : "off (port menu)");
 }
 
 void ff7_coaster_report(double seconds) {

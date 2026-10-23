@@ -394,6 +394,14 @@ void ff7_texture_patch(void) {
            tc_off ? "off" : "on");
 }
 
+// Port menu A/B test (game thread): back on, the cache starts empty
+void ff7_texture_cache_set(int on) {
+    if (on == !tc_off) return;
+    if (on) memset(tcache.e, 0, sizeof(tcache.e));
+    tc_off = !on;
+    l_info("ff7_texture: incremental reconversion %s", on ? "on" : "off (port menu)");
+}
+
 void ff7_texture_report(double seconds) {
     if (seconds <= 0) return;
     unsigned avg = st.fast ? (unsigned) (st.pixels / st.fast) : 0;

@@ -13,5 +13,7 @@ void ff7_snowboard_patch(void);
 
 /** Logs statistics accumulated over `seconds`, then resets them. */
 void ff7_snowboard_report(double seconds);
+/** Port menu A/B test, on the game thread between frames. */
+void ff7_snowboard_set(int on);
 
 #endif // FF7_SNOWBOARD_H

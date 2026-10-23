@@ -779,3 +779,32 @@ v0.6.23, sem eles. Pelo código de `0x5F04D7`:
 A mesma família de glitch aparece nas árvores do snowboard. Próximo passo:
 seguir o caminho dos polígonos adiados até o desenho e comparar com o
 `natives_off.txt` + `memmap_off.txt` + `stack_off.txt`.
+
+## v0.6.25: som do menu na primeira vez; testes A/B no menu do port
+
+Log da v0.6.24: montanha-russa a 30 fps firmes (folga de 360–960 ms/s; 19–32
+mil triângulos nativos/s, recorte pelo original 4–97/s), mas com texturas 3D
+piscando. E o primeiro som de um menu, ou o de carregar o save, não sai.
+
+**Som do menu.** O efeito do cursor (`0214c4e4`) toca em pares `Stop`/`Play`, e
+o resumo do diagnóstico mostra `Play` ignorados nesse trecho. A correção da
+v0.6.19 (ignorar `Play` num buffer que a `.so` diz estar tocando) valia para
+todo buffer. Num efeito curto que terminou, o estado "tocando" da `.so` só muda
+quando ela consulta a posição, então o `Play` seguinte era engolido. Agora só
+buffers em loop (a música em stream) têm o `Play` repetido ignorado; efeitos de
+uma vez passam sempre, como antes da v0.6.19.
+
+**Texturas piscando: testes A/B no menu do port** (Start + L + R). Três itens
+novos ligam e desligam na hora, sem reiniciar:
+
+- `A/B NATIVOS DOS MINI-GAMES`: os nativos da montanha-russa e do snowboard
+  (hooks tirados e repostos, `ff7_coaster_set` / `ff7_snowboard_set`);
+- `A/B LIMITE DE 30 FPS` (`ff7_framecap_set`);
+- `A/B CACHE DE TEXTURAS`: a reconversão incremental (`ff7_texture_cache_set`;
+  religado, o cache começa vazio).
+
+As mudanças são aplicadas na thread do jogo entre quadros
+(`port_menu_apply_ab`: no `usleep` do limitador e na entrada do quadro dos
+minigames em `ff7_framecap.c`, já que eles nunca chamam `usleep`). O log
+registra cada troca (`port menu: A/B ...`). Para achar a causa do piscar: na
+montanha-russa, desligar um de cada vez e ver qual faz parar.

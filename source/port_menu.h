@@ -28,4 +28,7 @@ void port_menu_draw(void);
  *  minigame launch and follows the minigame for the profiler. */
 void port_menu_game_tick(void);
 
+/** Game thread, between frames: applies the A/B test switches of the menu. */
+void port_menu_apply_ab(void);
+
 #endif // PORT_MENU_H
