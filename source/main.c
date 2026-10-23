@@ -27,6 +27,8 @@
 #include "ff7_engine.h"
 #include "ff7_chocobo.h"
 #include "ff7_snowboard.h"
+#include "ff7_framecap.h"
+#include "ff7_coaster.h"
 #include "port_menu.h"
 #include "ff7_world.h"
 #include "ff7_stack.h"
@@ -277,6 +279,8 @@ int main() {
             ff7_engine_report((now - heartbeat_us) / 1000000.0);
             ff7_chocobo_report((now - heartbeat_us) / 1000000.0);
             ff7_snowboard_report((now - heartbeat_us) / 1000000.0);
+            ff7_coaster_report((now - heartbeat_us) / 1000000.0);
+            ff7_framecap_report((now - heartbeat_us) / 1000000.0);
             ff7_world_report((now - heartbeat_us) / 1000000.0);
             ff7_stack_report((now - heartbeat_us) / 1000000.0);
             gl_variants_report((now - heartbeat_us) / 1000000.0);

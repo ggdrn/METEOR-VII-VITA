@@ -700,3 +700,82 @@ recompilado: `ff7_memmap` (endereços constantes; `memmap_off.txt`) e
 `natives_off.txt` + `memmap_off.txt` + `stack_off.txt` juntos. Se o glitch
 continuar, ele não vem de nenhuma otimização do port; resta o próprio jogo
 (versão Android) ou o vitaGL.
+
+## Snowboard: estado em aberto (pausado na v0.6.24)
+
+O que já se sabe e o que foi tentado, para retomar depois.
+
+**Música (faixa WIND, `wind.wav`, a única estéreo)** — ainda muda.
+
+| Versão | Tentativa | Resultado |
+|---|---|---|
+| 0.6.18 | diagnóstico do stream (`ff7_dsound.c`) | stream lido por ~9 s e parado |
+| 0.6.19 | `Play` repetido ignorado (o jogo manda "resume" a cada quadro) | stream passa a andar em tempo real, em loop |
+| 0.6.20 | log de volume/pan/frequência | volume 0 dB, pan e frequência nunca mudam |
+| 0.6.21–22 | `Lock` e pico do PCM (crash na 0.6.21, corrigido) | o PCM decodificado chega ao buffer (pico 900–6.350), 176 KB/s |
+| 0.6.23 | diagnóstico no `Enqueue` do OpenSL (`bq diag`) | ainda sem log de snowboard |
+
+Descartado: volume, fade, player OpenSL não criado, formato errado, endereço
+errado do buffer, stream parado. Falta ver, com o `bq diag`, se os blocos do
+buffer da música chegam ao `Enqueue` do OpenSL e com que ganho. A chave
+`wavmusic_fullvolume.txt` força volume cheio (teste).
+
+**Árvores esticadas** — continuam.
+
+- O nativo `C_006A8A3E` foi corrigido (cor e UV corrente: `test_tri2_exact.py`),
+  mas não era esta causa.
+- Com `natives_off.txt` (todos os nativos de desenho e matemática desligados) o
+  glitch continua: não vem deles.
+- Ainda não testado: `natives_off.txt` + `memmap_off.txt` + `stack_off.txt` (as
+  reescritas de endereço, únicas otimizações que ficam ligadas).
+- Pista (v0.6.24, abaixo): a mesma família de glitch aparece na montanha-russa,
+  em triângulos que encostam no plano próximo e vão para o caminho de recorte
+  (polígonos adiados, desenhados pelo renderizador do próprio port Android).
+
+## v0.6.24: montanha-russa a 30 fps e nativa
+
+Log da v0.6.23: 18–60 fps, thread do jogo 96% ocupada, sem espera de
+limitador (roda o mais rápido possível).
+
+**30 fps** (`source/ff7_framecap.c`, novo; o limite do snowboard foi para lá
+também). O quadro da montanha-russa segue o esquema do snowboard: `0x5E8F9B`
+soma o tempo × 60 em `[0xC3F6E8]` (até 32 passos), e `0x5E8E7E` (a função
+principal do modo, uma vez por quadro) roda os passos de lógica de 60 Hz e
+desenha só no último (`[0x9014A8]`). A entrada de `0x5E8E7E` espera até
+completar 33,3 ms: 2 passos por quadro, mesma velocidade de jogo. Chaves:
+`coaster_60fps.txt`, `snowboard_60fps.txt`. Log: `coaster cap: N frames/s`.
+
+**Nativos** (`source/ff7_coaster.c`, `ff7_coaster_core.h`). No perfil:
+`0x5F2639` 16,6% + 2,4%, `0x5F04D7` 15,4% + 3%, `_ftol` 14,8%, `0x5F2759` 11,5%
++ 2,4%, `0x5F2838` 4,6%, `0x5F2897` 2,6%. Tudo vira C:
+
+- `0x5F04D7`, um triângulo: profundidade e fade dos 3 vértices; nada se nenhum
+  está na frente; se algum está a menos de -100, o caminho de recorte vai para o
+  original (por trampolim, sem `SO_CONTINUE`); senão, espaço pelo `0x66E272` e 3
+  vértices projetados com cor esmaecida (2º vértice no slot 2, 3º no slot 1);
+- auxiliares, também nativos sozinhos: `0x5F2639` (projeção, `0x66CE40` em float,
+  w = 0 vira 0,1), `0x5F2759` (profundidade), `0x5F2838` (fade entre
+  `[0xC3F750]` e `[0xC3F754]`) e `0x5F2897` (cor × fade, 3 `_ftol` embutidos).
+
+Teste: `scripts/emu/test_coaster.py`: 3.000 chamadas, 0 divergências em
+registradores, x87 (incluindo o valor deixado na pilha), memória e
+`_check_event`. Quando o nativo recusa (recorte ou NaN), o teste confere que ele
+não mudou nada. 9 de 10 mutações detectadas; a restante é equivalente (ordem de
+uma soma comutativa). Chave: `coaster_off.txt`. Log: `coaster/s: ...`.
+
+**Glitches ("efeitos 3D puxados do nada").** Não vêm destes nativos: o caminho
+desenhado direto reproduz o original bit a bit, e os glitches já existiam na
+v0.6.23, sem eles. Pelo código de `0x5F04D7`:
+
+- triângulos com um vértice perto da câmera (profundidade < -100) não são
+  desenhados ali: viram polígonos adiados (`0x672C61` aloca o registro,
+  `0x66C4F0` põe uma matriz identidade, vértices em espaço de câmera, z do
+  plano 0,5 em +0x6C) para o recorte do motor;
+- esses polígonos são desenhados depois pelo renderizador do próprio port
+  Android. A família `C_006A8xxx` (`C_006A8002` descarta o triângulo com
+  w ≤ 0; `C_006A83AE` desenha vértices já projetados sem UV própria) é código C
+  do port, não do PC.
+
+A mesma família de glitch aparece nas árvores do snowboard. Próximo passo:
+seguir o caminho dos polígonos adiados até o desenho e comparar com o
+`natives_off.txt` + `memmap_off.txt` + `stack_off.txt`.

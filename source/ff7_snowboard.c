@@ -20,13 +20,7 @@
  *
  * DATA_PATH "snowboard_off.txt" leaves the originals.
  *
- * 30 fps cap (v0.6.19): with the natives the run reaches 60 fps, which keeps
- * the CPU at 96%. The snowboard's frame (0x72381C, once per drawn frame) runs
- * fixed 60 Hz logic steps for the time measured since the last frame
- * (0x723960: elapsed * 60 into [[0x926290] + 0x268], up to 32 steps) and
- * draws once, so drawing at 30 fps runs 2 logic steps a frame: same speed.
- * Its entry waits until 33.3 ms have passed since the previous frame.
- * DATA_PATH "snowboard_60fps.txt" leaves it uncapped.
+ * The 30 fps cap of the snowboard is in ff7_framecap.c (since v0.6.24).
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
@@ -47,8 +41,6 @@
 
 #include <stdint.h>
 
-#include <psp2/kernel/processmgr.h>
-#include <psp2/kernel/threadmgr.h>
 #include <so_util/so_util.h>
 
 extern so_module so_mod;
@@ -63,30 +55,9 @@ extern so_module so_mod;
 #define FPU_GOT         0xf4c82c   // GOT slot: pointer to the x87 state
 
 static snowboard_env env;
-static so_hook xform_hook, tri_hook, tri3_hook, frame_hook;
+static so_hook xform_hook, tri_hook, tri3_hook;
 static unsigned long long fallbacks;
 
-#define SYM_FRAME       "_Z15func_0x0072381cv"
-#define CAP_OFF         DATA_PATH "snowboard_60fps.txt"
-#define FRAME_US        33333 // 30 fps
-
-static SceUInt64 next_frame;
-static unsigned capped_frames, cap_wait_us;
-
-static void frame_native(void) {
-    SceUInt64 now = sceKernelGetProcessTimeWide();
-    if (next_frame && now < next_frame) {
-        SceUInt64 wait = next_frame - now;
-        if (wait > FRAME_US) wait = FRAME_US;
-        sceKernelDelayThread((SceUInt) wait);
-        cap_wait_us += (unsigned) wait;
-        now = sceKernelGetProcessTimeWide();
-    }
-    // a steady 30 fps cadence; after a slow frame, start over from now
-    next_frame = next_frame && now - next_frame < FRAME_US ? next_frame + FRAME_US : now + FRAME_US;
-    capped_frames++;
-    SO_CONTINUE_HELD(int, frame_hook);
-}
 
 static void xform_native(void) {
     if (!snowboard_xform_run(&env)) {
@@ -109,22 +80,7 @@ static void tri3_native(void) {
     }
 }
 
-static void frame_cap_patch(void) {
-    if (file_exists(CAP_OFF)) {
-        l_info("ff7_snowboard: 30 fps cap disabled by %s", CAP_OFF);
-        return;
-    }
-    uintptr_t frame = so_symbol(&so_mod, SYM_FRAME);
-    if (!frame) {
-        l_warn("ff7_snowboard: %s not found, no 30 fps cap", SYM_FRAME);
-        return;
-    }
-    frame_hook = hook_addr(frame, (uintptr_t) &frame_native);
-    l_info("ff7_snowboard: snowboard drawn at 30 fps at most (logic stays 60 Hz)");
-}
-
 void ff7_snowboard_patch(void) {
-    frame_cap_patch();
     if (ff7_switch_off("ff7_snowboard", OFF_SWITCH)) return;
     uintptr_t xform = so_symbol(&so_mod, SYM_XFORM), tri = so_symbol(&so_mod, SYM_TRI);
     uintptr_t tri3 = so_symbol(&so_mod, SYM_TRI3);
@@ -154,11 +110,6 @@ void ff7_snowboard_patch(void) {
 }
 
 void ff7_snowboard_report(double seconds) {
-    if (seconds > 0 && capped_frames) {
-        l_info("snowboard cap: %.1f frames/s, %.1f ms/s waiting for 30 fps", capped_frames / seconds,
-               cap_wait_us / 1000.0 / seconds);
-        capped_frames = cap_wait_us = 0;
-    }
     if (seconds <= 0 || (!env.counters[0] && !env.counters[1] && !fallbacks)) return;
     l_info("snowboard/s: %.0f transforms, %.0f triangles (%.0f clipped, %.0f drawn) native, %.0f original",
            env.counters[0] / seconds, env.counters[1] / seconds, env.counters[2] / seconds,

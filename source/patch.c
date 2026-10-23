@@ -48,6 +48,8 @@ extern "C"
 #include "ff7_chocobo.h"
 #include "ff7_snowboard.h"
 #include "ff7_dsound.h"
+#include "ff7_framecap.h"
+#include "ff7_coaster.h"
 #include "ff7_world.h"
 #include "ff7_music.h"
 #include "ff7_screen.h"
@@ -111,6 +113,8 @@ void so_patch(void) {
 	ff7_engine_patch();
 	ff7_chocobo_patch();
 	ff7_snowboard_patch();
+	ff7_coaster_patch();
+	ff7_framecap_patch();
 	ff7_world_patch();
 	ff7_music_patch();
 	ff7_dsound_patch();
