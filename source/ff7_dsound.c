@@ -24,6 +24,14 @@
  * Play/Stop that reach the porters' code, the stream's refills (first 20
  * calls, every end-flag change, the end) and a stream summary every 5 s.
  *
+ * v0.6.20: the v0.6.19 log shows the stream alive (refilled continuously,
+ * the file read in real time, looping) but nothing heard: the diagnostics
+ * add SetVolume / SetPan / SetFrequency of the music buffer and the x86
+ * music volumes ([0xDE6558] master 0-100, [0xDE6584] current 0-127: the
+ * buffer volume is the table 0x967660 at their product / 100, -10000 = mute
+ * at 0). DATA_PATH "wavmusic_fullvolume.txt" (test) plays the music buffer
+ * at full volume whatever the game asks.
+ *
  * DATA_PATH "dsound_play_fix_off.txt" turns the fix off,
  * "sound_diag_off.txt" the logs.
  *
@@ -53,6 +61,13 @@ extern so_module so_mod;
 #define SYM_PLAY    "_Z26fw_IDirectSoundBuffer_Playjjjj"
 #define SYM_STOP    "_Z26fw_IDirectSoundBuffer_Stopj"
 #define SYM_STATUS  "_Z31fw_IDirectSoundBuffer_GetStatusjj"
+#define SYM_VOLUME  "_Z31fw_IDirectSoundBuffer_SetVolumeji"
+#define SYM_PAN     "_Z28fw_IDirectSoundBuffer_SetPanji"
+#define SYM_FREQ    "_Z34fw_IDirectSoundBuffer_SetFrequencyjj"
+#define FULL_VOLUME DATA_PATH "wavmusic_fullvolume.txt"
+#define VA_STREAM   0xde62d8u // the music stream; +0 its DirectSound buffer
+#define VA_MASTER   0xde6558u
+#define VA_MUSIC    0xde6584u
 #define MAX_LOGS    600
 #define MAX_BUFS    64
 
@@ -62,8 +77,8 @@ typedef int (* status_fn)(uint32_t buf, uint32_t status_va);
 static mk_address_fn mk_address;
 static status_fn get_status;
 static volatile uint32_t * regs;
-static so_hook refill_hook, create_hook, play_hook, stop_hook;
-static int fix_on, diag_on;
+static so_hook refill_hook, create_hook, play_hook, stop_hook, volume_hook, pan_hook, freq_hook;
+static int fix_on, diag_on, full_volume;
 static int logs_left = MAX_LOGS;
 
 // Looping flag of the last Play passed on, per buffer
@@ -92,6 +107,8 @@ static uint16_t rd16(uint32_t va) {
 static double now_s(void) {
     return sceKernelGetProcessTimeWide() / 1000000.0;
 }
+
+static int is_music(uint32_t buf);
 
 #define DIAG(...) do { if (diag_on && logs_left > 0) { logs_left--; l_info(__VA_ARGS__); } } while (0)
 
@@ -133,8 +150,9 @@ static void refill_native(void) {
     SceUInt64 now = sceKernelGetProcessTimeWide();
     if (now >= st.next_summary) {
         st.next_summary = now + 5000000;
-        DIAG("sound diag %.3f: last 5 s: %u refills, %u Play passed on, %u repeated Play skipped", now_s(),
-             st.refills, st.plays, st.skipped_plays);
+        DIAG("sound diag %.3f: last 5 s: %u refills, %u Play passed on, %u repeated Play skipped; music buffer"
+             " %08x, x86 music volume master %u current %u target %u", now_s(), st.refills, st.plays,
+             st.skipped_plays, rd32(VA_STREAM), rd32(VA_MASTER), rd32(VA_MUSIC), rd32(VA_MUSIC + 4));
         log_stream("stream now", stream, r);
         st.refills = st.plays = st.skipped_plays = 0;
     }
@@ -167,7 +185,11 @@ static int play_native(uint32_t buf, uint32_t a, uint32_t b, uint32_t flags) {
         bufs[slot].flags = flags & 1;
     }
     st.plays++;
-    DIAG("sound diag %.3f: Play %08x flags %u -> %d", now_s(), buf, flags, r);
+    static unsigned plays_logged;
+    if (is_music(buf) || plays_logged < 20) { // effects replay all the time: only the first ones
+        plays_logged++;
+        DIAG("sound diag %.3f: Play %08x%s flags %u -> %d", now_s(), buf, is_music(buf) ? " (music)" : "", flags, r);
+    }
     return r;
 }
 
@@ -176,6 +198,43 @@ static int stop_native(uint32_t buf) {
     int slot = buf ? buf_slot(buf) : -1;
     if (slot >= 0 && bufs[slot].buf == buf) bufs[slot].buf = 0; // the next Play goes through
     DIAG("sound diag %.3f: Stop %08x -> %d", now_s(), buf, r);
+    return r;
+}
+
+static int is_music(uint32_t buf) {
+    return buf && buf == rd32(VA_STREAM);
+}
+
+// The music buffer's volume, pan and frequency: every change is logged
+static int last_set[3] = { 0x7fffffff, 0x7fffffff, 0x7fffffff };
+
+
+static void log_set(int which, uint32_t buf, int value, int passed, int r) {
+    static const char * const names[3] = { "SetVolume", "SetPan", "SetFrequency" };
+    if (is_music(buf)) {
+        if (value != last_set[which])
+            DIAG("sound diag %.3f: music %s %08x %d%s -> %d", now_s(), names[which], buf, value,
+                 passed != value ? " (full volume test: 0)" : "", r);
+        last_set[which] = value;
+    }
+}
+
+static int volume_native(uint32_t buf, int vol) {
+    int v = full_volume && is_music(buf) ? 0 : vol;
+    int r = SO_CONTINUE_HELD(int, volume_hook, buf, v);
+    log_set(0, buf, vol, v, r);
+    return r;
+}
+
+static int pan_native(uint32_t buf, int pan) {
+    int r = SO_CONTINUE_HELD(int, pan_hook, buf, pan);
+    log_set(1, buf, pan, pan, r);
+    return r;
+}
+
+static int freq_native(uint32_t buf, uint32_t freq) {
+    int r = SO_CONTINUE_HELD(int, freq_hook, buf, freq);
+    log_set(2, buf, (int) freq, (int) freq, r);
     return r;
 }
 
@@ -197,10 +256,18 @@ void ff7_dsound_patch(void) {
     }
     play_hook = hook_addr(play, (uintptr_t) &play_native);
     stop_hook = hook_addr(stop, (uintptr_t) &stop_native);
+    full_volume = file_exists(FULL_VOLUME);
+    if (diag_on || full_volume) {
+        uintptr_t vol = so_symbol(&so_mod, SYM_VOLUME), pan = so_symbol(&so_mod, SYM_PAN);
+        uintptr_t freq = so_symbol(&so_mod, SYM_FREQ);
+        if (vol) volume_hook = hook_addr(vol, (uintptr_t) &volume_native);
+        if (pan && diag_on) pan_hook = hook_addr(pan, (uintptr_t) &pan_native);
+        if (freq && diag_on) freq_hook = hook_addr(freq, (uintptr_t) &freq_native);
+    }
     if (diag_on) {
         refill_hook = hook_addr(refill, (uintptr_t) &refill_native);
         create_hook = hook_addr(create, (uintptr_t) &create_native);
     }
-    l_info("ff7_dsound: repeated Play %s, diagnostics %s", fix_on ? "ignored while playing (fix on)" : "passed on",
-           diag_on ? "on" : "off");
+    l_info("ff7_dsound: repeated Play %s, diagnostics %s%s", fix_on ? "ignored while playing (fix on)" : "passed on",
+           diag_on ? "on" : "off", full_volume ? ", WAV music at full volume (test)" : "");
 }

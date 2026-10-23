@@ -590,3 +590,35 @@ bater, e a câmera entra na pedra. O nativo do snowboard reproduz o recorte do
 original bit a bit (teste do emulador), e glitches já tinham sido vistos na
 v0.6.16, sem ele. Para confirmar se é do jogo: repetir a cena com
 `snowboard_off.txt`.
+
+## v0.6.20: árvores do snowboard (renderizador C_006A8A3E) e volume da música
+
+**Árvores esticadas** (prints: textura de árvore ampliada sobre paredes e chão).
+O nativo de `C_006A8A3E` (renderizador de triângulos da moto, também usado no
+snowboard, nativo desde as versões da moto) diferia do original em duas coisas:
+
+- o original chama `fake_glColor4ub` uma vez por triângulo, com a cor do
+  **primeiro** vértice (triângulo de cor sólida), e o nativo usava a cor de
+  cada vértice;
+- o original chama `glTexCoord2f` por vértice, então a UV corrente fica com a do
+  último vértice; o nativo não atualizava `CUR_U`/`CUR_V`. Os desenhos
+  seguintes que emitem vértices sem mandar UV herdavam uma UV velha, e a textura
+  esticava pelo cenário.
+
+O teste antigo (`test_tri2.py`) não comparava cores nem a UV corrente: o
+emulador não resolvia as entradas do GOT de símbolos da própria `.so`. Agora
+`Emu(resolve_defined=True)` resolve essas entradas, e
+`scripts/emu/test_tri2_exact.py` roda a função original de verdade
+(`fake_glColor4ub`, `glTexCoord2f`, `glVertex3f`) contra o núcleo num blob ARM
+e compara tudo: vértices com cor, `pCurVertex`, cor e UV correntes. O núcleo
+novo dá 0 divergências em 600 chamadas; o da v0.6.19, 196 em 200.
+
+**Música do snowboard** (log da v0.6.19). Com a correção do `Play`, o stream
+anda: reabastece o tempo todo, lê o arquivo em tempo real (~44 KB/s de ADPCM)
+e volta ao ponto de loop. Mesmo assim não se ouve nada, então o problema está
+depois dos dados. O volume que o código do PC dá ao buffer é a tabela `0x967660`
+(-10000 = mudo no índice 0), indexada por `[0xDE6558] × [0xDE6584] / 100`
+(volume mestre de música × volume atual, que os fades mudam). O diagnóstico
+agora registra `SetVolume`, `SetPan` e `SetFrequency` do buffer da música e
+essas variáveis no resumo de 5 s. A chave de teste `wavmusic_fullvolume.txt`
+força volume cheio no buffer da música.

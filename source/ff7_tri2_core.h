@@ -17,11 +17,20 @@
  *   +24  float u
  *   +28  float v
  *
- * Per triangle: indices are uint16, stride is sizeof(vertex)=32 bytes.
- * For each of the three vertices:
- *   fake_glColor4ub(r, g, b, a)          (offsets 18, 17, 16, 19)
- *   fake_glTexCoord2f(u, v)               (offsets 24, 28  — loaded as floats)
- *   fake_glVertex3f(x, y, z)             (offsets 0, 4, 8 — loaded as floats)
+ * Per triangle (indices uint16, vertex stride 32), as the .so does it:
+ *   fake_glColor4ub(v0 r, g, b, a)    once, from the FIRST vertex (+18, +17,
+ *                                     +16, +19): the triangle is flat
+ *   for v0, v1, v2:
+ *     glTexCoord2f(u, v)              (+24, +28) into the current u/v
+ *     glVertex3f(x, y, z)             (+0, +4, +8): the vertex gets x, y, z,
+ *                                     the current color and u/v; nothing is
+ *                                     written when the buffer is full
+ * so after it the current color is the last triangle's first vertex and the
+ * current u/v its last vertex (later glVertex3f calls use them).
+ *
+ * v0.6.20: the first version took the color of every vertex (smooth instead
+ * of flat) and left the current u/v as they were; both differ from the
+ * original (the snowboard's trees stretched over the scenery).
  *
  * No w-divide, no matrix, no keep_alpha logic.  The function ends with a
  * tail-call to glEnd(), so the native version must do the same.
@@ -38,65 +47,46 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Emit one vertex from C_006A8A3E's simpler vertex layout.
- * Colour bytes in the .so come out in B G R A order at +16..+19.
- * fake_glColor4ub is called as (r=+18, g=+17, b=+16, a=+19). */
-static inline void tri2_core_emit(const uint8_t * vtx, uint8_t ** cur,
-                                   const uint8_t * last, uint8_t col[4]) {
-    /* colour: r=+18 g=+17 b=+16 a=+19 */
-    col[0] = vtx[18];  /* r */
-    col[1] = vtx[17];  /* g */
-    col[2] = vtx[16];  /* b */
-    col[3] = vtx[19];  /* a */
-
-    float x, y, z, u, v;
-    memcpy(&x, vtx +  0, 4);
-    memcpy(&y, vtx +  4, 4);
-    memcpy(&z, vtx +  8, 4);
-    memcpy(&u, vtx + 24, 4);
-    memcpy(&v, vtx + 28, 4);
-
+// glTexCoord2f + glVertex3f for one vertex; the color is the current one
+static inline void tri2_core_emit(const uint8_t * vtx, uint8_t ** cur, const uint8_t * last,
+                                  const uint8_t col[4], uint32_t * cur_u, uint32_t * cur_v) {
+    memcpy(cur_u, vtx + 24, 4);
+    memcpy(cur_v, vtx + 28, 4);
     uint8_t * p = *cur;
     if (p >= last) return;
-    memcpy(p,      &x, 4);
-    memcpy(p +  4, &y, 4);
-    memcpy(p +  8, &z, 4);
+    memcpy(p, vtx, 12); // x, y, z
     memcpy(p + 12, col, 4);
-    memcpy(p + 16, &u, 4);
-    memcpy(p + 20, &v, 4);
+    memcpy(p + 16, cur_u, 4);
+    memcpy(p + 20, cur_v, 4);
     *cur = p + 0x18;
 }
 
 /*
  * The loop between glBegin(GL_TRIANGLES) and glEnd() for C_006A8A3E.
  * `s` is the same tri_state as used by tri_core_draw (shares pCurVertex,
- * pLastVertex and the current-colour pointers).
+ * pLastVertex and the current color and u/v).
  */
 static inline void tri2_core_draw(const tri_state * s, int count,
                                    const uint16_t * idx,
                                    const uint8_t * verts) {
     uint8_t * cur = *s->cur;
     const uint8_t * last = *s->last;
-    uint8_t col[4];
-    int emitted = 0;
+    uint32_t * cur_u = (uint32_t *) s->u, * cur_v = (uint32_t *) s->v;
 
     for (; count > 0; count -= 3, idx += 3) {
         const uint8_t * v0 = verts + 32u * idx[0];
         const uint8_t * v1 = verts + 32u * idx[1];
         const uint8_t * v2 = verts + 32u * idx[2];
-        tri2_core_emit(v0, &cur, last, col);
-        tri2_core_emit(v1, &cur, last, col);
-        tri2_core_emit(v2, &cur, last, col);
-        emitted = 1;
-    }
-
-    *s->cur = cur;
-    if (emitted) {
+        const uint8_t col[4] = { v0[18], v0[17], v0[16], v0[19] }; // r, g, b, a
         *s->r = col[0];
         *s->g = col[1];
         *s->b = col[2];
         *s->a = col[3];
+        tri2_core_emit(v0, &cur, last, col, cur_u, cur_v);
+        tri2_core_emit(v1, &cur, last, col, cur_u, cur_v);
+        tri2_core_emit(v2, &cur, last, col, cur_u, cur_v);
     }
+    *s->cur = cur;
 }
 
 #endif /* FF7_TRI2_CORE_H */

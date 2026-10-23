@@ -27,7 +27,8 @@ CHECK_EVENT = 0xadb9f4
 EVCOUNT = 0x1492b78     # _check_event's call counter (natives bump it inline)
 
 class Emu:
-    def __init__(self, so_path):
+    def __init__(self, so_path, resolve_defined=False):
+        self.resolve_defined = resolve_defined  # GOT entries of the .so's own symbols (.dynsym at 0x18c)
         d = open(so_path, 'rb').read()
         self.d = d
         uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
@@ -65,8 +66,17 @@ class Emu:
                 if typ == 0x17:  # RELATIVE
                     v = struct.unpack_from('<I', self.uc.mem_read(B + r_off, 4))[0]
                     self.w32(B + r_off, (v + B) & 0xffffffff)
-                elif typ in (0x15, 0x16, 0x02):  # GLOB_DAT, JUMP_SLOT, ABS32 -> trap
-                    self.w32(B + r_off, END + 0x100)
+                elif typ in (0x15, 0x16, 0x02):  # GLOB_DAT, JUMP_SLOT, ABS32
+                    # symbols the .so defines (data such as the GL state globals)
+                    # resolve to it; imports go to a trap
+                    sym = r_info >> 8
+                    value, shndx = struct.unpack_from('<I', d, 0x18c + 16 * sym + 4)[0], \
+                        struct.unpack_from('<H', d, 0x18c + 16 * sym + 14)[0]
+                    if self.resolve_defined and shndx != 0 and value:
+                        add = struct.unpack('<I', self.uc.mem_read(B + r_off, 4))[0] if typ == 0x02 else 0
+                        self.w32(B + r_off, (B + value + add) & 0xffffffff)
+                    else:
+                        self.w32(B + r_off, END + 0x100)
 
     def _mk(self, uc, addr, size, user):
         va = uc.reg_read(UC_ARM_REG_R0)

@@ -108,14 +108,15 @@ def main():
         last = ctypes.c_void_p(ctypes.addressof(buf) + 0x18 * room)
         col  = (ctypes.c_uint8 * 4)(4, 3, 2, 1)   # a b g r at increasing addrs
         # u, v, keep_alpha — not used by tri2_core_draw but tri_state needs them
-        u_v  = ctypes.c_uint32(0)
+        u_c  = ctypes.c_uint32(0)   # current u and v: written by the core since v0.6.20
+        v_c  = ctypes.c_uint32(0)
         ka   = ctypes.c_uint32(0)
         st = State(ctypes.addressof(cur), ctypes.addressof(last),
                    ctypes.addressof(col) + 3,  # r
                    ctypes.addressof(col) + 2,  # g
                    ctypes.addressof(col) + 1,  # b
                    ctypes.addressof(col),       # a
-                   ctypes.addressof(u_v), ctypes.addressof(u_v),
+                   ctypes.addressof(u_c), ctypes.addressof(v_c),
                    ctypes.addressof(ka))
         ib = (ctypes.c_uint16 * max(1, len(idx)))(*idx) if idx else (ctypes.c_uint16 * 1)()
         vb = ctypes.create_string_buffer(verts, len(verts))
