@@ -653,3 +653,18 @@ outro lugar. `0x72700C` desenha os blocos de terreno sem textura, não as
 Com `natives_off.txt`, se o glitch continuar, é do jogo; se sumir, as chaves
 individuais apontam o módulo. O log de cada sessão mostra quais estão
 desligados (`<módulo>: disabled by ...`).
+
+## v0.6.22: crash do diagnóstico de som da v0.6.21
+
+A v0.6.21 travava ao entrar no snowboard, com ou sem `natives_off.txt`. Os
+dois core dumps (`scripts/parse_core.py`, novo) mostram a thread do jogo parada
+em `0x81023CB0`, dentro do `refill_native` de `ff7_dsound.c` (o `music_peak`
+inline). O `Lock` da `.so` devolve ao código x86 **endereços x86** (o buffer de
+som fica na memória x86, ex.: `p1 029c550c`), e o diagnóstico lia esse valor
+como ponteiro do host. A mensagem "OTHER memory" do log também estava errada
+pelo mesmo motivo: os dados vão para o buffer certo.
+
+Agora o pico do PCM é lido pela memória x86 (`mk_address`), e o log só mostra o
+endereço x86 e o endereço de host correspondente. Os testes da v0.6.21 continuam
+valendo: uma descida normal para o diagnóstico da música (pico do PCM no resumo
+de 5 s) e `natives_off.txt` para as árvores.

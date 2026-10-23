@@ -85,7 +85,7 @@ static mk_address_fn mk_address;
 static status_fn get_status;
 static volatile uint32_t * regs;
 static so_hook refill_hook, create_hook, play_hook, stop_hook, volume_hook, pan_hook, freq_hook, lock_hook;
-// the music buffer's data (from its Lock), for the level check: music_base, music_locks (declared above)
+// for the level check: music_va, music_locks (declared above)
 static uint32_t music_size;
 static unsigned lock_logs;
 static int fix_on, diag_on, full_volume;
@@ -121,7 +121,7 @@ static double now_s(void) {
 static int is_music(uint32_t buf);
 static int music_peak(void);
 static unsigned music_locks;
-static uint8_t * music_base;
+static uint32_t music_va; // x86 address of the music buffer's data (from its Lock)
 
 #define DIAG(...) do { if (diag_on && logs_left > 0) { logs_left--; l_info(__VA_ARGS__); } } while (0)
 
@@ -166,7 +166,7 @@ static void refill_native(void) {
         DIAG("sound diag %.3f: last 5 s: %u refills, %u Play passed on, %u repeated Play skipped; music buffer"
              " %08x, x86 music volume master %u current %u target %u; %u Locks, PCM peak %d of 32767 (data %p)",
              now_s(), st.refills, st.plays, st.skipped_plays, rd32(VA_STREAM), rd32(VA_MASTER), rd32(VA_MUSIC),
-             rd32(VA_MUSIC + 4), music_locks, music_peak(), music_base);
+             rd32(VA_MUSIC + 4), music_locks, music_peak(), (void *) (uintptr_t) music_va);
         music_locks = 0;
         log_stream("stream now", stream, r);
         st.refills = st.plays = st.skipped_plays = 0;
@@ -221,35 +221,35 @@ static int is_music(uint32_t buf) {
 }
 
 // Lock (buf, offset, bytes, &p1, &n1, &p2, &n2, flags): the porters' code
-// writes host pointers into the x86 out-parameters
+// writes x86 addresses into the x86 out-parameters (the buffers live in x86
+// memory). v0.6.21 read them as host pointers and crashed.
 static int lock_native(uint32_t buf, uint32_t off, uint32_t bytes, uint32_t p1_va, uint32_t n1_va, uint32_t p2_va,
                        uint32_t n2_va, uint32_t flags) {
     int r = SO_CONTINUE_HELD(int, lock_hook, buf, off, bytes, p1_va, n1_va, p2_va, n2_va, flags);
     if (is_music(buf)) {
         music_locks++;
         uint32_t p1 = rd32(p1_va), n1 = rd32(n1_va), p2 = p2_va ? rd32(p2_va) : 0, n2 = n2_va ? rd32(n2_va) : 0;
-        if (p1 && off <= 0x1000000) {
-            music_base = (uint8_t *) (uintptr_t) (p1 - off);
+        if (p1 && p1 >= off) {
+            music_va = p1 - off;
             music_size = rd32(VA_STREAM + 0xc);
         }
         if (lock_logs < 12) {
             lock_logs++;
-            uint8_t * x = p1 ? mk_address(p1) : NULL;
-            DIAG("sound diag %.3f: music Lock %08x offset %u bytes %u flags %u -> %d: p1 %08x n1 %u p2 %08x n2 %u;"
-                 " x86 address p1 is host %p (%s)", now_s(), buf, off, bytes, flags, r, p1, n1, p2, n2, x,
-                 x == (uint8_t *) (uintptr_t) p1 ? "same memory" : "OTHER memory: the x86 writes miss the buffer");
+            DIAG("sound diag %.3f: music Lock %08x offset %u bytes %u flags %u -> %d: p1 %08x n1 %u p2 %08x n2 %u"
+                 " (x86 addresses; p1 at host %p)", now_s(), buf, off, bytes, flags, r, p1, n1, p2, n2,
+                 p1 ? (void *) mk_address(p1) : NULL);
         }
     }
     return r;
 }
 
-// Peak |sample| of the music buffer (16-bit PCM), 0 = silence
+// Peak |sample| of the music buffer (16-bit PCM, read through mk_address), 0 = silence
 static int music_peak(void) {
-    if (!music_base || !music_size || music_size > 0x100000) return -1;
+    if (!music_va || !music_size || music_size > 0x100000) return -1;
     int peak = 0;
-    const int16_t * pcm = (const int16_t *) music_base;
-    for (uint32_t i = 0; i < music_size / 2; i += 7) {
-        int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+    for (uint32_t off = 0; off + 2 <= music_size; off += 14) {
+        int v = (int16_t) rd16(music_va + off);
+        if (v < 0) v = -v;
         if (v > peak) peak = v;
     }
     return peak;
