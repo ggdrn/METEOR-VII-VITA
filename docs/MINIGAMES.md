@@ -1044,3 +1044,29 @@ que o toque acabou de marcar. Agora:
 **Pendente no Vita:** confirmar 30 fps estáveis no submarino (`perf:` e
 `submarine cadence:`), os botões L2/R2 de tela no submarino e o R1+R2 de tela
 na corrida de chocobo.
+
+## v0.6.29: correções da v0.6.28 (limitador e L2/R2 de tela)
+
+**Log da v0.6.28.** Os modelos nativos rodaram no console (`submarine/s:`
+~43 modelos e ~5.500 triângulos de modelo por segundo). Mas o novo limitador
+não entrou (`unexpected submarine limiter code, left as is`), então o
+submarino seguiu em 27,4 fps, com a thread do jogo trabalhando só 34–37% do
+tempo. O código da `.so` confere com o trampolim; quem falhou foi a checagem
+das páginas x86 de `[0xE73F18]`/`[0xE74328]`/`[0xE747A0]` no boot, que ainda
+não estão mapeadas nessa hora. Agora a instalação checa só o código, e cada
+chamada confere as páginas (sem elas, roda o original).
+
+**L2/R2 de tela.** O submarino usa o mesmo layout do campo (`_UI` entrada
+11; `UI_determine()` dá ao modo 10 o mesmo índice do campo). Esse layout já
+tinha sido filtrado no campo, antes de entrar no submarino, e por isso os
+botões nunca voltaram. Agora a filtragem guarda à parte os L2/R2 de cada
+layout. A cada desenho do layout (`UI_display`), eles entram na lista
+enquanto o modo for 10 e saem fora dele (soltando o toque). Se o layout não
+tiver L2/R2 próprios, usa os primeiros da tabela `_UI` (64 listas de 32
+objetos). O log mostra `ui: layout ...: on-screen L2/R2 shown (submarine)`.
+O toque passa pelo mesmo caminho da v0.6.28 (botões presos por toque viram
+botões do gamepad), que vale também para o R1+R2 da corrida de chocobo.
+
+**Pendente no Vita:** `ff7_framecap: submarine limiter 0x78C9E1 replaced`
+no boot; `submarine cadence:` ~30 frames/s no submarino; L2/R2 visíveis e
+funcionando; R1+R2 na corrida de chocobo.

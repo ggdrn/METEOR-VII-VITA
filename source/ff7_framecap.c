@@ -155,14 +155,14 @@ static void sub_step(uint32_t game) {
 
 static void sub_limiter(void) {
     volatile uint32_t * regs = ff7_x86_regs();
-    if (!cap_on) {
+    uint32_t esp = regs[4];
+    uint32_t * arg = sub_mem(esp + 4), * flag = sub_mem(SUB_FLAG), * catch_up = sub_mem(SUB_CATCH);
+    if (!cap_on || !arg || !flag || !catch_up || !sub_mem(SUB_LATE)) {
         sub_due = 0;
         sub_original();
         return;
     }
-    uint32_t esp = regs[4];
-    uint32_t game = *(uint32_t *) sub_mem(esp + 4);
-    uint32_t * flag = sub_mem(SUB_FLAG), * catch_up = sub_mem(SUB_CATCH);
+    uint32_t game = *arg;
     SceUInt64 now = sceKernelGetProcessTimeWide();
     if (*flag) {
         // drawn: the next logic step at its time
@@ -228,8 +228,8 @@ void ff7_framecap_patch(void) {
     }
     uintptr_t fn = so_symbol(&so_mod, "_Z15func_0x0078c9e1v");
     sub_pages = (uint8_t * const *) so_symbol(&so_mod, "MEMMAP");
-    if (!fn || !sub_pages || !ff7_x86_regs() || !sub_tramp_setup(fn) || !sub_mem(SUB_FLAG) || !sub_mem(SUB_LATE)
-        || !sub_mem(SUB_CATCH)) {
+    // (the x86 data pages are only mapped later: sub_limiter checks them)
+    if (!fn || !sub_pages || !ff7_x86_regs() || !sub_tramp_setup(fn)) {
         l_warn("ff7_framecap: unexpected submarine limiter code, left as is");
         return;
     }
