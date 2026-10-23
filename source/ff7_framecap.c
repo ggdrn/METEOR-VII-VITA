@@ -30,8 +30,20 @@
  * 1), or for one catch-up step when the next one is already due (as the
  * original, at most one: [0xE747A0]).
  *
+ * The chocobo race (mode 7) has the same kind of limiter, 0x779CC6, called
+ * by the frame function 0x779E14 after the logic step and the draw list
+ * (started at [0xE3BA38] = rdtsc): it spins until [game + 0x30] / 30 ticks
+ * after that start ([0xE3BAC0], set at 0x76D693), then the frame is
+ * submitted, so drawing and the vblank hand-off again come on top of 33.3 ms
+ * (v0.6.29 log: 22-24 fps with ~30% of the game thread spinning). When a
+ * step ran past its period it sets [0xE3BAC8] (and the overshoot
+ * [0xE73EE0]): the next frame skips its draw list and runs a second logic
+ * step. Replaced with the 33.3 ms cadence; a slow frame restarts the
+ * cadence (as the snowboard / coaster caps) instead of skipping draws.
+ *
  * DATA_PATH "snowboard_60fps.txt" / "coaster_60fps.txt" leave one uncapped,
- * "submarine_limiter_off.txt" keeps the submarine's own limiter.
+ * "submarine_limiter_off.txt" / "chocobo_limiter_off.txt" keep the game's
+ * own limiter.
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
@@ -194,6 +206,62 @@ static void sub_limiter(void) {
     regs[4] = esp + 4;
 }
 
+// The chocobo race's limiter 0x779CC6 (game)
+#define CHOCO_LATE      0xe3bac8u // 1: the last step overran, skip the next draw list
+#define CHOCO_OVERSHOOT 0xe73ee0u // double
+#define CHOCO_LIMITER_OFF DATA_PATH "chocobo_limiter_off.txt"
+
+static SceUInt64 choco_due;
+static unsigned choco_frames, choco_wait_us;
+uintptr_t ff7_framecap_choco_r4, ff7_framecap_choco_resume;
+
+// The original (port menu A/B): stmdb sp!, {r4-r11, lr}; sub sp, #12; ldr.w r4, [pc, #imm]
+__attribute__((naked)) static void choco_original(void) {
+    __asm__ volatile(
+        "push {r4, r5, r6, r7, r8, r9, r10, r11, lr}\n\t"
+        "sub sp, sp, #12\n\t"
+        "ldr r4, =ff7_framecap_choco_r4\n\t"
+        "ldr r4, [r4]\n\t"
+        "ldr r12, =ff7_framecap_choco_resume\n\t"
+        "ldr r12, [r12]\n\t"
+        "bx r12\n\t"
+        ".ltorg\n\t");
+}
+
+static int choco_tramp_setup(uintptr_t fn) {
+    const uint16_t * hw = (const uint16_t *) (fn & ~1);
+    if (hw[0] != 0xe92d || hw[1] != 0x4ff0 || hw[2] != 0xb083 || hw[3] != 0xf8df || (hw[4] & 0xf000) != 0x4000)
+        return 0;
+    uintptr_t entry = (uintptr_t) hw;
+    ff7_framecap_choco_r4 = *(uint32_t *) (((entry + 6 + 4) & ~3u) + (hw[4] & 0xfff));
+    ff7_framecap_choco_resume = (entry + 10) | 1;
+    return 1;
+}
+
+static void choco_limiter(void) {
+    volatile uint32_t * regs = ff7_x86_regs();
+    uint32_t * late = sub_mem(CHOCO_LATE), * over_lo = sub_mem(CHOCO_OVERSHOOT), * over_hi = sub_mem(CHOCO_OVERSHOOT + 4);
+    if (!cap_on || !late || !over_lo || !over_hi) {
+        choco_due = 0;
+        choco_original();
+        return;
+    }
+    port_menu_apply_ab(); // between two frames of the race: a safe point
+    SceUInt64 now = sceKernelGetProcessTimeWide();
+    if (choco_due && now < choco_due) {
+        SceUInt64 wait = choco_due - now;
+        if (wait > FRAME_US) wait = FRAME_US;
+        sceKernelDelayThread((SceUInt) wait);
+        choco_wait_us += (unsigned) wait;
+        now = sceKernelGetProcessTimeWide();
+    }
+    choco_due = choco_due && now - choco_due < FRAME_US ? choco_due + FRAME_US : now + FRAME_US;
+    *late = 0; // never "overran": every step draws
+    *over_lo = *over_hi = 0;
+    choco_frames++;
+    regs[4] += 4;
+}
+
 static void snowboard_frame(void) {
     cap_wait(&caps[0]);
     SO_CONTINUE_HELD(int, caps[0].hook);
@@ -220,6 +288,17 @@ void ff7_framecap_patch(void) {
         }
         c->hook = hook_addr(fn, (uintptr_t) natives[i]);
         l_info("ff7_framecap: %s drawn at 30 fps at most (logic stays 60 Hz)", c->name);
+    }
+
+    sub_pages = (uint8_t * const *) so_symbol(&so_mod, "MEMMAP");
+    uintptr_t choco = so_symbol(&so_mod, "_Z15func_0x00779cc6v");
+    if (file_exists(CHOCO_LIMITER_OFF)) {
+        l_info("ff7_framecap: chocobo race keeps its own limiter (%s)", CHOCO_LIMITER_OFF);
+    } else if (!choco || !sub_pages || !ff7_x86_regs() || !choco_tramp_setup(choco)) {
+        l_warn("ff7_framecap: unexpected chocobo race limiter code, left as is");
+    } else {
+        hook_addr(choco, (uintptr_t) choco_limiter);
+        l_info("ff7_framecap: chocobo race limiter 0x779CC6 replaced by a steady 30 fps cadence");
     }
 
     if (file_exists(SUB_LIMITER_OFF)) {
@@ -250,6 +329,11 @@ void ff7_framecap_report(double seconds) {
         l_info("%s cap: %.1f frames/s, %.1f ms/s waiting for 30 fps", c->name, c->frames / seconds,
                c->wait_us / 1000.0 / seconds);
         c->frames = c->wait_us = 0;
+    }
+    if (choco_frames) {
+        l_info("chocobo race cadence: %.1f frames/s, %.1f ms/s waiting for 30 fps", choco_frames / seconds,
+               choco_wait_us / 1000.0 / seconds);
+        choco_frames = choco_wait_us = 0;
     }
     if (sub_frames || sub_steps) {
         l_info("submarine cadence: %.1f frames/s, %.1f logic steps/s (%u catch-up), %.1f ms/s waiting for 30 fps",

@@ -1070,3 +1070,58 @@ botões do gamepad), que vale também para o R1+R2 da corrida de chocobo.
 **Pendente no Vita:** `ff7_framecap: submarine limiter 0x78C9E1 replaced`
 no boot; `submarine cadence:` ~30 frames/s no submarino; L2/R2 visíveis e
 funcionando; R1+R2 na corrida de chocobo.
+
+## v0.6.30: corrida de chocobo — limitador e núcleo de desenho mais enxuto
+
+**Log da v0.6.29.** Submarino confirmado: `submarine cadence: 30.1 frames/s`.
+Na corrida de chocobo: 22–24 fps, thread do jogo 52–73% trabalhando e
+~25–30% em espera ativa. O padrão é o mesmo do submarino.
+
+**Limitador da corrida (`ff7_framecap.c`).** `0x779CC6`, chamado pela função
+de quadro `0x779E14` depois da lógica e da lista de desenho, gira até
+`[jogo + 0x30] / 30` ticks contados do início do passo (`[0xE3BA38]`,
+período `[0xE3BAC0]` gravado em `0x76D693`). Só então o quadro é enviado,
+e o envio e a espera do vblank vêm por cima dos 33,3 ms. Se o passo passou do
+período, ele liga `[0xE3BAC8]` (e grava o excesso em `[0xE73EE0]`), e o
+quadro seguinte pula a lista de desenho e roda mais um passo. Agora ele vira a
+cadência fixa de 33,3 ms dos outros mini-games: dorme até a hora do quadro.
+Um quadro lento reinicia a cadência, em vez de pular desenhos. `[0xE3BAC8]`
+e o excesso ficam zerados. O A/B do limite no menu volta ao original
+(trampolim). `chocobo_limiter_off.txt` mantém o original desde o boot. Log:
+`chocobo race cadence: N frames/s, N ms/s waiting`.
+
+**Onde ia o tempo.** O profiler só amostra quando a thread volta a executar
+código da `.so`. Por isso as linhas `[native] chocobo_prim_do` (21%) e
+`[native] chocobo_list_run` (15%) são o nosso caminho nativo inteiro:
+lista → objeto → primitiva, incluindo o `0x66E272` nativo do motor, que era
+chamado pela entrada da `.so` (hook → wrapper → `engine_alloc_run`).
+
+**Núcleo de desenho (`ff7_chocobo_core.h`).** Mesma saída bit a bit, menos
+trabalho por primitiva:
+
+- `ch_draw`: o que as primitivas de uma lista compartilham é carregado uma
+  vez — matriz da câmera (`0xE72E60`), constantes `[0x7B7F50]`/`[0x7B7F58]`,
+  página de globais e as tabelas do modelo (`[0xE7112C]` + 0x10/0x18/0x4C/0x50).
+  Recarrega depois de cada `0x770434` (objetos tipo 0x21), que pode mexer na
+  câmera;
+- `ch_alloc`: o caminho comum do `0x66E272` (buffer do quadro com espaço) é
+  C embutido, igual ao `engine_alloc_run`; textura nula devolve 0; o caminho
+  lento ainda chama a função x86. As escritas na pilha morta (argumentos e
+  EBP salvo) só acontecem nessa chamada;
+- vértices de entrada contíguos (como a lista sempre passa) e o buffer de
+  saída são resolvidos como um bloco cada, em vez de 2 lookups por vértice;
+- as multiplicações finais são float: o produto em double de dois floats é
+  exato, e arredondar para float dá o mesmo resultado.
+
+No emulador, a lista caiu de ~1.380 para ~815 instruções ARM por primitiva
+(−41%; `CHOCOBO_COST=1 test_chocobo_list.py`). Testes:
+`test_chocobo_list.py`, 300 chamadas, e `test_chocobo.py`, 3.000 primitivas,
+com zero divergências. O stub do `0x770434` agora também mexe na matriz.
+Mutações detectadas: contadores do `0x66E272` embutido, tabela de quads do
+modelo, multiplicação final e falta de recarregar a matriz depois do tipo
+0x21. Não exercitado: o buffer com espaço exatamente 0 (o teste não roda o
+caminho lento de alocação; a condição é a mesma do `engine_alloc_run`, testado
+em `test_engine.py`).
+
+**Pendente no Vita:** `ff7_framecap: chocobo race limiter 0x779CC6 replaced`,
+`chocobo race cadence:` perto de 30 e `perf:` na corrida inteira.

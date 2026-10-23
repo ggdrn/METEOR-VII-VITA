@@ -11,7 +11,14 @@
  * walks the object lists and calls 0x770767 / 0x7706D7 per object, which go
  * through 0x77BB50 / 0x77BE95 to the primitives (together ~18% of the game
  * thread in the v0.6.11 profile, mostly mk_address calls for their stack
- * frames). Only 0x770434 (type 0x21 objects) and 0x66E272 stay x86 calls.
+ * frames). Only 0x770434 (type 0x21 objects) stays an x86 call.
+ *
+ * Since v0.6.30 a draw list loads what its primitives share once (camera
+ * matrix, constants, the model's tables: ch_draw) and 0x66E272's common path
+ * (room in the texture's vertex buffer) runs inline; its slow path still
+ * calls the x86 function. The input vertices and the output vertex buffer are
+ * resolved as one block each. Under emulation that took the list from ~1,380
+ * to ~815 ARM instructions per primitive (CHOCOBO_COST=1 in the list test).
  *
  * The math is ff7_chocobo_core.h, checked by compiling it into an ARM blob
  * that runs under emulation next to the recompiled functions
@@ -19,8 +26,7 @@
  * _check_event calls identical over 6,000 primitives, with NaN, infinities,
  * vertices behind the camera and a null texture; scripts/emu/
  * test_chocobo_list.py for the list, object and wrapper functions over 3,000
- * random lists and calls). 0x66E272 is called through its x86 entry (the
- * native ff7_engine hook).
+ * random lists and calls).
  *
  * DATA_PATH "chocobo_off.txt" leaves the originals.
  *

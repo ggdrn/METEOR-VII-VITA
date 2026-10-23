@@ -49,6 +49,17 @@ def main():
     events = [0]
     def count(uc_, addr, size, user): events[0] += 1
     uc.hook_add(UC_HOOK_CODE, count, begin=B + CHECK_EVENT, end=B + CHECK_EVENT + 1)
+    # CHOCOBO_COST=1: ARM instructions the native run executes, in the blob and in the .so it calls
+    cost = [0, 0, 0]
+    if __import__('os').environ.get('CHOCOBO_COST'):
+        hist = {}
+        def in_blob(uc_, addr, size, user):
+            cost[0] += cost[2]
+            if cost[2]: hist[addr] = hist.get(addr, 0) + 1
+        main.hist = hist
+        def in_so(uc_, addr, size, user): cost[1] += cost[2]
+        uc.hook_add(UC_HOOK_CODE, in_blob, begin=BLOB, end=BLOB + 0x10000)
+        uc.hook_add(UC_HOOK_CODE, in_so, begin=B, end=B + 0xf49604)
     stub_calls = [0]
     def stub(uc_, addr, size, user):
         # 0x770434 (m, i, count): results from its arguments and registers
@@ -58,6 +69,10 @@ def main():
         slot = G + 0xd00 + 4 * (i & 0x3f)
         old = struct.unpack('<I', bytes(uc.mem_read(HOSTG + slot - G, 4)))[0]
         gw(slot, struct.pack('<I', (old * 31 + m + cnt + r[0] + r[1] + r[2] + r[5] + esp) & 0xffffffff))
+        # and it moves the camera a little (the native code must reload the matrix after it)
+        k = 0xe72e60 + 4 * (i % 16)
+        mv = struct.unpack('<f', bytes(uc.mem_read(HOSTG + k - G, 4)))[0]
+        if mv == mv: gw(k, struct.pack('<f', f32(mv * 0.75 + 1.0)))
         emu.setreg(0, i & 1)
         emu.setreg(1, (r[1] * 3 + 1) & 0xffffffff)
         emu.setreg(2, r[2] ^ 0x5a5a5a5a)
@@ -181,7 +196,9 @@ def main():
         events[0] = 0; stub_calls[0] = 0
         uc.reg_write(UC_ARM_REG_R0, ENV); uc.reg_write(UC_ARM_REG_R1, mode)
         uc.reg_write(UC_ARM_REG_SP, HSTACK + 0xff000); uc.reg_write(UC_ARM_REG_LR, END | 1)
+        cost[2] = 1 if kind == "list" else 0
         uc.emu_start(entry | 1, END, count=5000000)
+        cost[2] = 0
         ret = uc.reg_read(UC_ARM_REG_R0)
         n_x = bytes(uc.mem_read(XH, 0x200000)); n_f = bytes(uc.mem_read(B + FPU, 0x68))
         n_g = bytes(uc.mem_read(HOSTG, 0x2000))
@@ -193,6 +210,9 @@ def main():
                                                                 if not (ev0 + k) & 0x7ff}:
             n_ev = -1
         for k, v in enumerate(struct.unpack('<5I', bytes(uc.mem_read(ENV + 32, 20))) + (n_st,)): tot[k] += v
+        if kind == 'list':
+            nprim = struct.unpack('<2I', bytes(uc.mem_read(ENV + 32, 8)))
+            main.list_prims = getattr(main, 'list_prims', 0) + nprim[0] + nprim[1]
 
         problems = []
         if ret != 1: problems.append('native returned %d' % ret)
@@ -223,6 +243,11 @@ def main():
     for k in ('list', 'obj', 'wrap'):
         print('%s: %d mismatches in %d calls' % (names[k], bad.get(k, 0), calls.get(k, 0)))
     print('native: %d triangles, %d quads (%d drawn), %d lists, %d objects, %d type 0x21 calls' % tuple(tot))
+    if cost[0] or cost[1]:
+        prims = main.list_prims
+        open('/tmp/claude-501/choco_hist.txt', 'w').write('\n'.join('%x %d' % kv for kv in sorted(main.hist.items())))
+        print('cost: %d ARM instructions in the native code, %d in the .so it calls; per primitive %.0f + %.0f'
+              % (cost[0], cost[1], cost[0] / max(prims, 1), cost[1] / max(prims, 1)))
     sys.exit(1 if bad else 0)
 
 if __name__ == '__main__':

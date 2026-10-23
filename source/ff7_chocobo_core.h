@@ -141,36 +141,119 @@ static inline int ch_top_ok(const chocobo_env * e) {
     return top <= 7;
 }
 
+#define CH_GLOBALS 0xe71000 // the race's globals page
+#define CH_MATRIX  0xe72e60 // the race's camera matrix (the lists draw with it)
+
+/*
+ * What every primitive of one draw needs, loaded once: the camera matrix
+ * (0x66CE40 reads it from x86 memory on every call; nothing a draw list does
+ * between two primitives writes it, but 0x770434 may: reloaded after it),
+ * the constants [0x7B7F50] (double, w limit) and [0x7B7F58] (float 1.0), the
+ * globals page and the race model's tables b = [0xE7112C]: triangle entries
+ * [b + 0x18] and primitives [b + 0x4C], quad entries [b + 0x10] and
+ * primitives [b + 0x50] (the objects only write their "used" flags, in the
+ * globals page).
+ */
+typedef struct ch_draw {
+    float m[16];
+    double kmin;
+    float one;
+    uint32_t m_va;
+    uint8_t * g;
+    uint32_t b, ent[2], prim[2]; // [0]: triangles, [1]: quads
+} ch_draw;
+
+static inline void ch_draw_load(const chocobo_env * e, ch_draw * d, uint32_t m_va) {
+    const uint8_t * kb = ch_block(e, 0x7b7f50, 12);
+    uint64_t b = (uint64_t) ch_get(e, kb, 0x7b7f50, 4) << 32 | ch_get(e, kb, 0x7b7f50, 0);
+    __builtin_memcpy(&d->kmin, &b, 8);
+    d->one = ch_f(ch_get(e, kb, 0x7b7f50, 8));
+    const uint8_t * mb = ch_block(e, m_va, 64);
+    if (mb) __builtin_memcpy(d->m, mb, 64);
+    else for (int i = 0; i < 16; i++) d->m[i] = ch_f(ch_rd32(e, m_va + 4 * i));
+    d->m_va = m_va;
+    d->g = ch_addr(e, CH_GLOBALS);
+    d->b = ch_get(e, d->g, CH_GLOBALS, 0x12c);
+    const uint8_t * bb = ch_block(e, d->b, 0x54);
+    d->ent[0] = ch_get(e, bb, d->b, 0x18);
+    d->prim[0] = ch_get(e, bb, d->b, 0x4c);
+    d->ent[1] = ch_get(e, bb, d->b, 0x10);
+    d->prim[1] = ch_get(e, bb, d->b, 0x50);
+}
+
+/*
+ * 0x66E272 (1, t) from a frame whose ESP before the pushes is frame: room for
+ * one primitive in texture t's vertex buffer. Its common path (the buffer
+ * belongs to this frame and has room) inline, as ff7_engine_core.h's
+ * engine_alloc_run; a null texture returns 0; anything else calls the x86
+ * function (the native ff7_engine hook, which runs the original's slow path)
+ * with its arguments pushed. The pushes and the caller's saved EBP are dead
+ * stack after the primitive: written only for that call.
+ */
+static inline uint32_t ch_alloc(chocobo_env * e, uint32_t frame, uint32_t ebp, uint32_t ebp_in, uint32_t t) {
+    volatile uint32_t * regs = e->regs;
+    if (!t) {
+        regs[CH_EAX] = 0;
+        ch_event(e);
+        return 0;
+    }
+    uint8_t * tb = ch_block(e, t, 0x90);
+    uint32_t pt = ch_get(e, tb, t, 0x30);
+    if (ch_get(e, tb, t, 0x54) >= ch_rd32(e, pt) && (int32_t) ch_get(e, tb, t, 0x50) >= 1) {
+        uint32_t p = ch_get(e, tb, t, 0x8c);
+        uint8_t * pb = ch_block(e, p, 0x1c); // may overlap t's fields: written in the x86 order
+        ch_put(e, pb, p, 0x8, ch_get(e, pb, p, 0x8) + 1);
+        ch_put(e, tb, t, 0x4c, ch_get(e, tb, t, 0x4c) + 1);
+        ch_put(e, tb, t, 0x50, ch_get(e, tb, t, 0x50) - 1);
+        ch_put(e, tb, t, 0x70, ch_get(e, tb, t, 0x80));
+        ch_put(e, tb, t, 0x74, ch_get(e, tb, t, 0x84));
+        ch_put(e, tb, t, 0x78, ch_get(e, tb, t, 0x88));
+        ch_put(e, tb, t, 0x80, ch_get(e, tb, t, 0x80) + ch_get(e, tb, t, 0x40));
+        ch_put(e, tb, t, 0x84, ch_get(e, tb, t, 0x84) + ch_get(e, tb, t, 0x44));
+        ch_put(e, tb, t, 0x88, ch_get(e, tb, t, 0x88) + 1);
+        ch_put(e, pb, p, 0xc, ch_get(e, pb, p, 0xc) + ch_get(e, tb, t, 0x38));
+        uint32_t v18 = ch_get(e, pb, p, 0x18) + ch_get(e, tb, t, 0x3c);
+        ch_put(e, pb, p, 0x18, v18);
+        regs[CH_EAX] = 1;
+        regs[CH_ECX] = v18;
+        regs[CH_EDX] = t;
+        ch_event(e);
+        return 1;
+    }
+    ch_wr32(e, ebp, ebp_in); // push ebp
+    ch_wr32(e, frame - 4, t);
+    ch_wr32(e, frame - 8, 1);
+    regs[CH_EBP] = ebp;
+    regs[CH_ESP] = frame - 12;
+    e->f_66e272();
+    return regs[CH_EAX];
+}
+
 /*
  * 0x77B9D4 (n = 3) or 0x77BCA4 (n = 4) with its arguments, called with the
- * x86 ESP at esp (its return address) and EBP = ebp_in.
+ * x86 ESP at esp (its return address) and EBP = ebp_in; d holds the matrix
+ * of its m argument.
  */
-static inline void chocobo_prim_do(chocobo_env * e, int n, uint32_t esp, uint32_t ebp_in, const uint32_t * c,
-                                   const uint32_t * v, uint32_t m_va, uint32_t t) {
+static inline void chocobo_prim_do(chocobo_env * e, const ch_draw * d, int n, uint32_t esp, uint32_t ebp_in,
+                                   const uint32_t * c, const uint32_t * v, uint32_t t) {
     volatile uint32_t * regs = e->regs;
     uint8_t * fpu = e->fpu;
+    const float * m = d->m;
     uint32_t ebp = esp - 4;
     uint32_t frame = ebp - (n == 3 ? 0x48 : 0x60); // after sub esp
     if (n == 3) e->counters[0]++;
     else e->counters[1]++;
 
-    // [0x7B7F50] (double, w limit) and [0x7B7F58] (float 1.0)
-    const uint8_t * kb = ch_block(e, 0x7b7f50, 12);
-    double kmin;
-    {
-        uint32_t lo = ch_get(e, kb, 0x7b7f50, 0), hi = ch_get(e, kb, 0x7b7f50, 4);
-        uint64_t b = (uint64_t) hi << 32 | lo;
-        __builtin_memcpy(&kmin, &b, 8);
-    }
-    float m[16];
-    const uint8_t * mb = ch_block(e, m_va, 64);
-    for (int i = 0; i < 16; i++) m[i] = ch_f(ch_get(e, mb, m_va, 4 * i));
-
+    // the vertices (3 floats each); the draw list's are contiguous: one block
+    int packed = 1;
+    for (int k = 1; k < n; k++) packed &= v[k] == v[0] + 0xc * (uint32_t) k;
+    const uint8_t * vall = packed ? ch_block(e, v[0], 0xc * (uint32_t) n) : (const uint8_t *) 0;
     float o[4][4];
     for (int k = 0; k < n; k++) {
         float in[3];
-        const uint8_t * vbk = ch_block(e, v[k], 12);
-        for (int i = 0; i < 3; i++) in[i] = ch_f(ch_get(e, vbk, v[k], 4 * i));
+        const uint8_t * vbk = vall ? vall + 0xc * k : ch_block(e, v[k], 12);
+        if (vbk) __builtin_memcpy(in, vbk, 12);
+        else for (int i = 0; i < 3; i++) in[i] = ch_f(ch_rd32(e, v[k] + 4 * i));
         for (int j = 0; j < 4; j++) { // 0x66CE40
             float s = m[4 + j] * in[1];
             s = s + m[8 + j] * in[2];
@@ -179,15 +262,15 @@ static inline void chocobo_prim_do(chocobo_env * e, int n, uint32_t esp, uint32_
         }
         ch_event(e);
         double w = o[k][3];
-        if (!(w != w || kmin != kmin)) { // fcomp; unordered leaves the flags
-            fpu[CH_C0] = w < kmin;
+        if (!(w != w || d->kmin != d->kmin)) { // fcomp; unordered leaves the flags
+            fpu[CH_C0] = w < d->kmin;
             fpu[CH_C2] = 0;
-            fpu[CH_C3] = w == kmin;
+            fpu[CH_C3] = w == d->kmin;
         }
         if (fpu[CH_C0] | fpu[CH_C3]) { // test ah, 0x41: o.w <= kmin
             regs[CH_EAX] = ch_fnstsw(e);
             regs[CH_ECX] = v[k];
-            regs[CH_EDX] = m_va;
+            regs[CH_EDX] = d->m_va;
             ch_event(e);
             regs[CH_ESP] = esp + 4;
             return;
@@ -196,37 +279,36 @@ static inline void chocobo_prim_do(chocobo_env * e, int n, uint32_t esp, uint32_
     // the last pushes before 0x66E272: ECX = v[n-1], EDX = m (from the transform call)
     regs[CH_EAX] = ch_fnstsw(e);
     regs[CH_ECX] = v[n - 1];
-    regs[CH_EDX] = m_va;
-    ch_wr32(e, ebp, ebp_in); // push ebp
-    regs[CH_EBP] = ebp;
-    ch_wr32(e, frame - 4, t);
-    ch_wr32(e, frame - 8, 1);
-    regs[CH_ESP] = frame - 12;
-    e->f_66e272();
+    regs[CH_EDX] = d->m_va;
+    uint32_t room = ch_alloc(e, frame, ebp, ebp_in, t);
     regs[CH_ESP] = esp;
     regs[CH_EBP] = ebp_in;
-    if (!regs[CH_EAX]) {
+    if (!room) {
         ch_event(e);
         regs[CH_ESP] = esp + 4;
         return;
     }
 
-    float one = ch_f(ch_get(e, kb, 0x7b7f50, 8));
-    uint32_t inv_bits = 0, vb = 0;
+    // the vertices: x/w, y/w, z/w, 1/w, color (a float product rounds as the
+    // x87 double one stored as float: the double product of two floats is
+    // exact). The original rereads [t + 0x70] per vertex; only the vertex
+    // writes come in between, into the buffer it points to.
+    uint32_t inv_bits = 0, vb = 0, vbase = ch_rd32(e, t + 0x70);
+    uint8_t * vball = ch_block(e, vbase, 0x20 * (uint32_t) (n - 1) + 0x14);
     for (int k = 0; k < n; k++) {
         float inv;
         if (o[k][3] == 0.0f) {
             fpu[CH_ZE] = 1;
-            inv = one;
+            inv = d->one;
         } else {
-            inv = (float) ((double) one / (double) o[k][3]);
+            inv = (float) ((double) d->one / (double) o[k][3]);
         }
-        vb = ch_rd32(e, t + 0x70) + 0x20 * (uint32_t) k;
-        uint8_t * vbb = ch_block(e, vb, 0x14);
-        for (int j = 0; j < 3; j++) ch_put(e, vbb, vb, 4 * j, ch_bits((float) ((double) o[k][j] * (double) inv)));
-        inv_bits = ch_bits(inv);
-        ch_put(e, vbb, vb, 0xc, inv_bits);
-        ch_put(e, vbb, vb, 0x10, c[k]);
+        vb = vbase + 0x20 * (uint32_t) k;
+        uint32_t out[5] = { ch_bits(o[k][0] * inv), ch_bits(o[k][1] * inv), ch_bits(o[k][2] * inv), ch_bits(inv), c[k] };
+        uint8_t * vbb = vball ? vball + 0x20 * k : ch_block(e, vb, 0x14);
+        if (vbb) __builtin_memcpy(vbb, out, 0x14);
+        else for (int j = 0; j < 5; j++) ch_wr32(e, vb + 4 * j, out[j]);
+        inv_bits = out[3];
     }
     regs[CH_EAX] = c[n - 1];
     regs[CH_ECX] = inv_bits;
@@ -250,8 +332,9 @@ static inline int chocobo_prim_run(chocobo_env * e, int n) {
         c[k] = ch_get(e, args, esp + 4, 4 * k);
         v[k] = ch_get(e, args, esp + 4, 4 * n + 4 * k);
     }
-    chocobo_prim_do(e, n, esp, regs[CH_EBP], c, v, ch_get(e, args, esp + 4, 8 * n),
-                    ch_get(e, args, esp + 4, 8 * n + 4));
+    ch_draw d;
+    ch_draw_load(e, &d, ch_get(e, args, esp + 4, 8 * n));
+    chocobo_prim_do(e, &d, n, esp, regs[CH_EBP], c, v, ch_get(e, args, esp + 4, 8 * n + 4));
     return 1;
 }
 
@@ -261,15 +344,15 @@ static inline int chocobo_prim_run(chocobo_env * e, int n) {
  * (c, p, p + 0xc, .., m, t). ESP at its return address, EBP = ebp_in. The
  * arguments it pushes are not written (dead stack): only 0x66E272's are.
  */
-static inline void chocobo_wrap_do(chocobo_env * e, int n, uint32_t esp, uint32_t ebp_in, uint32_t m, uint32_t t,
-                                   uint32_t p) {
+static inline void chocobo_wrap_do(chocobo_env * e, const ch_draw * d, int n, uint32_t esp, uint32_t ebp_in,
+                                   uint32_t t, uint32_t p) {
     uint32_t c[4], v[4];
     const uint8_t * pb = ch_block(e, p + 0xc * n, 4 * n);
     for (int k = 0; k < n; k++) {
         c[k] = ch_get(e, pb, p + 0xc * n, 4 * k);
         v[k] = p + 0xc * k;
     }
-    chocobo_prim_do(e, n, esp - 4 - 4 * (2 * n + 2) - 4, esp - 4, c, v, m, t);
+    chocobo_prim_do(e, d, n, esp - 4 - 4 * (2 * n + 2) - 4, esp - 4, c, v, t);
     ch_event(e);
     e->regs[CH_EBP] = ebp_in;
     e->regs[CH_ESP] = esp + 4;
@@ -280,12 +363,12 @@ static inline int chocobo_wrap_run(chocobo_env * e, int n) {
     volatile uint32_t * regs = e->regs;
     uint32_t esp = regs[CH_ESP];
     const uint8_t * args = ch_block(e, esp + 4, 12);
-    chocobo_wrap_do(e, n, esp, regs[CH_EBP], ch_get(e, args, esp + 4, 0), ch_get(e, args, esp + 4, 4),
-                    ch_get(e, args, esp + 4, 8));
+    ch_draw d;
+    ch_draw_load(e, &d, ch_get(e, args, esp + 4, 0));
+    chocobo_wrap_do(e, &d, n, esp, regs[CH_EBP], ch_get(e, args, esp + 4, 4), ch_get(e, args, esp + 4, 8));
     return 1;
 }
 
-#define CH_GLOBALS 0xe71000 // the race's globals page
 
 /*
  * 0x770767 (quad = 0) / 0x7706D7 (quad = 1) (m, i, -, flag): object i of the
@@ -295,20 +378,12 @@ static inline int chocobo_wrap_run(chocobo_env * e, int n) {
  * flag < 0 returns 0; else 0x77BB50 / 0x77BE95 (m, [g], p) with g picked by
  * the e byte, sets the matching "used" global and returns 1.
  */
-static inline uint32_t chocobo_obj_do(chocobo_env * e, int quad, uint32_t esp, uint32_t ebp_in, uint32_t m,
+static inline uint32_t chocobo_obj_do(chocobo_env * e, const ch_draw * d, int quad, uint32_t esp, uint32_t ebp_in,
                                       uint32_t i, uint32_t flag) {
     volatile uint32_t * regs = e->regs;
-    uint8_t * g = ch_addr(e, CH_GLOBALS);
-    uint32_t b = ch_get(e, g, CH_GLOBALS, 0x12c);
-    const uint8_t * bb = ch_block(e, b, 0x54);
-    uint32_t ent, p;
-    if (!quad) {
-        ent = ch_get(e, bb, b, 0x18) + 0x1c * i;
-        p = ch_get(e, bb, b, 0x4c) + 0x30 * i;
-    } else {
-        ent = ch_get(e, bb, b, 0x10) + 0x28 * i;
-        p = ch_get(e, bb, b, 0x50) + (i << 6);
-    }
+    uint8_t * g = d->g;
+    uint32_t b = d->b;
+    uint32_t ent = d->ent[quad] + (quad ? 0x28 : 0x1c) * i, p = d->prim[quad] + (quad ? 0x40 : 0x30) * i;
     uint32_t r = 0;
     if ((int32_t) flag < 0) {
         regs[CH_EAX] = 0;
@@ -318,7 +393,7 @@ static inline uint32_t chocobo_obj_do(chocobo_env * e, int quad, uint32_t esp, u
         int sel = quad ? *ch_addr(e, ent + 0x27) == 0x38 : *ch_addr(e, ent + 0x1b) == 0x30;
         static const uint16_t tex[2][2] = { { 0xc44, 0xc28 }, { 0xc0c, 0xbf0 } };
         uint32_t off = tex[quad][sel];
-        chocobo_wrap_do(e, 3 + quad, esp - 28, esp - 4, m, ch_get(e, g, CH_GLOBALS, off), p);
+        chocobo_wrap_do(e, d, 3 + quad, esp - 28, esp - 4, ch_get(e, g, CH_GLOBALS, off), p);
         ch_put(e, g, CH_GLOBALS, off + 0x14, 1);
         regs[CH_EAX] = r = 1;
     }
@@ -334,8 +409,9 @@ static inline int chocobo_obj_run(chocobo_env * e, int quad) {
     volatile uint32_t * regs = e->regs;
     uint32_t esp = regs[CH_ESP];
     const uint8_t * args = ch_block(e, esp + 4, 16);
-    chocobo_obj_do(e, quad, esp, regs[CH_EBP], ch_get(e, args, esp + 4, 0), ch_get(e, args, esp + 4, 4),
-                   ch_get(e, args, esp + 4, 12));
+    ch_draw d;
+    ch_draw_load(e, &d, ch_get(e, args, esp + 4, 0));
+    chocobo_obj_do(e, &d, quad, esp, regs[CH_EBP], ch_get(e, args, esp + 4, 4), ch_get(e, args, esp + 4, 12));
     return 1;
 }
 
@@ -364,6 +440,8 @@ static inline int chocobo_list_run(chocobo_env * e) {
     uint32_t ptr = ch_rd32(e, b + 0x20) + 4 * (uint32_t) (int32_t) (int16_t) w16;
     uint32_t flag = ch_get(e, fr, ebp - 0x20, 0x1c);
     uint32_t ecx = ptr, edx, entry;
+    ch_draw d;
+    ch_draw_load(e, &d, CH_MATRIX);
     int type_set = 0;
     uint8_t type = 0;
     for (;; ptr += 4) {
@@ -382,24 +460,25 @@ static inline int chocobo_list_run(chocobo_env * e) {
         type_set = 1;
         uint32_t i = (uint32_t) (int32_t) (int16_t) entry;
         if (type == 0) {
-            count += chocobo_obj_do(e, 0, esp - 56, ebp, 0xe72e60, i, flag);
+            count += chocobo_obj_do(e, &d, 0, esp - 56, ebp, i, flag);
             ecx = count;
             regs[CH_ESP] = esp - 36;
         } else if (type == 1) {
-            count += chocobo_obj_do(e, 1, esp - 56, ebp, 0xe72e60, i, flag);
+            count += chocobo_obj_do(e, &d, 1, esp - 56, ebp, i, flag);
             ecx = regs[CH_ECX];
             regs[CH_ESP] = esp - 36;
         } else if (type == 0x21) {
             uint32_t cx = (ecx & 0xffff0000u) | (entry & 0xffff);
             ch_wr32(e, esp - 40, count);
             ch_wr32(e, esp - 44, cx);
-            ch_wr32(e, esp - 48, 0xe72e60);
+            ch_wr32(e, esp - 48, CH_MATRIX);
             regs[CH_EAX] = count;
             regs[CH_ECX] = cx;
             regs[CH_EDX] = edx;
             regs[CH_EBP] = ebp;
             regs[CH_ESP] = esp - 52;
             e->f_770434();
+            ch_draw_load(e, &d, CH_MATRIX); // it may have moved the camera
             count += regs[CH_EAX];
             ecx = regs[CH_ECX];
             regs[CH_ESP] = esp - 36;
