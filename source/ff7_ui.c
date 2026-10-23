@@ -14,6 +14,15 @@
  * analog and digital; with no d-pad it does nothing, so it goes as well
  * (recognized by the flag it toggles, TOUCH_MODE_FLAG). The Encounters
  * toggle, triggered buttons, swipers and the screen itself are untouched.
+ * In the submarine (mode 10) its on-screen L2 / R2 (keys 0x47 / 0x4F, Home /
+ * End) stay too.
+ *
+ * The kept buttons write their keys into st_keyboard, but once a physical
+ * button has been used updateGamepad() rewrites the 14 gamepad keys there
+ * every frame from the gamepad state, so a touch on R1 + R2 (0x85, the
+ * chocobo race) or L2 / R2 never reached the game. ff7_ui_touch_buttons()
+ * reports the buttons held through touch (an object with a touch id at +24
+ * that was not slid off, +0x3C) and main.c holds them as gamepad buttons.
  *
  * The first touches are logged with the objects of the current layout.
  *
@@ -98,11 +107,24 @@ static const char * class_name(void * obj) {
     return c >= 0 ? classes[c].name : "?";
 }
 
+#define GAME_MODE_VA 0xcbf9dc // uint16
+#define MODE_SUBMARINE 10
+#define KEY_L2 0x47
+#define KEY_R2 0x4f
+
+static int game_mode(void) {
+    static const uint8_t * const * memmap;
+    if (!memmap) memmap = (const uint8_t * const *) so_symbol(&so_mod, "MEMMAP");
+    const uint8_t * page = memmap ? memmap[GAME_MODE_VA >> 12] : NULL;
+    return page ? *(const uint16_t *) (page + (GAME_MODE_VA & 0xfff)) : -1;
+}
+
 static int is_virtual_gamepad(void * obj) {
     int c = class_of(obj);
     if (c == CLS_DPAD) return 1;
     if (c == CLS_BUTTON_MAPPED) {
         uint32_t key = *(uint32_t *) ((uint8_t *) obj + 40);
+        if ((key == KEY_L2 || key == KEY_R2) && game_mode() == MODE_SUBMARINE) return 0;
         return !(key == 0x82 || key == 0x85); // special actions; ESCAPE (0x83) = L + R
     }
     if (c == CLS_TOGGLE)
@@ -197,6 +219,29 @@ static void ui_touch_began(int id, float x, float y) {
     }
     call_original_touch_began(id, x, y);
     if (log) log_toggles(list, "after ");
+}
+
+// The st_keyboard key of each ff7_onKey button (updateGamepad's mapping)
+static const uint8_t button_keys[14] = { 0x48, 0x4b, 0x50, 0x4d, 0x9c, 0x52, 0x53, 0x4e,
+                                         0x49, 0x51, 0x4c, 0x4a, KEY_L2, KEY_R2 };
+
+static unsigned key_buttons(uint32_t key) {
+    if (key == 0x83) return 1u << 8 | 1u << 9;  // ESCAPE: L1 + R1
+    if (key == 0x85) return 1u << 9 | 1u << 13; // R1 + R2
+    for (int b = 0; b < 14; b++)
+        if (button_keys[b] == key) return 1u << b;
+    return 0;
+}
+
+unsigned ff7_ui_touch_buttons(void) {
+    void ** list = ui_current ? *ui_current : NULL;
+    unsigned held = 0;
+    for (int i = 0; list && list[i] && i < MAX_LAYOUT; i++) {
+        uint8_t * o = list[i];
+        if (class_of(o) == CLS_BUTTON_MAPPED && *(int32_t *) (o + 24) && !o[0x3c])
+            held |= key_buttons(*(uint32_t *) (o + 40));
+    }
+    return held;
 }
 
 void ff7_ui_patch(void) {

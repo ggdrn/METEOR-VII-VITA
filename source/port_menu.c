@@ -55,6 +55,7 @@
 
 #include "port_menu.h"
 #include "ff7_coaster.h"
+#include "ff7_submarine.h"
 #include "ff7_framecap.h"
 #include "ff7_snowboard.h"
 #include "ff7_texture.h"
@@ -244,6 +245,7 @@ void port_menu_apply_ab(void) {
         ab_applied[i] = w;
         if (i == 0) {
             ff7_coaster_set(w);
+            ff7_submarine_set(w);
             ff7_snowboard_set(w);
         } else if (i == 1) {
             ff7_framecap_set(w);

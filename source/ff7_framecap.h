@@ -1,5 +1,6 @@
 /*
- * 30 fps cap for minigames that run fixed 60 Hz logic steps (ff7_framecap.c).
+ * 30 fps cadence for the 3D minigames: snowboard and roller coaster (60 Hz
+ * logic) and the submarine's own limiter (ff7_framecap.c).
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.

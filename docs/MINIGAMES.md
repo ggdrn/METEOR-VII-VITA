@@ -808,3 +808,239 @@ As mudanças são aplicadas na thread do jogo entre quadros
 minigames em `ff7_framecap.c`, já que eles nunca chamam `usleep`). O log
 registra cada troca (`port menu: A/B ...`). Para achar a causa do piscar: na
 montanha-russa, desligar um de cada vez e ver qual faz parar.
+
+## v0.6.26: núcleo do submarino integrado, alvo de 30 fps
+
+Continuação dos três arquivos deixados em andamento pela sessão anterior
+(`ff7_submarine_core.h`, `blob_submarine.c`, `test_submarine.py`). Agora o
+núcleo é instalado por `source/ff7_submarine.c`, registrado no build, na
+inicialização e no relatório periódico:
+
+- `0x79F903`: atualização das 4.096 células do mar, com as alturas copiadas
+  aos vizinhos, flags e contadores. Resolve o bloco inteiro uma vez quando
+  as páginas são contíguas; mantém o caminho para páginas separadas.
+- `0x7A2EF8`: contagem dos bits iniciais pelas duas tabelas do jogo.
+- `0x79A61E`: triângulos dos respingos e quatro paredes das colunas d'água,
+  transformação/projeção e cores. A preparação da matriz e a reserva do
+  buffer continuam chamando as funções do jogo; `0x66E272` já tem o caminho
+  comum nativo do motor. Memória e eventos usam os mesmos atalhos verificados
+  dos outros mini-games, com fallback se o layout não corresponder.
+
+**30 fps.** O submarino já limita a lógica em 30 Hz: `0x77F56D` inicializa
+`[0xE74350]` com `[game + 0x30] / 30.0 - 10000.0` (as constantes estão em
+`0x7B7F60` e `0x7B7F68`); `0x78C9E1` compara o tempo decorrido com esse
+período e controla `[0xE73F18]`, repetindo a lógica e pulando o desenho
+quando atrasa. Portanto conserva-se esse limitador; não se acrescenta a
+espera usada pelo snowboard e pela montanha-russa, que têm lógica a 60 Hz.
+A otimização busca fazer o trabalho caber no período existente de ~33 ms.
+Ainda é preciso medir no Vita para afirmar 30 fps sustentados.
+
+**Correções durante a validação.** O gerador do teste usava um inteiro com
+sinal para uma flag aleatória de 32 bits, falhando antes da comparação.
+Na tradução, faltava uma sobrescrita peculiar do original na última coluna:
+o z do canto C inferior da terceira parede recebe o z de A, exceto na última
+linha, que o sobrescreve novamente. O canto D inferior conserva seu z de
+antes dos ajustes da borda. A comparação ampliada detectou a divergência e
+a tradução agora reproduz ambos. Também foi removido um deslocamento à
+esquerda de valor negativo em C no cálculo da altura inferior.
+
+**Validação.** `scripts/emu/test_submarine.py` compila o núcleo como blob ARM
+e roda o original recompilado a partir do mesmo estado. Confere os oito
+registradores, estado de controle x87, memória observável e `_check_event`.
+A rodada aleatória após a correção passou em 240 chamadas (30 da grade, 30
+da contagem, 180 dos respingos), sem divergências. Os casos dirigidos
+acrescentam desenho garantido nos quatro cantos e no interior da grade,
+texturas nulas, fade, vértices atrás da câmera/NaN, páginas contíguas ou
+separadas e os caminhos com e sem os atalhos de memória/eventos. A rodada
+final com esses casos passou em outras 240 chamadas (30/30/180), com 4.224
+triângulos e 477 colunas desenhados e nenhuma divergência. O teste
+agora também falha se o emulador esgotar o limite de instruções sem retornar.
+Três mutações em cópias temporárias do header foram detectadas: deslocar a
+gravação de um vizinho, zerar o ECX da contagem de bits e retirar a correção
+do canto C inferior na última coluna.
+
+```sh
+source scripts/env.sh
+python3 scripts/emu/test_submarine.py build/libjni_ff7.so /caminho/ff7_en.exe 240
+cmake --build build -j8
+```
+
+No macOS ARM, o Unicorn ARM local encerrou com `Illegal instruction` ao
+mapear memória; a validação foi executada com Python e Unicorn x86_64 via
+Rosetta. O `ff7_en.exe` usado é o da própria cópia local do OBB.
+
+**Teste no Vita.** VPK: `build/VPK/ff7_vita_v0.6.26.vpk`, compilado com a
+checagem de conteúdo aprovada. Abrir o submarino pelo menu (L + R + Start),
+jogar 30–60 s com respingos/explosões, testar a volta ao campo e comparar
+`perf:` e `submarine/s:`. Para o FPS real, desligar o perfil automático no
+menu e remover `profile_on.txt`/`profile_all.txt` se existirem. O item
+`A/B NATIVOS DOS MINI-GAMES` também passa a alternar os três nativos do
+submarino entre quadros; `submarine_off.txt` desliga só este módulo no boot e
+`natives_off.txt` continua valendo. O item A/B do limite de 30 fps continua
+restrito aos limitadores adicionais do snowboard/montanha-russa.
+
+**Próximo alvo, após medir:** `0x79FB20` (outra fatia grande do perfil do
+submarino) ainda roda no original. Os glitches da montanha-russa/snowboard
+e a investigação do áudio não foram alterados nesta versão.
+
+## v0.6.27: superfície do mar nativa e Quadrado entregue na thread do jogo
+
+**Medição da v0.6.26 enviada pelo usuário.** `build/VPK/logs.txt` mostra os
+nativos instalados e, na maior parte do submarino, 27–28 fps com o perfil
+ligado. O perfil contém 10.705 amostras, 10.341 da thread do jogo:
+
+| Função | Amostras da thread do jogo |
+|---|---:|
+| `mk_address` | 28,01% (61% chamadas por `0x7A0190`) |
+| `0x7A0190` | 23,91% |
+| `0x66CE40` | 5,25% |
+| `_check_event` | 4,97% |
+| `0x79FB20` | 4,35% |
+| `0x77DF72` | 4,25% |
+
+Logo, o maior alvo atual é `0x7A0190`: ~41% somando sua própria execução e
+suas chamadas a `mk_address`, além das transformações. `0x79FB20` continua
+original, mas não é mais a prioridade do perfil recebido.
+
+**Superfície (`ff7_submarine_core.h`, `ff7_submarine.c`).** `0x7A0190`
+agora percorre em C a região de 24×24 células ao redor da câmera. Faz as
+quatro transformações por célula em float, preserva a ordem das contas,
+a comparação do plano próximo e os caminhos de cor por vértice/cor média.
+Grava seis vértices por quadrado: projetados quando todos estão à frente;
+coordenadas originais no buffer adiado quando há recorte ou projeção
+ortográfica; descarta quando os quatro estão atrás. A preparação das
+matrizes das texturas e a reserva do buffer mantêm as funções do jogo.
+Resolve os dados contíguos de cada ponto sem passar pelo resolvedor x86 a
+cada campo. O modo de depuração de grade (`0xE7475C & 0x40`) continua no
+original; o núcleo recusa antes de alterar estado. O limitador de 30 Hz
+continua intacto. A/B dos nativos e `submarine_off.txt` incluem a superfície.
+
+**Quadrado (`ff7_submarine_input.c`).** O mapeamento original foi conferido
+no emulador: botão Android 6 → `st_keyboard[0x53]` (Delete) → ação `0x80`
+pelo `ff7input.cfg` original. `0x798580` testa a borda dessa ação e chama
+`0x79F114`, o disparo. O log antigo não registrava entrada nem tentativas de
+tiro, portanto não permite afirmar em qual etapa as pressões relatadas se
+perderam ou se o jogo recusou os disparos.
+
+Agora, somente no modo 10, o Quadrado físico usa uma fila de pressões
+publicada pela thread principal e consumida pela thread do jogo na entrada
+de `0x798580`. Um toque curto continua pendente mesmo depois de soltar;
+pressões seguidas são entregues uma por passagem. Ele não percorre também
+o caminho do teclado Android, evitando duplicar a mesma pressão. Os outros
+botões/modos e o controle virtual conservam o caminho original. A fila é
+limpa ao sair do modo 10. Não há repetição automática ao segurar.
+
+O disparo continua passando pelas verificações originais: um dos quatro
+tubos em `0x9873E4` deve estar em `0x20000`, deve haver uma das 16 entradas
+livre (`0xEC18B4 + 0xC8*i == 1`) e uma entidade elegível no conjunto de 12
+registros (`0x98A1E0 + 0x70*i`, flag `0x800`). O código não força um torpedo
+quando essas condições falham. Os ganchos de entrada/disparo usam
+trampolins que reproduzem os primeiros oito bytes verificados da `.so`, sem
+reescrever o código a cada quadro. A correção de entrada é independente do
+A/B de desenho e de `natives_off.txt`; `submarine_input_off.txt` restaura
+somente o caminho de entrada antigo no boot.
+
+**Diagnósticos, a cada heartbeat (~5 s):**
+
+- `submarine surface:` quadros/s, ms/quadro da rotina, quadrados projetados,
+  adiados e descartados por segundo, quadros de depuração pelo original;
+- `submarine fire:` pressões de Quadrado, bordas entregues, chamadas de
+  disparo, torpedos criados (tubos consumidos), recusas por recarga, falta de
+  entrada livre ou entidade elegível, fila restante e fase (`0xE74768`).
+  Os contadores de tiro usam operações atômicas entre as duas threads.
+
+**Validação:** 40 quadros da superfície (23.040 células), sem divergências
+em memória, registradores, controle x87 ou eventos. Regressão conjunta de
+80 chamadas: 10 grade, 10 bits, 50 respingos e 10 superfície, sem
+divergências. Outra rodada de 24 chamadas da superfície verificou 22 quadros
+nativos (8.064 quadrados projetados, 1.152 adiados, 1.728 descartados) e duas
+recusas de depuração sem alterar estado. O teste cobre cores, posições nos
+limites do mapa, projeção ortográfica, texturas nulas e atalhos ligados ou
+desligados. A `memcpy` de 64 bytes usada pelo `rep movsd` de `0x66E70A` é
+atendida por um stub de cópia no emulador, nos dois lados da comparação.
+
+`test_submarine_input.py` compila as funções reais da fila extraídas do
+módulo e testa toque rápido, três pressões seguidas, ausência de duplicação,
+controle virtual, saída do modo e fallback. Também compila a montagem real
+dos dois trampolins e compara os registradores e a pilha ARM com os
+prólogos originais; executa `ff7_onKey`/`updateGamepad` da `.so` e confere o
+mapeamento com o CFG do OBB e a instrução que testa o tiro no executável.
+
+```sh
+source scripts/env.sh
+python3 scripts/emu/test_submarine.py build/libjni_ff7.so /caminho/ff7_en.exe 80
+python3 scripts/emu/test_submarine_input.py build/libjni_ff7.so /caminho/ff7_en.exe /caminho/original.obb
+cmake --build build -j8
+```
+
+VPK: `build/VPK/ff7_vita_v0.6.27.vpk`. **Pendente no Vita:** confirmar tiro
+com Quadrado (toques curtos e repetidos) e FPS nos mesmos trechos. Comparar
+os novos diagnósticos com `perf:`; o perfil anterior estava ligado, então
+medir também sem o profiler para o FPS real. Ainda não há medição da
+v0.6.27 no console nem confirmação do disparo em hardware.
+
+## v0.6.28: submarino a 30 fps de verdade, modelos 3D nativos e botões de tela
+
+**O que o log da v0.6.27 mostrou.** O submarino ficava travado em 27,5 fps,
+mas a thread do jogo trabalhava só 36–46% do tempo (o resto: ~40% em espera
+ativa e ~20% dormindo). Ou seja: não faltava CPU. O limitador do próprio jogo
+(`0x78C9E1`) espera até `ticks/30 - 10000` (~32,3 ms) contados do *início do
+último passo de lógica* e só então libera o desenho. O desenho e a entrega do
+quadro à thread de render (que espera um vblank) vêm por cima. Cada quadro
+dava ~36 ms.
+
+**Limitador substituído (`ff7_framecap.c`).** Mesmo esquema do snowboard e
+da montanha-russa: uma cadência fixa de 33,3 ms. Depois de um desenho
+(`[0xE73F18]` = 1), o novo limitador dorme até a hora do próximo passo e pede
+um passo de lógica (como o caminho "atrasado" do original: flag 0,
+`[jogo + 0x40] += 1.0`, `[0xE747A0] = 0`). Depois de um passo de lógica, pede
+o desenho; se o próximo passo já venceu, faz no máximo um passo extra antes
+de desenhar (como o original, via `[0xE747A0]`). A lógica continua em 30 Hz.
+Um quadro muito lento reinicia a cadência em vez de acelerar os seguintes. O
+item A/B do limite de 30 fps no menu do port volta ao limitador original
+(trampolim, sem reescrever código). `submarine_limiter_off.txt` mantém o
+original desde o boot. Log: `submarine cadence: N frames/s, N logic steps/s`.
+
+**Modelos 3D nativos (`0x79FB20`).** É a função que monta os modelos do
+submarino (malha de triângulos: vértices int16, índices em bytes, uma cor
+por canto). Era o maior trecho ainda no original no perfil da v0.6.27 (~15%
+com o `mk_address` dela). Agora o laço dos triângulos é C: 3 transformações
+`0x66CE40` em float, teste de w contra `[0x7B7FC8]` (com as flags do x87 como
+o recompilado, inclusive NaN), espaço de `0x66E272 (1, [0xEDA668])` e os 3
+vértices x/w, y/w, z/w, 1/w com a cor `0xFFRRGGBB`. O ponteiro de cores anda
+12 bytes por triângulo, desenhado ou não. A matriz do modelo é montada
+chamando as mesmas funções do jogo, na mesma ordem e com a mesma pilha
+(rotações `0x6625AB`, `0x6627CD`, `0x6626BC`; pilha de matrizes `0xE996F8`;
+`0x662ECC`; `0x6617E9`/`0x67D2BF`). Registradores finais e `_check_event`
+iguais ao original. Entra no A/B de nativos e em `submarine_off.txt`.
+
+**Validação:** `scripts/emu/test_submarine.py` ganhou o modo 5 (modelos).
+`get_tick_now` e `sin`/`cos` da libm, chamados pelas rotações, viram stubs
+iguais dos dois lados. A pilha de matrizes `0xE996F8` recebe uma matriz de
+verdade, e metade dos modelos tem malha larga, com triângulos visíveis e
+atrás da câmera no mesmo modelo. 320 chamadas: grade 40, bits 40, respingos
+120, superfície 40, modelos 80; zero divergências; 446 triângulos de modelo
+desenhados e 247 atrás da câmera. Mutações detectadas no núcleo dos modelos:
+ordem dos ângulos, avanço das cores de um triângulo descartado, ordem dos
+bytes da cor, ECX antes de `0x66E272`, ECX de um descarte no 2º canto, EDX
+final e matriz identidade. Não exercitado pelo teste: o ECX quando o último
+triângulo cai no 3º canto (`lea ecx, [ebp - 0x90]`, conferido no código).
+
+**Botões de tela.** O port remove o gamepad virtual do Android dos layouts.
+Isso tirava também os botões L2/R2 do submarino. Pior: os botões que ficavam,
+como o R1+R2 da corrida de chocobo (tecla especial `0x85`), não funcionavam.
+Depois que um botão físico é usado, `updateGamepad()` da `.so` reescreve a
+cada leitura do teclado as 14 teclas do gamepad em `st_keyboard`, apagando o
+que o toque acabou de marcar. Agora:
+
+- no submarino (modo 10), os botões de tela L2/R2 (teclas `0x47`/`0x4F`)
+  ficam no layout;
+- `ff7_ui_touch_buttons()` informa quais botões de jogo estão presos por
+  toque (objeto com id de toque em +24, sem ter deslizado para fora, +0x3C);
+  R1+R2 vira R1 e R2, ESCAPE vira L1 e R1;
+- `main.c` junta as fontes de cada botão (físico/painel traseiro, analógico,
+  rotação do mapa, toque) e só solta o botão quando a última fonte solta.
+
+**Pendente no Vita:** confirmar 30 fps estáveis no submarino (`perf:` e
+`submarine cadence:`), os botões L2/R2 de tela no submarino e o R1+R2 de tela
+na corrida de chocobo.

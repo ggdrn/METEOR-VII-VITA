@@ -15,6 +15,7 @@
 #include "utils/perf.h"
 #include "ff7_texture.h"
 #include "ff7_anim.h"
+#include "ff7_ui.h"
 #include "ff7_lzss.h"
 #include "ff7_swirl.h"
 #include "ff7_light.h"
@@ -29,6 +30,7 @@
 #include "ff7_snowboard.h"
 #include "ff7_framecap.h"
 #include "ff7_coaster.h"
+#include "ff7_submarine.h"
 #include "port_menu.h"
 #include "ff7_world.h"
 #include "ff7_stack.h"
@@ -136,6 +138,8 @@ static int ff7_lang_from_system() {
     }
 }
 
+static void poll_touch_buttons(void);
+
 int main() {
     soloader_init_all();
 
@@ -214,7 +218,9 @@ int main() {
     unsigned int slow50 = 0, slow100 = 0;
     SceUInt64 heartbeat_us = sceKernelGetProcessTimeWide();
     while (1) {
+        ff7_submarine_input_poll();
         controls_poll();
+        poll_touch_buttons();
 
         // RendererWrapper.onDrawFrame() skips the first two frames
         if (++frame >= 3) {
@@ -279,6 +285,8 @@ int main() {
             ff7_engine_report((now - heartbeat_us) / 1000000.0);
             ff7_chocobo_report((now - heartbeat_us) / 1000000.0);
             ff7_snowboard_report((now - heartbeat_us) / 1000000.0);
+            ff7_submarine_input_report();
+            ff7_submarine_report((now - heartbeat_us) / 1000000.0);
             ff7_coaster_report((now - heartbeat_us) / 1000000.0);
             ff7_framecap_report((now - heartbeat_us) / 1000000.0);
             ff7_world_report((now - heartbeat_us) / 1000000.0);
@@ -301,6 +309,30 @@ int main() {
  * 0 up, 1 left, 2 down, 3 right, 4 A, 5 B, 6 X, 7 Y,
  * 8 L1, 9 R1, 10 start, 11 select, 12 L2, 13 R2
  */
+
+/*
+ * One game button can be held by several inputs at once (the physical
+ * button or rear pad, a stick, an on-screen button): the game sees it held
+ * while any of them holds it, and released when the last one lets go.
+ */
+enum { KEY_SRC_PAD = 1, KEY_SRC_STICK = 2, KEY_SRC_ROTATE = 4, KEY_SRC_TOUCH = 8 };
+
+static void port_key(int button, int source, bool down) {
+    static uint8_t held[14];
+    if (button < 0 || button >= 14) return;
+    uint8_t was = held[button];
+    held[button] = down ? was | source : was & ~source;
+    if (!was != !held[button]) ff7_onKey(&jni, FF7_CLASS, button, held[button] != 0);
+}
+
+// On-screen buttons the port keeps (ff7_ui.c): their touches, as buttons
+static void poll_touch_buttons(void) {
+    static unsigned prev;
+    unsigned now = ff7_ui_touch_buttons(), changed = now ^ prev;
+    prev = now;
+    for (int b = 0; changed; b++, changed >>= 1)
+        if (changed & 1) port_key(b, KEY_SRC_TOUCH, (now >> b) & 1);
+}
 
 static int ff7_button_from_keycode(int32_t keycode) {
     switch (keycode) {
@@ -325,7 +357,8 @@ static int ff7_button_from_keycode(int32_t keycode) {
 void controls_handler_key(int32_t keycode, ControlsAction action) {
     int button = ff7_button_from_keycode(keycode);
     if (button < 0 || action == CONTROLS_ACTION_MOVE) return;
-    ff7_onKey(&jni, FF7_CLASS, button, action == CONTROLS_ACTION_DOWN);
+    if (button == 6 && ff7_submarine_input_key(action == CONTROLS_ACTION_DOWN)) return;
+    port_key(button, KEY_SRC_PAD, action == CONTROLS_ACTION_DOWN);
 }
 
 void controls_handler_touch(int32_t id, float x, float y, ControlsAction action) {
@@ -382,7 +415,7 @@ void controls_handler_analog(ControlsStickId which, float x, float y, ControlsAc
         for (int i = 0; i < 4; i++) {
             if (now[i] != held[i]) {
                 held[i] = now[i];
-                ff7_onKey(&jni, FF7_CLASS, i, now[i]);
+                port_key(i, KEY_SRC_STICK, now[i]);
             }
         }
         return;
@@ -395,8 +428,8 @@ void controls_handler_analog(ControlsStickId which, float x, float y, ControlsAc
 
     /* If we leave the world map while a rotation button is held, release it */
     if (!is_world_map()) {
-        if (rot_held[0]) { rot_held[0] = false; ff7_onKey(&jni, FF7_CLASS, 8, false); }
-        if (rot_held[1]) { rot_held[1] = false; ff7_onKey(&jni, FF7_CLASS, 9, false); }
+        if (rot_held[0]) { rot_held[0] = false; port_key(8, KEY_SRC_ROTATE, false); }
+        if (rot_held[1]) { rot_held[1] = false; port_key(9, KEY_SRC_ROTATE, false); }
         return;
     }
 
@@ -405,10 +438,10 @@ void controls_handler_analog(ControlsStickId which, float x, float y, ControlsAc
 
     if (now_left != rot_held[0]) {
         rot_held[0] = now_left;
-        ff7_onKey(&jni, FF7_CLASS, 8, now_left);   /* L1 = rotate left  */
+        port_key(8, KEY_SRC_ROTATE, now_left);   /* L1 = rotate left  */
     }
     if (now_right != rot_held[1]) {
         rot_held[1] = now_right;
-        ff7_onKey(&jni, FF7_CLASS, 9, now_right);  /* R1 = rotate right */
+        port_key(9, KEY_SRC_ROTATE, now_right);  /* R1 = rotate right */
     }
 }
