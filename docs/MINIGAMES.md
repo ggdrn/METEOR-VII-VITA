@@ -1244,3 +1244,33 @@ triangle lists/s`.
 `VIDEO_drawBuffers` (~4%) foi olhado e não muda: só liga três atributos e
 chama `glDrawArrays`, e o tempo atribuído a ele é a cópia dos vértices na
 fila de render, que é necessária.
+
+## v0.6.34: símbolos ✕/○ corretos e voltar ao título pelo menu do port
+
+**✕/○ trocados nos textos.** O usuário viu ○ nos textos onde quem
+funcionava era o ✕, e vice-versa. Os textos dos campos nomeiam os botões
+pela posição no controle de Xbox: (B), à direita, é o ○ do PS1, que
+confirma; (A), embaixo, é o ✕, que cancela. Exemplos (pt-BR, `flevel.lgp`):
+"selecione com o botão (B)", "Aperte (B) quando estiver pronto", "Acesse o
+Menu com (Y)". No Vita, a Cruz é o botão A do Android. Pela `.so`,
+`ff7_onKey` grava `BUT_A` e o `updateGamepad` transforma isso na tecla
+`0x9C`, que o `ff7input.cfg` do jogo liga ao ○ (OK). Ou seja: a Cruz
+confirma. Escolha do usuário: manter ✕ confirmando. A troca de rótulos em
+`ff7_buttons_core.h` passou a ser (B) → ✕ azul e (A) → ○ vermelho; (X) → □
+e (Y) → △ não mudam. Detalhes em `docs/BOTOES-PS.md`.
+
+**Carregar um save sem reiniciar.** O menu △ do jogo tem, na tabela do
+executável, um 11º item "Sair" (o QUIT do PC). Ele só liga
+`[jogo + 0xA54]`, que fecha o jogo, e o Android não o mostra; pôr um item
+novo no menu △ exigiria mexer no desenho, no cursor e nas tabelas de ações
+do menu (código x86). Por isso a opção fica no menu do port (L + R + Start):
+**"VOLTAR AO TITULO (CARREGAR SAVE)"**. Ela pede um segundo toque para
+confirmar, porque o que não foi salvo se perde. Num campo, faz o que o
+opcode de script GAMEOVER (0xFF, handler `0x6142B6`) faz: estado de saída
++1 = 0x1A e +0x26 = 0 no bloco de controle do campo. O jogo mostra o Game
+Over e volta ao título, e lá "Continuar" abre os saves. Só funciona a partir
+de um campo (como os atalhos de mini-game). O menu do port passou de 15
+para 16 itens (linhas de 26 para 24 px).
+
+**Pendente no Vita:** os textos com ✕/○ (por exemplo, a corrida de chocobo
+e o Gold Saucer) e a volta ao título por um campo.

@@ -40,14 +40,23 @@ enum { PSB_CROSS, PSB_CIRCLE, PSB_SQUARE, PSB_TRIANGLE };
 #define FF7_COLOR  0xFE // followed by 0xD2..0xD9
 #define FF7_END    0xFF
 
-// Label letter -> symbol, and the color code it gets (D3 blue, D4 red, D5 purple, D6 green)
+/*
+ * Label letter -> symbol, and the color code it gets (D3 blue, D4 red, D5
+ * purple, D6 green). The texts name the buttons by position on an Xbox pad,
+ * as the PC release laid them over the PlayStation's: (B) confirms, (A)
+ * cancels, (X) is Square, (Y) Triangle ("selecione com o botao (B)",
+ * "Menu com (Y)"). On the Vita Cross confirms (it is the Android A button,
+ * which the game's ff7input.cfg binds to the PlayStation's OK, Circle), so
+ * (B) shows Cross and (A) Circle: the symbol is the button that does it.
+ * Until v0.6.33 (A) showed Cross and (B) Circle, the other way round.
+ */
 static const struct {
     uint8_t letter;
     uint8_t glyph;
     uint8_t color;
 } psb_map[PSB_COUNT] = {
-    { 'A' - 0x20, PSB_FIRST_CHAR + PSB_CROSS,    0xD3 },
-    { 'B' - 0x20, PSB_FIRST_CHAR + PSB_CIRCLE,   0xD4 },
+    { 'B' - 0x20, PSB_FIRST_CHAR + PSB_CROSS,    0xD3 },
+    { 'A' - 0x20, PSB_FIRST_CHAR + PSB_CIRCLE,   0xD4 },
     { 'X' - 0x20, PSB_FIRST_CHAR + PSB_SQUARE,   0xD5 },
     { 'Y' - 0x20, PSB_FIRST_CHAR + PSB_TRIANGLE, 0xD6 },
 };

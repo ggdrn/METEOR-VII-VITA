@@ -5,12 +5,22 @@ de Xbox: as falas dizem "Aperte **(A)**", "**(B)** para cancelar" etc. O port
 troca esses rótulos pelos símbolos do PlayStation, mantendo a função de cada
 botão (o mapeamento físico do port):
 
-| Original | Botão do Vita | Símbolo | Cor |
-|---|---|---|---|
-| (A) | Cruz | ✕ | azul (`{FE}{D3}`) |
-| (B) | Círculo | ○ | vermelho (`{FE}{D4}`) |
-| (X) | Quadrado | □ | roxo (`{FE}{D5}`) |
-| (Y) | Triângulo | △ | verde (`{FE}{D6}`) |
+| Original | Função no jogo | Botão do Vita | Símbolo | Cor |
+|---|---|---|---|---|
+| (B) | confirmar | Cruz | ✕ | azul (`{FE}{D3}`) |
+| (A) | cancelar | Círculo | ○ | vermelho (`{FE}{D4}`) |
+| (X) | □ do PS1 | Quadrado | □ | roxo (`{FE}{D5}`) |
+| (Y) | menu | Triângulo | △ | verde (`{FE}{D6}`) |
+
+**Correção da v0.6.34.** Os textos nomeiam os botões pela posição no
+controle de Xbox, que o lançamento de PC sobrepôs ao do PlayStation: (B), à
+direita, é o ○ do PS1, que confirma; (A), embaixo, é o ✕, que cancela
+("selecione com o botão (B)", "(Y) para o Menu"). No Vita, a Cruz é o botão
+A do Android, e o `updateGamepad()` da `.so` transforma esse A na tecla
+`0x9C`, que o `ff7input.cfg` do jogo liga ao ○ (OK). Ou seja: a Cruz
+confirma. Até a v0.6.33 o port desenhava (A) como ✕ e (B) como ○, e o texto
+mostrava ○ onde a Cruz era quem funcionava. Agora (B) vira ✕ e (A) vira ○,
+e o símbolo mostrado é o do botão que faz a ação. Os controles não mudaram.
 
 Nenhum dado do jogo vai no VPK: os símbolos são desenhados pelo próprio port
 em tempo de execução, nos dados que o jogo já carregou do OBB/APK do usuário.

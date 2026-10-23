@@ -108,7 +108,7 @@ static const minigame games[] = {
 };
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
 enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
-       ITEM_CLOSE, NUM_ITEMS };
+       ITEM_TITLE, ITEM_CLOSE, NUM_ITEMS };
 
 static const uint32_t * memmap;
 
@@ -119,6 +119,16 @@ static volatile int auto_profile = 1;
 static volatile int game_mode;
 static volatile int record_request; // 1: save the scene and start the profiler
 static volatile int goto_request = -1; // scene to return to
+/*
+ * Back to the title screen, to load another save without restarting: from a
+ * field, what the field script opcode GAMEOVER (0xFF, handler 0x6142B6)
+ * does - exit state +1 = 0x1A, +0x26 = 0 in the control block. The game
+ * shows its game over screen and returns to the title, whose "Continue"
+ * opens the save files. The menu asks for a second press first.
+ */
+#define EXIT_GAMEOVER 0x1a
+static volatile int title_request;
+static int title_armed;
 static volatile int recording = -1; // scene being profiled
 static volatile int jumping;        // map jump written, waiting for it to end
 static scene scenes[MAX_SCENES];
@@ -276,6 +286,23 @@ void port_menu_game_tick(void) {
             profiler_start_now();
             l_info("port menu: scene %d recording (profiler on): mode %d, map %d, x %d, y %d, triangle %d,"
                    " direction %d", recording + 1, sc.mode, sc.map, sc.x, sc.y, sc.triangle, sc.dir);
+        }
+    }
+
+    if (title_request) {
+        static int title_tries;
+        uint8_t * c = mode == MODE_FIELD ? control_block() : NULL;
+        if (c && c[1] == 0) {
+            put16(c + 0x26, 0);
+            c[1] = EXIT_GAMEOVER;
+            title_request = 0;
+            title_tries = 0;
+            l_info("port menu: back to the title screen (field %d, as the GAMEOVER opcode)",
+                   x86(VA_FIELD_ID) ? get16(x86(VA_FIELD_ID)) : -1);
+        } else if (++title_tries > 600) {
+            l_warn("port menu: back to the title not done (mode %d, field busy)", mode);
+            title_request = 0;
+            title_tries = 0;
         }
     }
 
@@ -439,6 +466,19 @@ static void activate(int item) {
     } else if (item == ITEM_AUTO) {
         auto_profile = !auto_profile;
         l_info("port menu: automatic profiling %s", auto_profile ? "on" : "off");
+    } else if (item == ITEM_TITLE) {
+        if (game_mode != MODE_FIELD) {
+            set_message("SO A PARTIR DE UM CAMPO");
+        } else if (!title_armed) {
+            title_armed = 1;
+            set_message("APERTE DE NOVO: O JOGO NAO SALVO SE PERDE");
+        } else {
+            title_armed = 0;
+            title_request = 1;
+            set_message("VOLTANDO AO TITULO: ESCOLHA CONTINUAR");
+            open = 0;
+            wait_release = 1;
+        }
     } else if (item == ITEM_PROFILER) {
         if (profiler_active()) {
             profiler_set_paused(1);
@@ -468,6 +508,7 @@ uint32_t port_menu_input(uint32_t buttons) {
         }
         if (combo) {
             open = 1;
+            title_armed = 0;
             cursor = 0;
             return 0; // the game sees every held button go up
         }
@@ -481,8 +522,10 @@ uint32_t port_menu_input(uint32_t buttons) {
         wait_release = 1;
     } else if (pressed & SCE_CTRL_UP) {
         cursor = (cursor + NUM_ITEMS - 1) % NUM_ITEMS;
+        title_armed = 0;
     } else if (pressed & SCE_CTRL_DOWN) {
         cursor = (cursor + 1) % NUM_ITEMS;
+        title_armed = 0;
     } else if ((pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) && cursor == ITEM_GOTO && num_scenes) {
         scene_cursor = (scene_cursor + (pressed & SCE_CTRL_LEFT ? num_scenes - 1 : 1)) % num_scenes;
     } else if (pressed & SCE_CTRL_CROSS) {
@@ -524,7 +567,7 @@ static const glyph font[] = {
 
 #define SCALE   3
 #define ADVANCE (6 * SCALE)
-#define LINE_H  26 // 15 items fit in 544 lines
+#define LINE_H  24 // 16 items fit in 544 lines
 #define MAX_VERTICES 30000
 
 static float verts[MAX_VERTICES * 2];
@@ -630,7 +673,7 @@ void port_menu_draw(void) {
 
     char line[64];
     if (open) {
-        const float x0 = 120, y0 = 16, x1 = 840; // 15 items: the box ends at ~540 of 544 lines
+        const float x0 = 120, y0 = 16, x1 = 840; // 16 items: the box ends at ~526 of 544 lines
         const float y1 = y0 + 30 + (NUM_ITEMS + 4) * LINE_H;
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
@@ -663,9 +706,10 @@ void port_menu_draw(void) {
                 snprintf(line, sizeof(line), "A/B CACHE DE TEXTURAS: %s", ab_want[2] ? "SIM" : "NAO");
             } else if (i == ITEM_AUTO) snprintf(line, sizeof(line), "PERFIL AUTOMATICO NOS MINI-GAMES: %s", auto_profile ? "SIM" : "NAO");
             else if (i == ITEM_PROFILER) snprintf(line, sizeof(line), "PROFILER AGORA: %s", profiler_active() ? "PAUSAR" : "INICIAR");
+            else if (i == ITEM_TITLE) label = title_armed ? "VOLTAR AO TITULO: CONFIRMAR" : "VOLTAR AO TITULO (CARREGAR SAVE)";
             else label = "FECHAR";
             if (i == cursor) rect(x0 + 10, y - 6, x1 - 10, y + 7 * SCALE + 6, RGBA(60, 90, 170, 255));
-            int needs_field = i < NUM_GAMES || i == ITEM_GOTO;
+            int needs_field = i < NUM_GAMES || i == ITEM_GOTO || i == ITEM_TITLE;
             uint32_t color = needs_field && game_mode != MODE_FIELD ? RGBA(130, 130, 140, 255) : RGBA(255, 255, 255, 255);
             text(x0 + 30, y, label, color);
         }
