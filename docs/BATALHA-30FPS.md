@@ -421,3 +421,43 @@ total de quadros.
    do anterior, ou assim que fica pronto se esse momento já passou. `late`
    agora só conta esses atrasos; a cadência se ajusta sozinha a partir do
    quadro seguinte.
+
+## 11. Resultado da v0.6.42 e decisão: desligada por padrão (v0.6.43)
+
+A v0.6.42 interpolou de fato (~12 quadros/s com quadro intermediário,
+quase nenhum recusado), mas não serviu:
+
+| | Interpolação ligada | Desligada |
+|---|---|---|
+| Quadros na tela | 20–24 fps, irregulares | 14,8 fps, regulares |
+| Intervalo entre quadros | intermediário ~57 ms depois do anterior, novo ~31 ms depois dele | 67 ms |
+| Lógica da batalha | ~11,6 passos/s (mais lenta que os 15) | 14,8 passos/s |
+| Custo na thread do jogo | casamento ~6 ms + repetição ~18 ms por quadro | — |
+
+O que o jogador vê: movimento aos trancos, que parece acelerado, menu
+tremendo às vezes e nunca 30 fps.
+
+**Por quê:** neste desenho, a thread do jogo faz o casamento e a repetição
+do quadro (~24 ms) e ainda espera os 33 ms entre os dois quadros
+mostrados. Somados aos ~23 ms de trabalho do próprio quadro, passam dos
+66,7 ms de um quadro de batalha. O tremor do menu vem de interpolar
+também os elementos 2D (janelas e cursor) quando eles mudam entre um quadro
+e outro.
+
+**Decisão (v0.6.43):** a interpolação fica **desligada por padrão**, com
+custo zero (nada é gravado nem casado). Liga com
+`ux0:data/ffvii-vita/battle_30fps_on.txt` ou pelo item A/B do menu do port,
+só para testes.
+
+**Para funcionar de verdade, o desenho teria de mudar:**
+
+1. O casamento e a repetição saem da thread do jogo e vão para a thread de
+   render, que fica ociosa na batalha.
+2. O segundo quadro passa a ser mostrado pela thread principal, sem prender
+   a thread do jogo. Isso exige refazer a sincronização de `ff7_DrawFrame`
+   (os semáforos entre jogo e tela).
+3. O 2D (menus, janelas, números) fica fora da interpolação.
+
+É um trabalho grande e com resultado incerto: a GPU passa a desenhar cada
+quadro duas vezes, e a repetição de ~0,5 MB de comandos por quadro custa
+caro mesmo fora da thread do jogo.

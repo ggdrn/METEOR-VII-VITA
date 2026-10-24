@@ -40,8 +40,10 @@
  * others were not, the matching figures (as the phase 0 probe), the time
  * between shown frames and the cost.
  *
- * DATA_PATH "battle_30fps_off.txt" starts with the interpolation off (the
- * matching figures are still logged); the port menu turns it on and off.
+ * Off by default since v0.6.43 (on the Vita the replay and matching on the
+ * game thread do not fit: 20-24 fps shown unevenly, the battle slowed to
+ * ~11.6 steps/s). DATA_PATH "battle_30fps_on.txt" starts with it on; the
+ * port menu turns it on and off. Off, nothing is recorded or matched.
  * DATA_PATH "interp_probe_off.txt" (or "natives_off.txt") turns it all off.
  *
  * This software may be modified and distributed under the terms
@@ -78,7 +80,7 @@ extern so_module so_mod;
 #define GL_FLOAT_   0x1406
 #define HALF_US     33333     // half a battle frame
 #define MARGIN_US   3000      // composition and swap after the wait
-#define OFF_SWITCH  DATA_PATH "battle_30fps_off.txt"
+#define ON_SWITCH   DATA_PATH "battle_30fps_on.txt"
 
 // VIDEO_update's struct (VIDEO_init): framebuffer, texture, depth renderbuffer of
 // the offscreen frame, the screen's framebuffer and renderbuffer, texture size
@@ -91,7 +93,7 @@ static uint8_t * (* mk_address)(uint32_t va);
 static int (* video_update)(void);
 static volatile uint32_t * vs;
 static int enabled;
-static volatile int interp_on = 1;
+static volatile int interp_on; // off by default (v0.6.43): see docs/BATALHA-30FPS.md, section 11
 
 static ip_frame frames[2];
 static uint8_t * recs[2];
@@ -481,11 +483,11 @@ void ff7_interp_patch(void) {
         l_warn("ff7_interp: VIDEO_update's struct not found (%p), battle at 30 fps off", (void *) v);
         return;
     }
-    interp_on = !file_exists(OFF_SWITCH);
+    interp_on = file_exists(ON_SWITCH);
     enabled = 1;
     hook_addr(fw_swap, (uintptr_t) swap_native);
     hook_addr(swap, (uintptr_t) swap_native);
-    l_info("ff7_interp: battle at 30 fps installed (interpolation %s)", interp_on ? "on" : "off by " OFF_SWITCH);
+    l_info("ff7_interp: battle at 30 fps installed (interpolation %s)", interp_on ? "on by " ON_SWITCH : "off");
 }
 
 void ff7_interp_report(double seconds) {
