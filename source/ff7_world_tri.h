@@ -128,6 +128,26 @@ static inline void wt_wrf(const world_env * e, uint32_t va, float f) {
     wt_wr32(e, va, wt_bits(f));
 }
 
+// Host address of [va, va + len) if it lies in one page, else NULL (then
+// field by field): one translation per record instead of one per field
+static inline uint8_t * wt_block(const world_env * e, uint32_t va, uint32_t len) {
+    return (va & 0xfff) + len <= 0x1000 ? wt_host(e, va) : (uint8_t *) 0;
+}
+
+static inline uint32_t wt_get(const world_env * e, const uint8_t * b, uint32_t va, uint32_t off) {
+    uint32_t v;
+    if (b) {
+        __builtin_memcpy(&v, b + off, 4);
+        return v;
+    }
+    return wt_rd32(e, va + off);
+}
+
+static inline void wt_put(const world_env * e, uint8_t * b, uint32_t va, uint32_t off, uint32_t v) {
+    if (b) __builtin_memcpy(b + off, &v, 4);
+    else wt_wr32(e, va + off, v);
+}
+
 // vcvt.s32.f32 (0x75F090): truncates, saturates, NaN -> 0; one _check_event
 static inline int32_t wt_int(const world_env * e, float f) {
     wt_event(e);
@@ -221,25 +241,27 @@ static inline int wt_alloc(world_env * e, uint32_t t, uint32_t esp) {
         wt_event(e);
         return 0;
     }
-    uint32_t pt = wt_rd32(e, t + 0x30);
-    if (wt_rd32(e, t + 0x54) < wt_rd32(e, pt) || 1 > (int32_t) wt_rd32(e, t + 0x50)) {
+    uint8_t * tb = wt_block(e, t, 0x90);
+    uint32_t pt = wt_get(e, tb, t, 0x30);
+    if (wt_get(e, tb, t, 0x54) < wt_rd32(e, pt) || 1 > (int32_t) wt_get(e, tb, t, 0x50)) {
         uint32_t args[2] = { 1, t };
         e->counters[2]++;
         wt_call(e, e->f_66e272, esp, 2, args);
         return e->regs[WT_EAX] != 0;
     }
-    uint32_t p = wt_rd32(e, t + 0x8c);
-    wt_wr32(e, p + 0x8, wt_rd32(e, p + 0x8) + 1);
-    wt_wr32(e, t + 0x4c, wt_rd32(e, t + 0x4c) + 1);
-    wt_wr32(e, t + 0x50, wt_rd32(e, t + 0x50) - 1);
-    wt_wr32(e, t + 0x70, wt_rd32(e, t + 0x80));
-    wt_wr32(e, t + 0x74, wt_rd32(e, t + 0x84));
-    wt_wr32(e, t + 0x78, wt_rd32(e, t + 0x88));
-    wt_wr32(e, t + 0x80, wt_rd32(e, t + 0x80) + wt_rd32(e, t + 0x40));
-    wt_wr32(e, t + 0x84, wt_rd32(e, t + 0x84) + wt_rd32(e, t + 0x44));
-    wt_wr32(e, t + 0x88, wt_rd32(e, t + 0x88) + 1);
-    wt_wr32(e, p + 0xc, wt_rd32(e, p + 0xc) + wt_rd32(e, t + 0x38));
-    wt_wr32(e, p + 0x18, wt_rd32(e, p + 0x18) + wt_rd32(e, t + 0x3c));
+    uint32_t p = wt_get(e, tb, t, 0x8c);
+    uint8_t * pb = wt_block(e, p, 0x1c); // may overlap t's fields: written in the x86 order
+    wt_put(e, pb, p, 0x8, wt_get(e, pb, p, 0x8) + 1);
+    wt_put(e, tb, t, 0x4c, wt_get(e, tb, t, 0x4c) + 1);
+    wt_put(e, tb, t, 0x50, wt_get(e, tb, t, 0x50) - 1);
+    wt_put(e, tb, t, 0x70, wt_get(e, tb, t, 0x80));
+    wt_put(e, tb, t, 0x74, wt_get(e, tb, t, 0x84));
+    wt_put(e, tb, t, 0x78, wt_get(e, tb, t, 0x88));
+    wt_put(e, tb, t, 0x80, wt_get(e, tb, t, 0x80) + wt_get(e, tb, t, 0x40));
+    wt_put(e, tb, t, 0x84, wt_get(e, tb, t, 0x84) + wt_get(e, tb, t, 0x44));
+    wt_put(e, tb, t, 0x88, wt_get(e, tb, t, 0x88) + 1);
+    wt_put(e, pb, p, 0xc, wt_get(e, pb, p, 0xc) + wt_get(e, tb, t, 0x38));
+    wt_put(e, pb, p, 0x18, wt_get(e, pb, p, 0x18) + wt_get(e, tb, t, 0x3c));
     wt_event(e);
     return 1;
 }
@@ -258,10 +280,11 @@ static inline int world_tri_run(world_env * e) {
     uint32_t esp = regs[WT_ESP], ebp_in = regs[WT_EBP];
     uint32_t ebp = esp - 4;
     uint32_t frame = ebp - 0x174; // ESP after the prologue (sub esp, 0x170; push esi)
-    {
-        uint8_t * lo = wt_addr(e, frame - 0x40), * hi = wt_addr(e, ebp + 0x14);
-        if (hi != lo + (ebp + 0x14 - (frame - 0x40))) return 0;
-    }
+    // the frame (and the arguments above it) as one host block: its locals are
+    // used through `fr` (frame_lo is its x86 address)
+    const uint32_t frame_lo = frame - 0x40;
+    uint8_t * fr = wt_addr(e, frame_lo);
+    if (wt_addr(e, ebp + 0x14) != fr + (ebp + 0x14 - frame_lo)) return 0;
     uint32_t tri = wt_rd32(e, esp + 4), end = wt_rd32(e, esp + 8), normals = wt_rd32(e, esp + 12);
     uint32_t arg4 = wt_rd32(e, esp + 16);
 
@@ -281,7 +304,9 @@ static inline int world_tri_run(world_env * e) {
     uint32_t edx = 0;
     do {
         e->counters[0]++;
-        uint32_t idx[3] = { wt_rd8(e, tri), wt_rd8(e, tri + 1), wt_rd8(e, tri + 2) };
+        const uint8_t * trb = wt_block(e, tri, 12);
+        uint32_t idx[3];
+        for (int k = 0; k < 3; k++) idx[k] = trb ? trb[k] : wt_rd8(e, tri + k);
         uint32_t f = wt_rd32(e, WT_FLAGS + 4 * idx[0]) | wt_rd32(e, WT_FLAGS + 4 * idx[1])
                    | wt_rd32(e, WT_FLAGS + 4 * idx[2]);
         if (!(f & 0xff) || !(f & 0xff00)) {
@@ -369,39 +394,60 @@ static inline int world_tri_run(world_env * e) {
                 }
             }
 
-            uint32_t tex = (wt_rd32(e, tri + 8) >> 16) & 0x1ff;
+            uint32_t tex = (wt_get(e, trb, tri, 8) >> 16) & 0x1ff;
             wt_event(e); // 0x74C969
             if (!wt_rd32(e, 0x96994c)) goto next;
             if (!wt_alloc(e, wt_rd32(e, 0xe2bbd8 + 4 * tex), frame)) goto next;
             e->counters[1]++;
 
+            // u, v from the triangle bytes minus the texture's origin, times its scale
+            // (the x86 code rereads these per coordinate; only reads in between)
             float uv[6];
-            for (int k = 0; k < 6; k++) {
-                uint32_t base = wt_rd32(e, 0xe2d168);
-                int32_t d = (int32_t) wt_rd8(e, tri + 4 + k) - (int32_t) wt_rd16(e, base + 4 * tex + 2 * (k & 1));
-                uint32_t t = wt_rd32(e, 0xe2bbd8 + 4 * tex);
-                uv[k] = (float) ((double) d * (double) wt_rdf(e, t + 0x24 + 4 * (k & 1)));
+            {
+                uint32_t base = wt_rd32(e, 0xe2d168) + 4 * tex, t = wt_rd32(e, 0xe2bbd8 + 4 * tex);
+                int32_t org[2] = { (int32_t) wt_rd16(e, base), (int32_t) wt_rd16(e, base + 2) };
+                double scale[2] = { wt_rdf(e, t + 0x24), wt_rdf(e, t + 0x28) };
+                const uint8_t * tb = wt_block(e, tri + 4, 6);
+                for (int k = 0; k < 6; k++) {
+                    int32_t d = (int32_t) (tb ? tb[k] : wt_rd8(e, tri + 4 + k)) - org[k & 1];
+                    uv[k] = (float) ((double) d * scale[k & 1]);
+                }
             }
             float kn = wt_rdf(e, 0x7b7efc);
-            for (int k = 0; k < 3; k++)
-                for (int c = 0; c < 3; c++)
-                    wt_wrf(e, n_va[k] + 4 * c,
-                           (float) ((double) (int16_t) wt_rd16(e, nv[k] + 2 * c) * (double) kn));
             for (int k = 0; k < 3; k++) {
+                const uint8_t * nb = wt_block(e, nv[k], 6);
+                for (int c = 0; c < 3; c++) {
+                    int16_t n;
+                    if (nb) __builtin_memcpy(&n, nb + 2 * c, 2);
+                    else n = (int16_t) wt_rd16(e, nv[k] + 2 * c);
+                    __builtin_memcpy(fr + (n_va[k] + 4 * c - frame_lo), &(float) { (float) ((double) n * (double) kn) }, 4);
+                }
+            }
+            for (int k = 0; k < 3; k++) { // 0x68DAE1 (cdecl), its arguments pushed in the frame
                 uint32_t args[5] = { wt_rd32(e, 0xe360f4) + 0xf8, n_va[k], col_va + 16 * k, src_va + 4 * k,
                                      o_va[k] };
-                wt_call(e, e->f_68dae1, frame, 5, args);
+                __builtin_memcpy(fr + (frame - 20 - frame_lo), args, sizeof(args));
+                regs[WT_ESP] = frame - 24;
+                e->f_68dae1();
+                regs[WT_ESP] = frame;
             }
             float one = wt_rdf(e, 0x7b7ef8);
             for (int k = 0; k < 3; k++) {
-                float inv = wt_div(e, one, wt_rdf(e, ov[k] + 0xc));
+                const uint8_t * ob = wt_block(e, ov[k], 16);
+                float o[4];
+                if (ob) __builtin_memcpy(o, ob, 16);
+                else for (int c = 0; c < 4; c++) o[c] = wt_rdf(e, ov[k] + 4 * c);
+                float inv = wt_div(e, one, o[3]);
                 uint32_t vb = wt_rd32(e, wt_rd32(e, 0xe2bbd8 + 4 * tex) + 0x70) + 0x20 * k;
-                for (int c = 0; c < 3; c++)
-                    wt_wrf(e, vb + 4 * c, (float) ((double) wt_rdf(e, ov[k] + 4 * c) * (double) inv));
-                wt_wrf(e, vb + 0xc, inv);
-                wt_wr32(e, vb + 0x10, wt_rd32(e, o_va[k]));
-                wt_wrf(e, vb + 0x18, uv[2 * k]);
-                wt_wrf(e, vb + 0x1c, uv[2 * k + 1]);
+                uint8_t * vbb = wt_block(e, vb, 0x20);
+                uint32_t color;
+                __builtin_memcpy(&color, fr + (o_va[k] - frame_lo), 4);
+                // a float product rounds as the x87 double one stored as float:
+                // the double product of two floats is exact
+                uint32_t w[8] = { wt_bits(o[0] * inv), wt_bits(o[1] * inv), wt_bits(o[2] * inv), wt_bits(inv),
+                                  color, 0, wt_bits(uv[2 * k]), wt_bits(uv[2 * k + 1]) };
+                for (int c = 0; c < 8; c++)
+                    if (c != 5) wt_put(e, vbb, vb, 4 * c, w[c]);
             }
         }
     next: // the first two rejections skip this

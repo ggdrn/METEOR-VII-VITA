@@ -73,6 +73,15 @@ def main():
         emu.w32(B + MEMMAP + 4 * p, HOSTM + 0x1000 * i)
         uc.mem_write(HOSTM + 0x1000 * i, page(p))
     uc.mem_map(BLOB, 0x10000)
+    # WORLD_COST=1: ARM instructions of the native run, per source line of the blob
+    cost = {'on': 0, 'hist': {}, 'so': 0}
+    if os.environ.get('WORLD_COST'):
+        def in_blob(uc_, addr, size, user):
+            if cost['on']: cost['hist'][addr] = cost['hist'].get(addr, 0) + 1
+        def in_so(uc_, addr, size, user):
+            if cost['on']: cost['so'] += 1
+        uc.hook_add(UC_HOOK_CODE, in_blob, begin=BLOB, end=BLOB + 0x10000)
+        uc.hook_add(UC_HOOK_CODE, in_so, begin=B, end=B + 0xf49604)
     uc.mem_write(BLOB, blob)
     uc.mem_map(ENV, 0x1000)
     events = [0]
@@ -184,7 +193,9 @@ def main():
         uc.reg_write(UC_ARM_REG_R0, ENV)
         uc.reg_write(UC_ARM_REG_SP, HSTACK + 0xff000)
         uc.reg_write(UC_ARM_REG_LR, END | 1)
+        cost['on'] = 1
         uc.emu_start(entry | 1, END, count=5000000)
+        cost['on'] = 0
         ret = uc.reg_read(UC_ARM_REG_R0)
         n_x = bytes(uc.mem_read(XH, 0x200000))
         n_h = bytes(uc.mem_read(HOSTM, 0x1000 * len(pages)))
@@ -221,6 +232,11 @@ def main():
             if bad <= 6: print('MISMATCH (mesh %d, %d triangles): %s' % (it, ntri, '; '.join(problems)))
     print('0x75F68C: %d mismatches in %d meshes (%d triangles, %d drawn, %d allocation slow paths, %d NaN compares)'
           % (bad, total, stats[0], stats[1], stats[2], stats[3]))
+    if cost['hist']:
+        n = sum(cost['hist'].values())
+        print('cost: %d ARM instructions in the native code (%.0f a triangle), %d in the .so it calls (%.0f a triangle)'
+              % (n, n / max(stats[0], 1), cost['so'], cost['so'] / max(stats[0], 1)))
+        open('/tmp/claude-501/world_hist.txt', 'w').write('\n'.join('%x %d' % kv for kv in sorted(cost['hist'].items())))
     sys.exit(1 if bad else 0)
 
 if __name__ == '__main__':

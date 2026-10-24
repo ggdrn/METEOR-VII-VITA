@@ -1307,3 +1307,73 @@ Agora as duas chamadas são embutidas, como nos outros módulos:
   funções como antes.
 
 **Pendente no Vita:** FPS e `work %` no mapa-múndi, com o mesmo trajeto.
+
+## v0.6.36: mapa-múndi já num veículo (menu do port)
+
+Para medir o mapa-múndi com cada veículo sem chegar a esse ponto do jogo, o
+menu do port (L + R + Start) ganhou o item **"MAPA-MUNDI < BUGGY >"**:
+ESQ/DIR escolhe **BUGGY**, **SUBMARINO** ou **HIGHWIND**, e ✕ sai do campo
+atual para o mapa-múndi já pilotando o veículo. Como os outros atalhos, só
+funciona a partir de um campo (modo 1) e as escritas acontecem na thread do
+jogo, entre quadros (`port_menu_game_tick`). O menu passou de 16 para 17
+itens (linhas de 24 para 23 px; a caixa termina na linha 529 de 544).
+
+**Como o jogo entra no mapa-múndi.** O opcode MAPJUMP põe o destino no
+bloco de controle do campo (`+2`) e o estado de saída `+1 = 1`. Na saída,
+o motor do campo copia o destino para `[0xCC15D0]` e, se ele estiver em
+1..0x40, troca para o modo 3 (mapa-múndi) em vez de carregar um campo
+(`0x63C8A6`). Ao iniciar o módulo do mapa-múndi (`0x409A1D`), o tipo de
+entrada `[0xCC1644]` vira 0 (vindo de campo) ou 1 (vindo de batalha), e
+`[0xCC1648]` recebe o destino — **exceto** se já valer 2 (save carregado
+no mapa-múndi, copiado de `savemap+0xB90` ao carregar), que é mantido. No
+script do mapa-múndi, o tipo é a variável especial 5 e o destino a especial
+6 (`0x11B 5/6` → `0x767204`/`0x76720E`).
+
+**Quem cria e embarca o veículo.** A função de sistema 0 do `wm0.ev`
+(`world_us.lgp`) cria cada veículo conforme bits do save e, para alguns
+destinos, seleciona o veículo e embarca o jogador nele (opcode `0x30C`)
+antes de pôr a posição (`0x308` malha, `0x309` coordenadas na malha,
+`0x304` direção). Os bits do script são do banco 0 (`[0xE3A7E0] = 0xDC08DC`
+= `savemap+0xBA4`; bit *n* = byte *n* >> 3, bit *n* & 7, `0x764920`):
+
+| Veículo | Destino | Bits exigidos | Byte (VA) | Posição (malha, coord.) |
+|---|---|---|---|---|
+| Buggy | 7 | `0x3F8` (buggy no mapa) + `0x3F9` (grupo no buggy) | `0xDC095B` \|= 0x03 | (0x14, 0x11) + (0x175D, 0x1E0E) |
+| Submarino | 0x36 | `0x1A92` | `0xDC0C2E` \|= 0x04 | (0x14, 0x11) + (0xFE1, 0x1880), dir. 0xC0 |
+| Highwind | 0x29 | `0x3FC` (Highwind no mapa) | `0xDC095B` \|= 0x10 | (0x14, 0x11) + (0x11D1, 0x18C9) |
+
+`0xDC095B` é o byte "veículos no mapa-múndi" do save (`savemap+0xC23`;
+ff7tk: 0x01 buggy, 0x04 Tiny Bronco, 0x10 Highwind, nunca 0x11). O buggy
+e o Highwind dividem a mesma vaga de posição no save (`savemap+0xF74`,
+tabela modelo → vaga em `0x96DE80`), então o atalho do buggy desliga o bit
+do Highwind e vice-versa. Os três destinos caem na malha (20, 17), a região
+de Junon (cidade/porto/aeroporto). O mapa usado é o principal (`wm0`):
+destinos 0x1E, 0x1F, 0x2A, 0x38 seriam o fundo do mar e ≥ 0x3C a neve.
+
+**O que o atalho faz** (`port_menu.c`, `world_request`): com o campo livre
+(`+1 = 0`), liga os bits do veículo (e desliga os do outro da mesma vaga),
+zera `[0xCC1644]` se não for 0, e escreve o MAPJUMP para o destino
+(`+2` = destino, `+4/+6/+0x22/+0x24 = 0`, `+0x26 = 0`, `+1 = 1`). Não há
+segundo passo: como no opcode real, o campo é descarregado. O log mostra
+`port menu: world map in the ...` com o campo de origem, o destino, o byte
+antes/depois e o tipo de entrada anterior. No buggy, se o bit de script
+`0xE7F` (`0xDC0AAB` & 0x80) estiver ligado, o log avisa: a entrada vinda
+de campo não cria o buggy nesse caso.
+
+**Formato das vagas de posição** (para referência, `0x7660DB`/`0x76616A`):
+6 vagas de 8 bytes em `0xDC0C94` (`savemap+0xF5C`: líder, chocobo
+selvagem, Tiny Bronco/chocobo, buggy/Highwind, submarino, Weapons). Palavra
+0: x (19 bits) | modelo << 19 (5 bits) | direção >> 4 << 24; palavra 1:
+z (18 bits) | altura << 18. Modelos: 0 Cloud, 3 Highwind, 5 Tiny Bronco,
+6 buggy, 13 submarino, 19 chocobo. O atalho não escreve essas vagas (o
+script põe a posição), mas elas ficam no save junto com os bits.
+
+**Cuidado:** os bits ficam alterados na memória do save. Não salve depois
+de usar o atalho (ou use "VOLTAR AO TITULO" para descartar).
+
+**Não verificado sem o console:** que o opcode `0x30C` é mesmo "embarcar"
+(deduzido dos destinos em que ele aparece: saída de cidade de buggy,
+hangar do Highwind, doca do submarino); que o Highwind sai voando e o
+submarino na superfície; e se algum outro estado da história (por exemplo,
+discos 1/2, o bit `0xE7F` ou o progresso `savemap+0xBA4`) impede a criação
+do veículo. Se não embarcar, o log mostra o que foi escrito.

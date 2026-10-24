@@ -1,8 +1,9 @@
 /*
  * Port menu: hold L + R and press Start.
  *
- * Shortcuts to every 3D minigame, for measuring them without reaching them
- * in a save (docs/MINIGAMES.md), and profiler control.
+ * Shortcuts to every 3D minigame and to the world map in each vehicle, for
+ * measuring them without reaching them in a save (docs/MINIGAMES.md), and
+ * profiler control.
  *
  * Launching a minigame does what the field script opcode MINIGAME (0x20,
  * handler 0x6134C0) does in its first step: it writes the return map and
@@ -36,6 +37,26 @@
  * field entity [ctrl + 0x2A] (set by the PC opcode); entities are 0x88 bytes
  * at [0xCC0B60]: x, y, z (<< 12) at +0xC/+0x10/+0x14, direction +0x38,
  * triangle +0x78 (opcodes XYZI and DIR). The current field is [0xCC15D0].
+ *
+ * World map in a vehicle (v0.6.36): "MAPA-MUNDI" (LEFT/RIGHT: buggy,
+ * submarine, Highwind) jumps from a field to the world map already riding
+ * that vehicle, to measure the world map with each one. It uses the
+ * game's own entry points: a MAPJUMP (as "go to scene") to a world map
+ * entry 1..0x40 (the field engine switches to mode 3 when the target is in
+ * 1..0x40, 0x63C8A6). The world map's entry script (wm0.ev, system
+ * function 0) creates each vehicle from bits of the save (bank 0 =
+ * 0xDC08DC, bit n = byte n >> 3, bit n & 7) and, for some entries, boards
+ * it (script opcode 0x30C) and places it at fixed coordinates:
+ *   entry 7    buggy     bits 0x3F8 (buggy on the map) + 0x3F9 (party in it)
+ *   entry 0x36 submarine bit 0x1A92 (byte 0xDC0C2E, 0x04)
+ *   entry 0x29 Highwind  bit 0x3FC (Highwind on the map)
+ * Bits 0x3F8/0x3F9/0x3FC are the save's "vehicles on the world map" byte
+ * (savemap 0xC23 = 0xDC095B: 0x01 buggy, 0x02 riding it, 0x10 Highwind);
+ * the buggy and the Highwind share one position slot (savemap 0xF74), so
+ * one is turned off when the other is set. [0xCC1644] (world map entry
+ * type: 0 field, 1 battle, 2 loaded save) is set to 0 first: a save made on
+ * the world map leaves it at 2, and the entry from a field would be ignored
+ * (0x409A22). This changes the save in memory: do not save afterwards.
  *
  * A/B tests (v0.6.25): the minigame natives (coaster, snowboard), the
  * 30 fps cap and the texture reconversion cache can be turned off and on in
@@ -81,6 +102,10 @@ extern so_module so_mod;
 #define MODE_FIELD 1
 #define EXIT_MAPJUMP 1
 #define EXIT_MINIGAME 0xc
+#define VA_WM_ENTRY 0xcc1644u // int32: world map entry type (0 field, 1 battle, 2 loaded save)
+#define VA_WM_VEHICLES 0xdc095bu // savemap 0xC23: vehicles on the world map (script bits 0x3F8..)
+#define VA_WM_SUB 0xdc0c2eu // script bit 0x1A92 (byte 0x352 of the bank, 0x04): submarine
+#define VA_WM_NO_BUGGY 0xdc0aabu // script bit 0xE7F (0x80): no buggy when entering from a field
 #define SCENES_PATH DATA_PATH "cenas.txt"
 #define MAX_SCENES 16
 
@@ -96,6 +121,21 @@ typedef struct {
     uint16_t z;
 } minigame;
 
+typedef struct {
+    const char * name;
+    uint16_t entry;   // world map entry (MAPJUMP target)
+    uint32_t flag_va; // save byte with the vehicle's bits
+    uint8_t set, clear;
+} vehicle;
+
+// Entries of wm0.ev's system function 0 that board a vehicle (opcode 0x30C)
+static const vehicle vehicles[] = {
+    { "BUGGY",     0x07, VA_WM_VEHICLES, 0x03, 0x10 }, // bits 0x3F8 + 0x3F9; Highwind off (same slot)
+    { "SUBMARINO", 0x36, VA_WM_SUB,      0x04, 0x00 }, // bit 0x1A92
+    { "HIGHWIND",  0x29, VA_WM_VEHICLES, 0x10, 0x03 }, // bit 0x3FC; buggy off (same slot)
+};
+#define NUM_VEHICLES ((int) (sizeof(vehicles) / sizeof(vehicles[0])))
+
 // From the MINIGAME opcodes of the game's scripts (field: return map)
 static const minigame games[] = {
     { "G-BIKE (MOTO)",              0,   0, 507,  243,  176, 92 }, // games_2
@@ -107,7 +147,7 @@ static const minigame games[] = {
     { "SNOWBOARD (FLIPERAMA)",      6,   0, 507,  -37,  273, 26 }, // games_2
 };
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
-enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
+enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, NUM_ITEMS };
 
 static const uint32_t * memmap;
@@ -131,6 +171,8 @@ static volatile int title_request;
 static int title_armed;
 static volatile int recording = -1; // scene being profiled
 static volatile int jumping;        // map jump written, waiting for it to end
+static volatile int world_request = -1; // vehicle to go to the world map in
+static int vehicle_cursor; // main thread
 static scene scenes[MAX_SCENES];
 // A/B tests: wanted (main thread) and applied (game thread) states
 static volatile int ab_want[3] = { 1, 1, 1 }; // minigame natives, 30 fps cap, texture cache
@@ -350,6 +392,43 @@ void port_menu_game_tick(void) {
         }
     }
 
+    int v = world_request;
+    if (v >= 0) {
+        static int world_tries;
+        const vehicle * vh = &vehicles[v];
+        uint8_t * c = mode == MODE_FIELD ? control_block() : NULL;
+        uint8_t * flags = x86(vh->flag_va), * entry = x86(VA_WM_ENTRY), * nob = x86(VA_WM_NO_BUGGY);
+        if (c && c[1] == 0 && flags && entry) {
+            uint8_t old = *flags;
+            *flags = (uint8_t) ((old & ~vh->clear) | vh->set);
+            int32_t type;
+            memcpy(&type, entry, 4);
+            if (type != 0) {
+                int32_t zero = 0;
+                memcpy(entry, &zero, 4);
+            }
+            put16(c + 0x02, vh->entry);
+            put16(c + 0x04, 0);
+            put16(c + 0x06, 0);
+            put16(c + 0x22, 0);
+            put16(c + 0x24, 0);
+            put16(c + 0x26, 0);
+            c[1] = EXIT_MAPJUMP; // the field leaves for the world map; no second step, as for the real opcode
+            l_info("port menu: world map in the %s: field %d, entry %d, save byte 0x%X 0x%02X -> 0x%02X, entry type %d -> 0",
+                   vh->name, x86(VA_FIELD_ID) ? get16(x86(VA_FIELD_ID)) : -1, vh->entry, (unsigned) vh->flag_va, old,
+                   *flags, (int) type);
+            if (v == 0 && nob && (*nob & 0x80))
+                l_warn("port menu: script bit 0xE7F is set (0x%X = 0x%02X): the world map will not create the buggy",
+                       (unsigned) VA_WM_NO_BUGGY, *nob);
+            world_request = -1;
+            world_tries = 0;
+        } else if (++world_tries > 600) {
+            l_warn("port menu: world map in the %s not reached (mode %d, field busy)", vh->name, mode);
+            world_request = -1;
+            world_tries = 0;
+        }
+    }
+
     int r = request;
     if (r >= 0) {
         uint8_t * c = mode == MODE_FIELD ? control_block() : NULL;
@@ -455,6 +534,17 @@ static void activate(int item) {
             open = 0;
             wait_release = 1;
         }
+    } else if (item == ITEM_WORLD) {
+        if (game_mode != MODE_FIELD) {
+            set_message("SO A PARTIR DE UM CAMPO");
+        } else {
+            world_request = vehicle_cursor;
+            char m[64];
+            snprintf(m, sizeof(m), "MAPA-MUNDI: %s (NAO SALVE DEPOIS)", vehicles[vehicle_cursor].name);
+            set_message(m);
+            open = 0;
+            wait_release = 1;
+        }
     } else if (item >= ITEM_AB_NATIVES && item <= ITEM_AB_TEXCACHE) {
         int k = item - ITEM_AB_NATIVES;
         ab_want[k] = !ab_want[k];
@@ -528,6 +618,8 @@ uint32_t port_menu_input(uint32_t buttons) {
         title_armed = 0;
     } else if ((pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) && cursor == ITEM_GOTO && num_scenes) {
         scene_cursor = (scene_cursor + (pressed & SCE_CTRL_LEFT ? num_scenes - 1 : 1)) % num_scenes;
+    } else if ((pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) && cursor == ITEM_WORLD) {
+        vehicle_cursor = (vehicle_cursor + (pressed & SCE_CTRL_LEFT ? NUM_VEHICLES - 1 : 1)) % NUM_VEHICLES;
     } else if (pressed & SCE_CTRL_CROSS) {
         activate(cursor);
     }
@@ -567,7 +659,7 @@ static const glyph font[] = {
 
 #define SCALE   3
 #define ADVANCE (6 * SCALE)
-#define LINE_H  24 // 16 items fit in 544 lines
+#define LINE_H  23 // 17 items fit in 544 lines
 #define MAX_VERTICES 30000
 
 static float verts[MAX_VERTICES * 2];
@@ -673,7 +765,7 @@ void port_menu_draw(void) {
 
     char line[64];
     if (open) {
-        const float x0 = 120, y0 = 16, x1 = 840; // 16 items: the box ends at ~526 of 544 lines
+        const float x0 = 120, y0 = 16, x1 = 840; // 17 items: the box ends at 529 of 544 lines
         const float y1 = y0 + 30 + (NUM_ITEMS + 4) * LINE_H;
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
@@ -698,6 +790,8 @@ void port_menu_draw(void) {
                 else
                     snprintf(line, sizeof(line), "IR PARA CENA < %d/%d > MODO %d", scene_cursor + 1, num_scenes,
                              scenes[scene_cursor].mode);
+            } else if (i == ITEM_WORLD) {
+                snprintf(line, sizeof(line), "MAPA-MUNDI < %s >", vehicles[vehicle_cursor].name);
             } else if (i == ITEM_AB_NATIVES) {
                 snprintf(line, sizeof(line), "A/B NATIVOS DOS MINI-GAMES: %s", ab_want[0] ? "SIM" : "NAO");
             } else if (i == ITEM_AB_CAP) {
@@ -709,12 +803,12 @@ void port_menu_draw(void) {
             else if (i == ITEM_TITLE) label = title_armed ? "VOLTAR AO TITULO: CONFIRMAR" : "VOLTAR AO TITULO (CARREGAR SAVE)";
             else label = "FECHAR";
             if (i == cursor) rect(x0 + 10, y - 6, x1 - 10, y + 7 * SCALE + 6, RGBA(60, 90, 170, 255));
-            int needs_field = i < NUM_GAMES || i == ITEM_GOTO || i == ITEM_TITLE;
+            int needs_field = i < NUM_GAMES || i == ITEM_GOTO || i == ITEM_WORLD || i == ITEM_TITLE;
             uint32_t color = needs_field && game_mode != MODE_FIELD ? RGBA(130, 130, 140, 255) : RGBA(255, 255, 255, 255);
             text(x0 + 30, y, label, color);
         }
         y += 6;
-        text(x0 + 20, y, "X: ESCOLHER  O: FECHAR  ESQ/DIR: CENA", RGBA(170, 190, 230, 255));
+        text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: CENA/VEICULO", RGBA(170, 190, 230, 255));
         if (game_mode != MODE_FIELD) text(x0 + 20, y + LINE_H, "MINI-GAMES: SO A PARTIR DE UM CAMPO", RGBA(230, 190, 120, 255));
     }
     if (show_message) {
