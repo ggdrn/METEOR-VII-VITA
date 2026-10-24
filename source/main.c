@@ -32,6 +32,7 @@
 #include "ff7_coaster.h"
 #include "ff7_submarine.h"
 #include "ff7_fieldbg.h"
+#include "ff7_vcolor.h"
 #include "port_menu.h"
 #include "ff7_world.h"
 #include "ff7_stack.h"
@@ -289,6 +290,7 @@ int main() {
             ff7_submarine_input_report();
             ff7_submarine_report((now - heartbeat_us) / 1000000.0);
             ff7_fieldbg_report((now - heartbeat_us) / 1000000.0);
+            ff7_vcolor_report((now - heartbeat_us) / 1000000.0);
             ff7_coaster_report((now - heartbeat_us) / 1000000.0);
             ff7_framecap_report((now - heartbeat_us) / 1000000.0);
             ff7_world_report((now - heartbeat_us) / 1000000.0);

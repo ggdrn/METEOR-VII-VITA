@@ -52,6 +52,7 @@ extern "C"
 #include "ff7_coaster.h"
 #include "ff7_submarine.h"
 #include "ff7_fieldbg.h"
+#include "ff7_vcolor.h"
 #include "ff7_world.h"
 #include "ff7_music.h"
 #include "ff7_screen.h"
@@ -119,6 +120,7 @@ void so_patch(void) {
 	ff7_submarine_input_patch();
 	ff7_submarine_patch();
 	ff7_fieldbg_patch();
+	ff7_vcolor_patch();
 	ff7_framecap_patch();
 	ff7_world_patch();
 	ff7_music_patch();

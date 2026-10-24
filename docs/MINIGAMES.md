@@ -1398,3 +1398,40 @@ Resultado no emulador: 0 divergências em 300 malhas (9075 triângulos), e
 **1602 → 1011 instruções ARM por triângulo** no código nativo (o código do
 .so chamado: 869 → 805). Mutações nos índices, na textura e no frame da
 chamada são detectadas.
+
+## v0.6.37: batalhas, cores dos vértices em código nativo (`ff7_vcolor_core.h`)
+
+No profile da v0.6.35 (mapa-múndi com batalhas, magias e limits), três
+funções que multiplicam as cores dos vértices dos modelos por um brilho a
+cada quadro somavam ~12% da thread do jogo nas batalhas: 0x68F2D6 (6.1%),
+0x68EFCE (4.5%) e 0x68F0F8 (1.5%).
+
+- **0x68F2D6** (brilho, n, i, obj) e **0x68F0F8** (brilho, i, obj): travam
+  o conjunto de polígonos i do modelo (0x670196, com o objeto do jogo de
+  `[0xDB2BB8]`), percorrem os `[r + 4]` vértices (cores float em
+  `[r + 0x18] + 4`, de 0x18 em 0x18; saída RGB em `[r + 8] + 0x10`, de 0x20
+  em 0x20) e destravam (0x670144). Em 0x68F2D6, conjuntos com paleta
+  (`[r + 0x20]` e seu `+0x8c`) passam por 0x6A5BA0 (as cores da paleta n) e
+  depois sobem a paleta (0x660F12, 0x660F54).
+- **0x68EFCE** (brilho, cor, saída): `saída[k] = (int) (brilho * cor[k])`.
+  Os porters já a reescreveram em float (produto f32, `vcvt` truncando e
+  saturando, NaN → 0). O nativo faz o mesmo.
+
+O nativo faz o laço dos vértices e 0x6A5BA0 sem sair do código ARM (um
+lookup por cor e um `_check_event` em linha). Trava, destrava e o upload da
+paleta continuam chamando as funções do .so, com a pilha x86 e os
+EAX/ECX/EDX que o código x86 deixa antes de cada chamada.
+
+Teste: `scripts/emu/test_vcolor.py` compara com as funções recompiladas
+(registradores, estado x87, memória, as chamadas de upload da paleta e de
+`_check_event`) em conjuntos aleatórios: travados ou não, sem cores, 0 a 60
+vértices, paleta, registros que cruzam página, brilhos e cores com NaN,
+infinito, negativos e valores fora do int32. 0x660F12/0x660F54 chamam o
+renderizador por uma tabela (o emulador não faz chamadas x86 indiretas),
+então nas duas execuções viram um stub que registra os argumentos e os
+registradores recebidos. As mutações nos índices, na saturação, no
+deslocamento da paleta, nos registradores do upload e no EBP final são
+detectadas.
+
+Desligar: `ux0:data/ffvii-vita/vcolor_off.txt`. O log mostra a cada 5 s
+`vertex colors/s: ... sets, ... colors, ... paletted sets (native)`.
