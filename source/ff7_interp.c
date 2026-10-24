@@ -4,9 +4,12 @@
  * frames can be paired draw by draw and vertex by vertex, which an
  * interpolated in-between frame needs.
  *
- * The game thread finishes each frame in fw_SwapBuffers (VIDEO_update: the
- * offscreen framebuffer is drawn to the screen's, then the thread waits for
- * the main thread's next onDrawFrame). Its entry is hooked: the frame drawn
+ * The game thread finishes each frame in SwapBuffers, called by the GL
+ * driver's flip C_006A7157 (VIDEO_update: the offscreen framebuffer is drawn
+ * to the screen's, then the thread waits for the main thread's next
+ * onDrawFrame); fw_SwapBuffers, the same for the x86 import table, is hooked
+ * too (v0.6.39 hooked only that one, which battles never call). The entry
+ * is hooked: the frame drawn
  * since the previous one is matched with the frame before it
  * (ff7_interp_core.h). While the game is in battle (mode 2), gl_queue.c
  * hands every draw of the game thread to ff7_interp_draw with the vertex
@@ -218,6 +221,9 @@ static void frame_end(void) {
     }
 }
 
+// fw_SwapBuffers(hdc): VIDEO_update(); return 1. SwapBuffers(hdc) the same
+// plus a glGetError, which on the game thread answers GL_NO_ERROR without
+// doing anything: left out.
 static int swap_native(unsigned arg) {
     (void) arg;
     if (enabled) frame_end();
@@ -227,16 +233,20 @@ static int swap_native(unsigned arg) {
 
 void ff7_interp_patch(void) {
     if (ff7_switch_off("ff7_interp", DATA_PATH "interp_probe_off.txt")) return;
-    uintptr_t swap = so_symbol(&so_mod, "_Z14fw_SwapBuffersj");
+    uintptr_t fw_swap = so_symbol(&so_mod, "_Z14fw_SwapBuffersj"), swap = so_symbol(&so_mod, "SwapBuffers");
     video_update = (int (*)(void)) so_symbol(&so_mod, "VIDEO_update");
     mk_address = (uint8_t * (*)(uint32_t)) so_symbol(&so_mod, "mk_address");
     // push {r3, lr}; bl VIDEO_update; movs r0, #1; pop {r3, pc}: 12 bytes, the hook fits
-    static const uint16_t code[] = { 0xb508, 0xf1c4, 0xf857, 0x2001, 0xbd08 };
-    if (!swap || !video_update || !mk_address || memcmp((void *) (swap & ~1u), code, sizeof(code))) {
-        l_warn("ff7_interp: unexpected code at fw_SwapBuffers, battle probe off");
+    static const uint16_t fw_code[] = { 0xb508, 0xf1c4, 0xf857, 0x2001, 0xbd08 };
+    // push {r3, lr}; bl VIDEO_update; blx glGetError; movs r0, #1; pop {r3, pc}: 16 bytes
+    static const uint16_t code[] = { 0xb508, 0xf7ff, 0xfd63, 0xf75b, 0xcb4a, 0x2001, 0xbd08 };
+    if (!fw_swap || !swap || !video_update || !mk_address || memcmp((void *) (fw_swap & ~1u), fw_code, sizeof(fw_code))
+        || memcmp((void *) (swap & ~1u), code, sizeof(code))) {
+        l_warn("ff7_interp: unexpected code at SwapBuffers / fw_SwapBuffers, battle probe off");
         return;
     }
     enabled = 1;
+    hook_addr(fw_swap, (uintptr_t) swap_native);
     hook_addr(swap, (uintptr_t) swap_native);
     l_info("ff7_interp: battle 30 fps probe installed (matching consecutive battle frames, nothing drawn)");
 }

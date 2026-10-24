@@ -153,7 +153,8 @@ lógica depois do que hoje.
 ## 5. Riscos e pontos a confirmar
 
 1. **Sincronização com a thread do jogo** (respondido na fase 0, lendo o
-   código). A thread do jogo fecha cada quadro em `fw_SwapBuffers` →
+   código). A thread do jogo fecha cada quadro em `SwapBuffers` (chamada
+   pelo flip do driver, `C_006A7157`) →
    `VIDEO_update`, e ela mesma desenha o framebuffer fora da tela na tela.
    Depois dá `sem_post` (quadro pronto) e **espera** em `sem_wait` até o
    próximo `ff7_DrawFrame` da thread principal soltá-la. Ou seja, o jogo
@@ -222,8 +223,11 @@ save. Desligando o arquivo, tudo volta ao que é hoje.
 - **Gravação:** em batalha (modo 2), cada `glDrawArrays` da thread do jogo
   no framebuffer do jogo grava a chave de estado (um hash), a primitiva e o
   x, y, u, v de cada vértice.
-- **Fim do quadro:** `fw_SwapBuffers` é interceptada (ela só faz
-  `VIDEO_update(); return 1;`). Na entrada, o quadro que terminou é casado
+- **Fim do quadro:** `SwapBuffers` é interceptada (ela só faz
+  `VIDEO_update(); glGetError(); return 1;`), e `fw_SwapBuffers` (a mesma
+  coisa, pela tabela de importações x86) também. A v0.6.39 interceptava só
+  `fw_SwapBuffers`, que a batalha nunca chama: a medição não rodou. Corrigido
+  na v0.6.40. Na entrada, o quadro que terminou é casado
   com o anterior. Os desenhos da composição na tela, que vêm logo depois
   (o primeiro framebuffer que `VIDEO_update` liga), ficam de fora.
 - **Memória:** os buffers (1,4 MB, um bloco de memória) são alocados na
