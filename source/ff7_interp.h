@@ -35,9 +35,13 @@ void ff7_ip_note_words(int word, const void * data, uint32_t len); // hash of a 
 void ff7_ip_note_viewport(int32_t x, int32_t y, int32_t w, int32_t h);
 
 void ff7_interp_draw(uint32_t mode, int32_t first, int32_t count, const void * pos, int32_t pos_size, uint32_t pos_type,
-                     int32_t pos_stride, const void * uv, int32_t uv_size, uint32_t uv_type, int32_t uv_stride);
+                     int32_t pos_stride, const void * uv, int32_t uv_size, uint32_t uv_type, int32_t uv_stride,
+                     int32_t rec);
 
 void ff7_interp_patch(void);
+void ff7_interp_set(int on);     // battle at 30 fps on/off (port menu)
+int ff7_interp_get(void);        // on (and installed)
+int ff7_interp_available(void);  // installed
 void ff7_interp_report(double seconds);
 
 #endif // FF7_INTERP_H

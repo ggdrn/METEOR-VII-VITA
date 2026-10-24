@@ -80,6 +80,7 @@
 #include "ff7_framecap.h"
 #include "ff7_snowboard.h"
 #include "ff7_texture.h"
+#include "ff7_interp.h"
 
 #include "utils/logger.h"
 #include "utils/profiler.h"
@@ -152,7 +153,7 @@ static const minigame games[] = {
     { "SNOWBOARD (FLIPERAMA)",      6,   0, 507,  -37,  273, 26 }, // games_2
 };
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
-enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
+enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AB_BATTLE30, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, NUM_ITEMS };
 
 static const uint32_t * memmap;
@@ -604,6 +605,13 @@ static void activate(int item) {
         snprintf(m, sizeof(m), "%s: %s", what[k], ab_want[k] ? "LIGADO" : "DESLIGADO");
         set_message(m);
         l_info("port menu: A/B %s %s (mode %d)", what[k], ab_want[k] ? "on" : "off", game_mode);
+    } else if (item == ITEM_AB_BATTLE30) {
+        if (!ff7_interp_available()) {
+            set_message("BATALHA A 30 FPS: NAO INSTALADA (VER O LOG)");
+        } else {
+            ff7_interp_set(!ff7_interp_get());
+            set_message(ff7_interp_get() ? "BATALHA A 30 FPS: LIGADA" : "BATALHA A 30 FPS: DESLIGADA (15 FPS)");
+        }
     } else if (item == ITEM_AUTO) {
         auto_profile = !auto_profile;
         l_info("port menu: automatic profiling %s", auto_profile ? "on" : "off");
@@ -710,7 +718,7 @@ static const glyph font[] = {
 
 #define SCALE   3
 #define ADVANCE (6 * SCALE)
-#define LINE_H  22 // 18 items fit in 544 lines
+#define LINE_H  21 // 19 items fit in 544 lines
 #define MAX_VERTICES 30000
 
 static float verts[MAX_VERTICES * 2];
@@ -816,7 +824,7 @@ void port_menu_draw(void) {
 
     char line[64];
     if (open) {
-        const float x0 = 120, y0 = 16, x1 = 840; // 18 items: the box ends at 530 of 544 lines
+        const float x0 = 120, y0 = 16, x1 = 840; // 19 items: the box ends at 529 of 544 lines
         const float y1 = y0 + 30 + (NUM_ITEMS + 4) * LINE_H;
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
@@ -851,6 +859,8 @@ void port_menu_draw(void) {
                 snprintf(line, sizeof(line), "A/B LIMITE DE 30 FPS: %s", ab_want[1] ? "SIM" : "NAO");
             } else if (i == ITEM_AB_TEXCACHE) {
                 snprintf(line, sizeof(line), "A/B CACHE DE TEXTURAS: %s", ab_want[2] ? "SIM" : "NAO");
+            } else if (i == ITEM_AB_BATTLE30) {
+                snprintf(line, sizeof(line), "A/B BATALHA A 30 FPS (INTERPOLACAO): %s", ff7_interp_get() ? "SIM" : "NAO");
             } else if (i == ITEM_AUTO) snprintf(line, sizeof(line), "PERFIL AUTOMATICO NOS MINI-GAMES: %s", auto_profile ? "SIM" : "NAO");
             else if (i == ITEM_PROFILER) snprintf(line, sizeof(line), "PROFILER AGORA: %s", profiler_active() ? "PAUSAR" : "INICIAR");
             else if (i == ITEM_TITLE) label = title_armed ? "VOLTAR AO TITULO: CONFIRMAR" : "VOLTAR AO TITULO (CARREGAR SAVE)";

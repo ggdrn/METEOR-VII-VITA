@@ -9,6 +9,8 @@
 #ifndef SOLOADER_GL_QUEUE_H
 #define SOLOADER_GL_QUEUE_H
 
+#include <stdint.h>
+
 #include <vitaGL.h>
 
 /** Starts the render thread. Call after gl_init(). */
@@ -49,6 +51,27 @@ void gl_queue_palette_report(double seconds);
 
 /** Logs render thread statistics over `seconds`, then resets them. */
 void gl_queue_report(double seconds);
+
+/*
+ * Battle at 30 fps (ff7_interp.c), game thread only. gq_rec_begin records
+ * every record the game thread publishes into buf (and the GL state at that
+ * point into `slot`, 0 or 1) until gq_rec_end, which returns the bytes used
+ * and why the frame cannot be replayed (GQ_REC_* bits, 0: it can).
+ * gq_replay publishes the frame again from that state, the framebuffer
+ * fb_from replaced by fb_to and each draw's position array (attribute 0)
+ * passed to `lerp` on the copy (rec: the draw's offset in buf); 0 if the
+ * frame holds calls that cannot be replayed (nothing published then).
+ * gq_make_target creates a w x h RGBA texture in a framebuffer sharing the
+ * depth renderbuffer depth_rb (1, or minus the framebuffer status).
+ */
+enum { GQ_REC_OVERFLOW = 1, GQ_REC_TEXTURE = 2, GQ_REC_DIRECT = 4, GQ_REC_SHADOW = 8 };
+typedef void (* gq_lerp_fn)(void * ctx, uint32_t rec, uint8_t * pos, uint32_t stride, int size, uint32_t count,
+                            uint32_t mode);
+void gq_rec_begin(uint8_t * buf, uint32_t cap, int slot);
+uint32_t gq_rec_end(uint32_t * unsafe);
+int gq_replay(const uint8_t * buf, uint32_t len, int slot, uint32_t fb_from, uint32_t fb_to, gq_lerp_fn lerp,
+              void * ctx);
+int gq_make_target(uint32_t w, uint32_t h, uint32_t depth_rb, uint32_t * fb_out, uint32_t * tex_out);
 
 /* Entry points for the GL functions libjni_ff7.so imports (dynlib.c) */
 void gq_glActiveTexture(GLenum texture);

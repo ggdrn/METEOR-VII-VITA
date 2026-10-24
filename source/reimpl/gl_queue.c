@@ -134,6 +134,75 @@ static struct {
     uint32_t peak;
 } st;
 
+/*
+ * Battle at 30 fps (ff7_interp.c). The GL state as the game thread set it,
+ * raw values (gq_shadow), to set it again before a replay; and the
+ * recording of every record the game thread publishes during a frame. The
+ * state of units, caps, programs or uniform locations beyond what the
+ * shadow holds is only a problem when a recorded frame changes it (the
+ * frame is then not replayed): what a frame does not touch is the same
+ * before and after it.
+ */
+#define SH_CAPS  16
+#define SH_PROGS 16
+#define SH_LOCS  16
+#define SH_MATS  16
+enum {
+    SH_FB = 1, SH_ACTIVE = 2, SH_BLEND = 4, SH_DEPTH_FUNC = 8, SH_DEPTH_MASK = 0x10, SH_COLOR_MASK = 0x20,
+    SH_CULL = 0x40, SH_FRONT = 0x80, SH_VIEWPORT = 0x100, SH_CLEAR_COLOR = 0x200, SH_CLEAR_DEPTH = 0x400,
+    SH_DEPTH_RANGE = 0x800, SH_LINE_WIDTH = 0x1000, SH_PROGRAM = 0x2000
+};
+
+typedef struct {
+    uint32_t set;
+    uint32_t fb, active, blend_s, blend_d, depth_func, depth_mask, color_mask[4], cull, front, viewport[4];
+    uint32_t clear_color[4], clear_depth, depth_range[2], line_width, program;
+    uint32_t tex[2], tex_target[2], tex_set; // texture units 0 and 1
+    uint32_t ncaps, cap[SH_CAPS], cap_on[SH_CAPS];
+    uint16_t uni_set[SH_PROGS], mat_set[SH_PROGS];
+    int32_t uni[SH_PROGS][SH_LOCS];
+    float mat[SH_PROGS][SH_MATS][16];
+} gq_shadow;
+
+static gq_shadow sh, rec_start[2]; // game thread only
+static uint8_t * rec_buf;          // recording: [original address, size, record] entries
+static uint32_t rec_cap, rec_len, rec_unsafe;
+static int32_t rec_last_draw = -1;
+
+static inline void rec_bad(uint32_t why) {
+    if (rec_buf) rec_unsafe |= why;
+}
+
+static void sh_cap(uint32_t cap, uint32_t on) {
+    for (uint32_t i = 0; i < sh.ncaps; i++)
+        if (sh.cap[i] == cap) {
+            sh.cap_on[i] = on;
+            return;
+        }
+    if (sh.ncaps < SH_CAPS) {
+        sh.cap[sh.ncaps] = cap;
+        sh.cap_on[sh.ncaps++] = on;
+    } else {
+        rec_bad(GQ_REC_SHADOW);
+    }
+}
+
+static void sh_texture(uint32_t target, uint32_t texture) {
+    uint32_t u = sh.set & SH_ACTIVE ? sh.active - GL_TEXTURE0 : 0;
+    if (u >= 2) {
+        rec_bad(GQ_REC_SHADOW);
+        return;
+    }
+    sh.tex[u] = texture;
+    sh.tex_target[u] = target;
+    sh.tex_set |= 1u << u;
+}
+
+static inline void sh_val(uint32_t bit, uint32_t * field, uint32_t v) {
+    *field = v;
+    sh.set |= bit;
+}
+
 static inline SceUInt64 now_us(void) {
     return sceKernelGetProcessTimeWide();
 }
@@ -241,7 +310,21 @@ static void * reserve(uint32_t size) {
 
 // Only draws wake the render thread: state changes wait for the next draw
 // (or for whoever waits on the queue), which saves a kernel call per GL call
+static void rec_capture(const hdr_t * h, uint32_t size) {
+    if (rec_len + 8 + size > rec_cap) {
+        rec_unsafe |= GQ_REC_OVERFLOW;
+        return;
+    }
+    uint32_t * e = (uint32_t *) (rec_buf + rec_len);
+    e[0] = (uint32_t) h;
+    e[1] = size;
+    memcpy(e + 2, h, size);
+    if (h->op == OP_DRAW) rec_last_draw = (int32_t) rec_len;
+    rec_len += 8 + size;
+}
+
 static void publish(uint32_t size, int wake_up) {
+    if (rec_buf) rec_capture((const hdr_t *) (ring + head % QUEUE_SIZE), size);
     __sync_synchronize();
     head += size;
     uint32_t used = head - tail;
@@ -411,9 +494,6 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         DIRECT((active ? apply_attribs() : (void) 0, glDrawArrays_stat(mode, first, count)));
         return;
     }
-    if (ff7_ip_recording && attribs[0].enabled) // battle 30 fps probe: x/y and u/v of the draw
-        ff7_interp_draw(mode, first, count, attribs[0].ptr, attribs[0].size, attribs[0].type, attribs[0].stride,
-                        attribs[3].enabled ? attribs[3].ptr : NULL, attribs[3].size, attribs[3].type, attribs[3].stride);
     // Bytes each enabled array reads for vertices first .. first + count - 1
     int n = 0;
     uint8_t idx[MAX_ATTRIBS];
@@ -445,6 +525,7 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     uint32_t data = span ? (uint32_t) (hi - lo) : total;
 
     if (data > MAX_PAYLOAD) {
+        rec_bad(GQ_REC_DIRECT);
         DIRECT((apply_attribs(), glDrawArrays_stat(mode, first, count)));
         return;
     }
@@ -480,6 +561,10 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     st.draws++;
     st.bytes += data;
     publish(size, 0);
+    if (ff7_ip_recording && attribs[0].enabled) // battle 30 fps: x/y/z and u/v of the draw, its record
+        ff7_interp_draw(mode, first, count, attribs[0].ptr, attribs[0].size, attribs[0].type, attribs[0].stride,
+                        attribs[3].enabled ? attribs[3].ptr : NULL, attribs[3].size, attribs[3].type, attribs[3].stride,
+                        rec_buf ? rec_last_draw : -1);
     if (++pending_draws >= wake_batch) {
         pending_draws = 0;
         wake();
@@ -539,6 +624,7 @@ int ff7_texture_upload(GLenum target, GLint level, GLint internalformat, GLsizei
 
 void gq_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h,
                      GLint border, GLenum format, GLenum type, const void * pixels) {
+    if (on_game()) rec_bad(GQ_REC_TEXTURE);
     if (ff7_texture_upload(target, level, internalformat, w, h, format, type, pixels)) return;
     if (on_game()) {
         unsigned bpp = pixel_size(format, type);
@@ -560,6 +646,13 @@ void gq_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w
 void gq_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat * value) {
     if (on_game() && count > 0 && value) {
         ff7_ip_note_words(IP_MATRIX, value, 16 * sizeof(GLfloat));
+        uint32_t p = sh.program;
+        if (count == 1 && !transpose && location >= 0 && location < SH_MATS && p < SH_PROGS) {
+            memcpy(sh.mat[p][location], value, 16 * sizeof(GLfloat));
+            sh.mat_set[p] |= 1u << location;
+        } else {
+            rec_bad(GQ_REC_SHADOW);
+        }
         const uint32_t a[] = { location, count, transpose, 0 };
         queue_call((void *) glUniformMatrix4fv_variants, 4, a, value, (uint32_t) count * 16 * sizeof(GLfloat), 3);
         return;
@@ -662,6 +755,7 @@ void gl_queue_paletted_texture(GLenum target, GLsizei w, GLsizei h, const uint32
     uint32_t len = 1024 + (uint32_t) w * (uint32_t) h;
     uint8_t * d;
     call_t * c = NULL;
+    if (on_game()) rec_bad(GQ_REC_TEXTURE);
     if (on_game() && len <= MAX_PAYLOAD) {
         uint32_t args_end = align8(sizeof(call_t) + 4 * sizeof(uint32_t));
         uint32_t size = args_end + align8(len);
@@ -692,6 +786,7 @@ void gl_queue_paletted_texture(GLenum target, GLsizei w, GLsizei h, const uint32
 }
 
 void gq_glDeleteTextures(GLsizei n, const GLuint * textures) {
+    if (on_game()) rec_bad(GQ_REC_TEXTURE);
     if (on_game() && n > 0 && textures) {
         const uint32_t a[] = { n, 0 };
         queue_call((void *) delete_textures, 2, a, textures, (uint32_t) n * sizeof(GLuint), 1);
@@ -723,32 +818,40 @@ void gq_glPixelStorei(GLenum pname, GLint param) {
         else DIRECT(fn(__VA_ARGS__));                 \
     }
 
-QUEUED_NOTE(glActiveTexture, glActiveTexture, (GLenum texture), ff7_ip_note(IP_ACTIVE_TEX, texture), texture)
-QUEUED_NOTE(glBindFramebuffer, glBindFramebuffer_stat, (GLenum target, GLuint fb), ff7_ip_note_fb(fb), target, fb)
+QUEUED_NOTE(glActiveTexture, glActiveTexture, (GLenum texture),
+            (ff7_ip_note(IP_ACTIVE_TEX, texture), sh_val(SH_ACTIVE, &sh.active, texture)), texture)
+QUEUED_NOTE(glBindFramebuffer, glBindFramebuffer_stat, (GLenum target, GLuint fb),
+            (ff7_ip_note_fb(fb), sh_val(SH_FB, &sh.fb, fb)), target, fb)
 QUEUED(glBindRenderbuffer, glBindRenderbuffer, (GLenum target, GLuint rb), target, rb)
-QUEUED_NOTE(glBindTexture, glBindTexture_oes, (GLenum target, GLuint texture), ff7_ip_note_texture(texture), target,
-            texture)
-QUEUED_NOTE(glBlendFunc, glBlendFunc, (GLenum s, GLenum d), (ff7_ip_note(IP_BLEND_S, s), ff7_ip_note(IP_BLEND_D, d)), s, d)
+QUEUED_NOTE(glBindTexture, glBindTexture_oes, (GLenum target, GLuint texture),
+            (ff7_ip_note_texture(texture), sh_texture(target, texture)), target, texture)
+QUEUED_NOTE(glBlendFunc, glBlendFunc, (GLenum s, GLenum d),
+            (ff7_ip_note(IP_BLEND_S, s), ff7_ip_note(IP_BLEND_D, d), sh.blend_s = s, sh_val(SH_BLEND, &sh.blend_d, d)),
+            s, d)
 QUEUED(glClear, glClear_stat, (GLbitfield mask), mask)
 QUEUED_NOTE(glColorMask, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a),
-            ff7_ip_note(IP_COLOR_MASK, r | g << 1 | b << 2 | a << 3), r, g, b, a)
-QUEUED_NOTE(glCullFace, glCullFace, (GLenum mode), ff7_ip_note(IP_CULL, mode), mode)
+            (ff7_ip_note(IP_COLOR_MASK, r | g << 1 | b << 2 | a << 3), sh.color_mask[0] = r, sh.color_mask[1] = g,
+             sh.color_mask[2] = b, sh_val(SH_COLOR_MASK, &sh.color_mask[3], a)), r, g, b, a)
+QUEUED_NOTE(glCullFace, glCullFace, (GLenum mode), (ff7_ip_note(IP_CULL, mode), sh_val(SH_CULL, &sh.cull, mode)), mode)
 QUEUED(glDeleteShader, glDeleteShader, (GLuint shader), shader)
-QUEUED_NOTE(glDepthFunc, glDepthFunc, (GLenum func), ff7_ip_note(IP_DEPTH_FUNC, func), func)
-QUEUED_NOTE(glDepthMask, glDepthMask, (GLboolean flag), ff7_ip_note(IP_DEPTH_MASK, flag), flag)
-QUEUED_NOTE(glDisable, glDisable, (GLenum cap), ff7_ip_note_cap(cap, 0), cap)
-QUEUED_NOTE(glEnable, glEnable, (GLenum cap), ff7_ip_note_cap(cap, 1), cap)
+QUEUED_NOTE(glDepthFunc, glDepthFunc, (GLenum func),
+            (ff7_ip_note(IP_DEPTH_FUNC, func), sh_val(SH_DEPTH_FUNC, &sh.depth_func, func)), func)
+QUEUED_NOTE(glDepthMask, glDepthMask, (GLboolean flag),
+            (ff7_ip_note(IP_DEPTH_MASK, flag), sh_val(SH_DEPTH_MASK, &sh.depth_mask, flag)), flag)
+QUEUED_NOTE(glDisable, glDisable, (GLenum cap), (ff7_ip_note_cap(cap, 0), sh_cap(cap, 0)), cap)
+QUEUED_NOTE(glEnable, glEnable, (GLenum cap), (ff7_ip_note_cap(cap, 1), sh_cap(cap, 1)), cap)
 QUEUED(glFramebufferRenderbuffer, glFramebufferRenderbuffer,
        (GLenum target, GLenum attachment, GLenum rbtarget, GLuint rb), target, attachment, rbtarget, rb)
 QUEUED(glFramebufferTexture2D, glFramebufferTexture2D,
        (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level),
        target, attachment, textarget, texture, level)
-QUEUED(glFrontFace, glFrontFace, (GLenum mode), mode)
+QUEUED_NOTE(glFrontFace, glFrontFace, (GLenum mode), sh_val(SH_FRONT, &sh.front, mode), mode)
 QUEUED(glRenderbufferStorage, glRenderbufferStorage, (GLenum target, GLenum format, GLsizei w, GLsizei h),
        target, format, w, h)
 QUEUED(glTexParameteri, glTexParameteri_oes, (GLenum target, GLenum pname, GLint param), target, pname, param)
-QUEUED_NOTE(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h), ff7_ip_note_viewport(x, y, w, h), x, y,
-            w, h)
+QUEUED_NOTE(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h),
+            (ff7_ip_note_viewport(x, y, w, h), sh.viewport[0] = x, sh.viewport[1] = y, sh.viewport[2] = w,
+             sh_val(SH_VIEWPORT, &sh.viewport[3], h)), x, y, w, h)
 
 /*
  * glUseProgram / glUniform1i with the values already set are skipped on the
@@ -775,6 +878,7 @@ void gq_glUseProgram(GLuint program) {
         return;
     }
     ff7_ip_note_program(program);
+    sh_val(SH_PROGRAM, &sh.program, program);
     if ((int) program == cur_prog) {
         st.skipped++;
         return;
@@ -790,6 +894,12 @@ void gq_glUniform1i(GLint location, GLint v0) {
         return;
     }
     ff7_ip_note_uniform(location, v0);
+    if (sh.program < SH_PROGS && location >= 0 && location < SH_LOCS) {
+        sh.uni[sh.program][location] = v0;
+        sh.uni_set[sh.program] |= 1u << location;
+    } else {
+        rec_bad(GQ_REC_SHADOW);
+    }
     if (cur_prog >= 0 && cur_prog < CACHE_PROGS && location >= 0 && location < CACHE_LOCS) {
         if (uniform_set[cur_prog][location] && uniform_val[cur_prog][location] == v0) {
             st.skipped++;
@@ -802,23 +912,43 @@ void gq_glUniform1i(GLint location, GLint v0) {
 }
 
 void gq_glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
-    if (on_game()) QUEUE(glClearColor, fbits(r), fbits(g), fbits(b), fbits(a));
-    else DIRECT(glClearColor(r, g, b, a));
+    if (on_game()) {
+        sh.clear_color[0] = fbits(r);
+        sh.clear_color[1] = fbits(g);
+        sh.clear_color[2] = fbits(b);
+        sh_val(SH_CLEAR_COLOR, &sh.clear_color[3], fbits(a));
+        QUEUE(glClearColor, fbits(r), fbits(g), fbits(b), fbits(a));
+        return;
+    }
+    DIRECT(glClearColor(r, g, b, a));
 }
 
 void gq_glClearDepthf(GLfloat depth) {
-    if (on_game()) QUEUE(glClearDepthf, fbits(depth));
-    else DIRECT(glClearDepthf(depth));
+    if (on_game()) {
+        sh_val(SH_CLEAR_DEPTH, &sh.clear_depth, fbits(depth));
+        QUEUE(glClearDepthf, fbits(depth));
+        return;
+    }
+    DIRECT(glClearDepthf(depth));
 }
 
 void gq_glDepthRangef(GLfloat n, GLfloat f) {
-    if (on_game()) QUEUE(glDepthRangef, fbits(n), fbits(f));
-    else DIRECT(glDepthRangef(n, f));
+    if (on_game()) {
+        sh.depth_range[0] = fbits(n);
+        sh_val(SH_DEPTH_RANGE, &sh.depth_range[1], fbits(f));
+        QUEUE(glDepthRangef, fbits(n), fbits(f));
+        return;
+    }
+    DIRECT(glDepthRangef(n, f));
 }
 
 void gq_glLineWidth(GLfloat width) {
-    if (on_game()) QUEUE(glLineWidth, fbits(width));
-    else DIRECT(glLineWidth(width));
+    if (on_game()) {
+        sh_val(SH_LINE_WIDTH, &sh.line_width, fbits(width));
+        QUEUE(glLineWidth, fbits(width));
+        return;
+    }
+    DIRECT(glLineWidth(width));
 }
 
 GLenum gq_glGetError(void) {
@@ -937,4 +1067,174 @@ void gq_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLen
 }
 void gq_glShaderSource(GLuint shader, GLsizei count, const GLchar ** string, const GLint * length) {
     DIRECT(glShaderSource_soloader(shader, count, string, length));
+}
+
+/*
+ * Battle at 30 fps (ff7_interp.c): recording a frame's records and replaying
+ * them, game thread only. A replay sets the state the frame started with
+ * (rec_start[slot], with the game's framebuffer fb_from swapped for fb_to),
+ * then publishes the frame's records again: state changes and draws, the
+ * draws' positions changed by `lerp` on the copy; the original arguments
+ * that pointed into a record (uniform matrices) are moved to the copy.
+ * Records that change textures, framebuffers or objects make the frame
+ * unfit for a replay (nothing is published then).
+ */
+void gq_rec_begin(uint8_t * buf, uint32_t cap, int slot) {
+    if (!on_game()) return;
+    rec_start[slot & 1] = sh;
+    rec_len = 0;
+    rec_unsafe = 0;
+    rec_last_draw = -1;
+    rec_cap = cap;
+    rec_buf = buf;
+}
+
+uint32_t gq_rec_end(uint32_t * unsafe) {
+    rec_buf = NULL;
+    if (unsafe) *unsafe = rec_unsafe;
+    return rec_len;
+}
+
+enum { RK_REFUSE, RK_COPY, RK_SKIP };
+
+static int replay_kind(fn_t fn) {
+    static const fn_t copy[] = {
+        (fn_t) glActiveTexture, (fn_t) glBindFramebuffer_stat, (fn_t) glBindTexture_oes, (fn_t) glBlendFunc,
+        (fn_t) glClear_stat, (fn_t) glColorMask, (fn_t) glCullFace, (fn_t) glDepthFunc, (fn_t) glDepthMask,
+        (fn_t) glDisable, (fn_t) glEnable, (fn_t) glFrontFace, (fn_t) glViewport, (fn_t) glUseProgram_variants,
+        (fn_t) glUniform1i_variants, (fn_t) glUniformMatrix4fv_variants, (fn_t) glClearColor, (fn_t) glClearDepthf,
+        (fn_t) glDepthRangef, (fn_t) glLineWidth, (fn_t) glEnableVertexAttribArray,
+    };
+    static const fn_t skip[] = { // object state the frame left as it is now, or nothing to draw
+        (fn_t) glTexParameteri_oes, (fn_t) glPixelStorei, (fn_t) pool_refill, (fn_t) glBindRenderbuffer,
+    };
+    for (unsigned i = 0; i < sizeof(copy) / sizeof(copy[0]); i++)
+        if (fn == copy[i]) return RK_COPY;
+    for (unsigned i = 0; i < sizeof(skip) / sizeof(skip[0]); i++)
+        if (fn == skip[i]) return RK_SKIP;
+    return RK_REFUSE;
+}
+
+static void emit_state(const gq_shadow * s, uint32_t fb_from, uint32_t fb_to) {
+    if (s->set & SH_FB) QUEUE(glBindFramebuffer_stat, GL_FRAMEBUFFER, s->fb == fb_from ? fb_to : s->fb);
+    for (uint32_t u = 0; u < 2; u++)
+        if (s->tex_set & (1u << u)) {
+            QUEUE(glActiveTexture, GL_TEXTURE0 + u);
+            QUEUE(glBindTexture_oes, s->tex_target[u], s->tex[u]);
+        }
+    if (s->set & SH_ACTIVE) QUEUE(glActiveTexture, s->active);
+    if (s->set & SH_BLEND) QUEUE(glBlendFunc, s->blend_s, s->blend_d);
+    if (s->set & SH_DEPTH_FUNC) QUEUE(glDepthFunc, s->depth_func);
+    if (s->set & SH_DEPTH_MASK) QUEUE(glDepthMask, s->depth_mask);
+    if (s->set & SH_COLOR_MASK) QUEUE(glColorMask, s->color_mask[0], s->color_mask[1], s->color_mask[2], s->color_mask[3]);
+    if (s->set & SH_CULL) QUEUE(glCullFace, s->cull);
+    if (s->set & SH_FRONT) QUEUE(glFrontFace, s->front);
+    if (s->set & SH_VIEWPORT) QUEUE(glViewport, s->viewport[0], s->viewport[1], s->viewport[2], s->viewport[3]);
+    if (s->set & SH_CLEAR_COLOR)
+        QUEUE(glClearColor, s->clear_color[0], s->clear_color[1], s->clear_color[2], s->clear_color[3]);
+    if (s->set & SH_CLEAR_DEPTH) QUEUE(glClearDepthf, s->clear_depth);
+    if (s->set & SH_DEPTH_RANGE) QUEUE(glDepthRangef, s->depth_range[0], s->depth_range[1]);
+    if (s->set & SH_LINE_WIDTH) QUEUE(glLineWidth, s->line_width);
+    for (uint32_t i = 0; i < s->ncaps; i++) {
+        if (s->cap_on[i]) QUEUE(glEnable, s->cap[i]);
+        else QUEUE(glDisable, s->cap[i]);
+    }
+    for (uint32_t p = 1; p < SH_PROGS; p++) {
+        if (!s->uni_set[p] && !s->mat_set[p]) continue;
+        QUEUE(glUseProgram_variants, p);
+        for (uint32_t l = 0; l < SH_LOCS; l++)
+            if (s->uni_set[p] & (1u << l)) QUEUE(glUniform1i_variants, l, (uint32_t) s->uni[p][l]);
+        for (uint32_t m = 0; m < SH_MATS; m++)
+            if (s->mat_set[p] & (1u << m)) {
+                const uint32_t a[] = { m, 1, 0, 0 };
+                queue_call((void *) glUniformMatrix4fv_variants, 4, a, s->mat[p][m], 16 * sizeof(float), 3);
+            }
+    }
+    if (s->set & SH_PROGRAM) QUEUE(glUseProgram_variants, s->program);
+}
+
+int gq_replay(const uint8_t * buf, uint32_t len, int slot, uint32_t fb_from, uint32_t fb_to, gq_lerp_fn lerp,
+              void * ctx) {
+    if (!on_game()) return 0;
+    for (uint32_t off = 0; off < len;) { // all or nothing
+        const uint32_t * e = (const uint32_t *) (buf + off);
+        const hdr_t * h = (const hdr_t *) (e + 2);
+        if (h->op == OP_CALL) {
+            const call_t * c = (const call_t *) h;
+            if (replay_kind(c->fn) == RK_REFUSE) return 0;
+            if (c->fn == (fn_t) glBindFramebuffer_stat && c->a[1] != fb_from) return 0;
+        }
+        off += 8 + e[1];
+    }
+    // A clean target first: it shares the game's depth buffer, which holds the new frame's depths
+    const gq_shadow * s0 = &rec_start[slot & 1];
+    QUEUE(glBindFramebuffer_stat, GL_FRAMEBUFFER, fb_to);
+    QUEUE(glColorMask, 1, 1, 1, 1);
+    QUEUE(glDepthMask, 1);
+    QUEUE(glDisable, GL_SCISSOR_TEST);
+    if (s0->set & SH_CLEAR_COLOR)
+        QUEUE(glClearColor, s0->clear_color[0], s0->clear_color[1], s0->clear_color[2], s0->clear_color[3]);
+    QUEUE(glClearDepthf, fbits(1.0f));
+    QUEUE(glClear_stat, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    emit_state(s0, fb_from, fb_to); // sets again everything above the game had set
+    unsigned draws = 0;
+    for (uint32_t off = 0; off < len;) {
+        const uint32_t * e = (const uint32_t *) (buf + off);
+        uint32_t orig = e[0], size = e[1], at_off = off;
+        const hdr_t * h = (const hdr_t *) (e + 2);
+        off += 8 + size;
+        if (h->op == OP_CALL) {
+            if (replay_kind(((const call_t *) h)->fn) == RK_SKIP) continue;
+            call_t * c = reserve(size);
+            memcpy(c, h, size);
+            for (int i = 0; i < c->h.n; i++)
+                if (c->a[i] - orig < size) c->a[i] = (uint32_t) c + (c->a[i] - orig);
+            if (c->fn == (fn_t) glBindFramebuffer_stat) c->a[1] = fb_to;
+            st.calls++;
+            publish(size, 0);
+        } else if (h->op == OP_DRAW) {
+            draw_t * d = reserve(size);
+            memcpy(d, h, size);
+            for (int i = 0; i < d->h.n; i++) {
+                draw_attr_t * at = &d->attr[i];
+                if (at->index == 0 && at->type == GL_FLOAT)
+                    lerp(ctx, at_off, (uint8_t *) d + at->off, (uint32_t) at->stride, at->size, (uint32_t) d->count,
+                         d->mode);
+            }
+            st.draws++;
+            publish(size, 0);
+            if (++draws % wake_batch == 0) wake();
+        }
+    }
+    wake();
+    return 1;
+}
+
+/*
+ * The in-between frame's target: a w x h RGBA texture in a framebuffer of
+ * its own that shares the game's depth buffer (depth_rb). Run directly on
+ * the game thread with the render thread out, which then finds the
+ * framebuffer and texture bindings the game thread left.
+ */
+int gq_make_target(uint32_t w, uint32_t h, uint32_t depth_rb, uint32_t * fb_out, uint32_t * tex_out) {
+    gl_queue_lock();
+    GLuint tex = 0, fb = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei) w, (GLsizei) h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, sh.set & SH_FB ? sh.fb : 0);
+    uint32_t u = sh.set & SH_ACTIVE ? sh.active - GL_TEXTURE0 : 0;
+    int known = u < 2 && (sh.tex_set & (1u << u));
+    glBindTexture_oes(known ? sh.tex_target[u] : GL_TEXTURE_2D, known ? sh.tex[u] : 0);
+    gl_queue_unlock();
+    *fb_out = fb;
+    *tex_out = tex;
+    return status == GL_FRAMEBUFFER_COMPLETE ? 1 : -(int) status;
 }

@@ -19,6 +19,12 @@
  * counted as a cut (camera cut, scene change) and left out of the
  * displacement figures.
  *
+ * Phase 1: ip_match can also fill map[] (one entry per vertex of B: the
+ * index of its pair among A's vertices, or -1), which the in-between frame
+ * uses to place every vertex halfway; ip_mid then writes those positions,
+ * leaving a whole triangle as in B when one of its vertices has no pair or
+ * jumps more than IP_CUT_PX (vertices thrown off screen by the game).
+ *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
  */
@@ -36,10 +42,11 @@
 
 typedef struct {
     uint32_t key, mode, first, count; // first: index in the frame's vertices
+    uint32_t rec;                     // the caller's tag (phase 1: offset of the draw in the recorded stream)
 } ip_draw;
 
 typedef struct {
-    float x, y;
+    float x, y, z;
     uint32_t u, v; // bit patterns: compared, never computed with
 } ip_vert;
 
@@ -87,9 +94,9 @@ static inline uint32_t ip_mix(uint32_t h, uint32_t w) {
     return h ^ (h >> 13);
 }
 
-// One draw: `count` vertices, x/y floats at pos (stride ps), u/v floats at uv (stride us; NULL: zeros)
+// One draw: `count` vertices, x/y(/z if pos_z) floats at pos (stride ps), u/v floats at uv (stride us; NULL: zeros)
 static inline int ip_add(ip_frame * f, uint32_t key, uint32_t mode, uint32_t count, const uint8_t * pos, uint32_t ps,
-                         const uint8_t * uv, uint32_t us) {
+                         int pos_z, const uint8_t * uv, uint32_t us, uint32_t rec) {
     if (f->nd >= f->maxd || count > f->maxv - f->nv) {
         f->overflow = 1;
         return 0;
@@ -99,9 +106,11 @@ static inline int ip_add(ip_frame * f, uint32_t key, uint32_t mode, uint32_t cou
     d->mode = mode;
     d->first = f->nv;
     d->count = count;
+    d->rec = rec;
     ip_vert * o = f->v + f->nv;
     for (uint32_t i = 0; i < count; i++) {
-        memcpy(&o[i].x, pos + i * ps, 8);
+        memcpy(&o[i].x, pos + i * ps, pos_z ? 12 : 8);
+        if (!pos_z) o[i].z = 0.0f;
         if (uv) memcpy(&o[i].u, uv + i * us, 8);
         else o[i].u = o[i].v = 0;
     }
@@ -115,8 +124,18 @@ typedef struct {
     float dmax;
 } ip_disp;
 
+// 0: count moving and jumping vertices only (cuts), without the distances' square roots, sum and maximum
+static int ip_measure = 1;
+
 static inline void ip_moved(const ip_vert * a, const ip_vert * b, ip_disp * p) {
     float dx = b->x - a->x, dy = b->y - a->y;
+    if (!ip_measure) {
+        float d2 = dx * dx + dy * dy;
+        if (!(d2 > IP_MOVE_PX * IP_MOVE_PX)) return;
+        p->moving++;
+        if (d2 > IP_CUT_PX * IP_CUT_PX) p->far++;
+        return;
+    }
     float d = sqrtf(dx * dx + dy * dy);
     if (!(d > IP_MOVE_PX)) return; // also NaN
     p->moving++;
@@ -137,9 +156,10 @@ static inline uint32_t ip_tri_hash(const ip_vert * t) {
     return h ? h : 1;
 }
 
-// Triangles of b paired with triangles of a by u/v; returns the vertices matched (or -1: table too small)
+// Triangles of b paired with triangles of a by u/v; returns the vertices matched (or -1: table too small).
+// map (if set): b's vertices get a_first + their pair's index in a
 static inline int64_t ip_match_tris(const ip_vert * a, uint32_t na, const ip_vert * b, uint32_t nb, ip_scratch * s,
-                                    ip_disp * p) {
+                                    ip_disp * p, int32_t * map, uint32_t a_first) {
     uint32_t ta = na / 3, tb = nb / 3, size = 16;
     while (size < 2 * ta) size <<= 1;
     if (size > s->tri_size) return -1;
@@ -162,6 +182,8 @@ static inline int64_t ip_match_tris(const ip_vert * a, uint32_t na, const ip_ver
             if (!ip_same_uv(at, bt, 3)) continue;
             e->tri |= 0x80000000u;
             for (int k = 0; k < 3; k++) ip_moved(at + k, bt + k, p);
+            if (map)
+                for (int k = 0; k < 3; k++) map[3 * t + k] = (int32_t) (a_first + 3 * (e->tri & 0x7fffffffu) - 3 + k);
             matched += 3;
             break;
         }
@@ -169,12 +191,16 @@ static inline int64_t ip_match_tris(const ip_vert * a, uint32_t na, const ip_ver
     return matched;
 }
 
-// Matches B with A and adds the figures to st
-static inline void ip_match(const ip_frame * A, const ip_frame * B, ip_scratch * s, ip_stats * st) {
+// Matches B with A and adds the figures to st. map (if set, B->nv entries):
+// each vertex of B gets the index of its pair among A's vertices, or -1.
+// Returns 1 for a cut (or overflowing frames), 0 otherwise.
+static inline int ip_match(const ip_frame * A, const ip_frame * B, ip_scratch * s, ip_stats * st, int32_t * map) {
     if (A->overflow || B->overflow) {
         st->overflows++;
-        return;
+        return 1;
     }
+    if (map)
+        for (uint32_t i = 0; i < B->nv; i++) map[i] = -1;
     // Keys of A: per key, its draws in order (head, then next[])
     uint32_t kmask = s->key_size - 1;
     for (uint32_t i = 0; i <= kmask; i++) s->keys[i].head = -2; // empty
@@ -204,9 +230,11 @@ static inline void ip_match(const ip_frame * A, const ip_frame * B, ip_scratch *
         const ip_vert * av = A->v + ad->first, * bv = B->v + bd->first;
         if (ad->mode == bd->mode && ad->count == bd->count && ip_same_uv(av, bv, bd->count)) {
             for (uint32_t v = 0; v < bd->count; v++) ip_moved(av + v, bv + v, &p);
+            if (map)
+                for (uint32_t v = 0; v < bd->count; v++) map[bd->first + v] = (int32_t) (ad->first + v);
             fast += bd->count;
         } else if (ad->mode == IP_TRIANGLES && bd->mode == IP_TRIANGLES) {
-            int64_t m = ip_match_tris(av, ad->count, bv, bd->count, s, &p);
+            int64_t m = ip_match_tris(av, ad->count, bv, bd->count, s, &p, map ? map + bd->first : NULL, ad->first);
             if (m < 0) m = 0;
             by_uv += (uint64_t) m;
             unmatched += bd->count - (uint64_t) m;
@@ -223,12 +251,46 @@ static inline void ip_match(const ip_frame * A, const ip_frame * B, ip_scratch *
     st->unmatched += unmatched;
     if (p.moving > 100 && 2 * p.far > p.moving) {
         st->cuts++;
-        return;
+        return 1;
     }
     st->moving += p.moving;
     st->far += p.far;
     st->dsum += p.dsum;
     if (p.dmax > st->dmax) st->dmax = p.dmax;
+    return 0;
+}
+
+static inline int ip_near(const ip_vert * a, float bx, float by) {
+    float dx = bx - a->x, dy = by - a->y;
+    return dx * dx + dy * dy <= IP_CUT_PX * IP_CUT_PX; // false for NaN
+}
+
+/*
+ * The in-between positions of one draw of B: `count` vertices whose x, y
+ * (and z if pos_z) floats are at pos (stride ps), B's own values; map[i]:
+ * the pair of vertex i among A's vertices (av) or -1. Triangles (mode
+ * IP_TRIANGLES) move only if their 3 vertices have a pair near enough;
+ * other primitives vertex by vertex. Returns the vertices moved.
+ */
+static inline uint32_t ip_mid(uint8_t * pos, uint32_t ps, int pos_z, uint32_t count, uint32_t mode, const int32_t * map,
+                              const ip_vert * av) {
+    uint32_t moved = 0, group = mode == IP_TRIANGLES ? 3 : 1;
+    for (uint32_t i = 0; i + group <= count; i += group) {
+        float b[3][3] = { { 0 } };
+        int ok = 1;
+        for (uint32_t k = 0; k < group && ok; k++) {
+            memcpy(b[k], pos + (i + k) * ps, pos_z ? 12 : 8);
+            ok = map[i + k] >= 0 && ip_near(av + map[i + k], b[k][0], b[k][1]);
+        }
+        if (!ok) continue;
+        for (uint32_t k = 0; k < group; k++) {
+            const ip_vert * a = av + map[i + k];
+            float m[3] = { 0.5f * (a->x + b[k][0]), 0.5f * (a->y + b[k][1]), 0.5f * (a->z + b[k][2]) };
+            memcpy(pos + (i + k) * ps, m, pos_z ? 12 : 8);
+        }
+        moved += group;
+    }
+    return moved;
 }
 
 #endif // FF7_INTERP_CORE_H

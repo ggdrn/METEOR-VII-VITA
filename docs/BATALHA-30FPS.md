@@ -306,3 +306,76 @@ os buffers. A medição viu ~13,6 quadros/s, o ritmo da batalha.
 e o mais favorável (~99% casado, movimento contínuo e pequeno). As magias
 ganham quase tudo. As invocações ganham parcialmente e caem para cópia nos
 cortes.
+
+## 9. Fase 1 implementada (v0.6.41): protótipo do quadro intermediário
+
+`source/ff7_interp.c`, `source/ff7_interp_core.h` e o bloco "Battle at 30
+fps" no fim de `source/reimpl/gl_queue.c`.
+
+**Como cada quadro de batalha sai:**
+
+1. **Gravação.** Enquanto o jogo desenha o quadro N+1, a fila de render
+   grava uma cópia de cada registro que a thread do jogo publica: mudanças
+   de estado e desenhos com os vértices. Também guarda o estado GL do
+   início do quadro, com os valores reais: framebuffer, texturas das
+   unidades 0 e 1, blend, profundidade, máscaras, cull, viewport, cores de
+   limpeza, enables, programa, uniforms e matrizes por programa.
+2. **Casamento.** Em `SwapBuffers`, N+1 é casado com N como na fase 0, agora
+   gerando o mapa vértice de N+1 → vértice de N.
+3. **Quadro M.** Se o quadro serve, ele é desenhado de novo num framebuffer
+   próprio, M (textura 1024×512 que divide o buffer de profundidade com o do
+   jogo). A sequência: limpar M, repor o estado do início do quadro, repetir
+   os registros com o framebuffer do jogo trocado por M e cada posição no
+   meio do caminho. Um triângulo com vértice sem par, ou que salta mais de
+   96 px, fica como em N+1.
+4. **Apresentação.** `VIDEO_update` roda com a textura do jogo trocada pela
+   de M na sua struct (`[GOT 0xF4C97C]` +12), e a thread principal mostra
+   M. Meio quadro de batalha (33,3 ms) depois, `VIDEO_update` roda de novo,
+   agora com a textura do jogo, e aparece N+1. A composição (zoom, bordas,
+   botões de toque) é a do próprio jogo.
+
+**Quando o quadro sai como está (15 fps naquele quadro):**
+
+| Motivo | Quando acontece |
+|---|---|
+| `cut` | corte de câmera |
+| `textures` | o quadro enviou ou apagou textura |
+| `other state` | estado fora do que a sombra guarda, ou desenho grande demais para a fila |
+| `overflow` | mais de 2.048 desenhos, 32.768 vértices ou 1 MB de registros |
+| `not replayable` | uma chamada que não pode ser repetida |
+| `late` | o quadro chegou tarde para mostrar M meio quadro depois do anterior |
+
+**Limite desta fase.** A thread do jogo fica presa no gancho durante os 33
+ms entre M e N+1, porque `VIDEO_update` só volta quando a thread principal
+libera. Então só dá para interpolar quando o trabalho do quadro mais o
+casamento e a repetição cabem em ~30 ms. Na batalha comum o trabalho é de
+21–25 ms: fica apertado. O log mostra quantos quadros saem `late`. Se forem
+muitos, a fase 2 libera o jogo durante a espera, o que exige refazer a
+sincronização de `ff7_DrawFrame`.
+
+**O log em batalha, a cada 5 s:**
+
+```
+battle 30 fps: F battle frames, I interpolated | not: C cut, L late, T textures, ... |
+  in-between shown X ms after the last frame, new frame Y ms after it | hook ..., matching ..., replay ...
+battle 30 fps matching: (os números da fase 0)
+```
+
+Com tudo certo, X e Y ficam perto de 33 ms, e `interpolated` perto do
+total de quadros.
+
+**Controles:**
+
+- Menu do port: **"A/B BATALHA A 30 FPS (INTERPOLACAO): SIM/NAO"** liga e
+  desliga na hora, inclusive no meio da batalha, para comparar.
+- `ux0:data/ffvii-vita/battle_30fps_off.txt`: começa desligada (a medição
+  continua no log).
+- `ux0:data/ffvii-vita/interp_probe_off.txt`: desliga tudo.
+
+**O que observar no teste:**
+
+- triângulos faltando ou piscando no quadro M;
+- modelos "esticados" por um quadro;
+- efeitos e menus em lugares errados;
+- se o ritmo fica regular (sem quadros em pares);
+- se a batalha continua na velocidade certa.
