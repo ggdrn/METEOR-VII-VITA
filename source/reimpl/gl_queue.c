@@ -45,6 +45,7 @@
 #include "reimpl/gl_queue.h"
 
 #include "reimpl/gl_variants.h"
+#include "ff7_interp.h"
 #include "utils/cpu.h"
 #include "utils/glstats.h"
 #include "utils/glutil.h"
@@ -410,6 +411,9 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         DIRECT((active ? apply_attribs() : (void) 0, glDrawArrays_stat(mode, first, count)));
         return;
     }
+    if (ff7_ip_recording && attribs[0].enabled) // battle 30 fps probe: x/y and u/v of the draw
+        ff7_interp_draw(mode, first, count, attribs[0].ptr, attribs[0].size, attribs[0].type, attribs[0].stride,
+                        attribs[3].enabled ? attribs[3].ptr : NULL, attribs[3].size, attribs[3].type, attribs[3].stride);
     // Bytes each enabled array reads for vertices first .. first + count - 1
     int n = 0;
     uint8_t idx[MAX_ATTRIBS];
@@ -555,6 +559,7 @@ void gq_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w
 
 void gq_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat * value) {
     if (on_game() && count > 0 && value) {
+        ff7_ip_note_words(IP_MATRIX, value, 16 * sizeof(GLfloat));
         const uint32_t a[] = { location, count, transpose, 0 };
         queue_call((void *) glUniformMatrix4fv_variants, 4, a, value, (uint32_t) count * 16 * sizeof(GLfloat), 3);
         return;
@@ -711,19 +716,28 @@ void gq_glPixelStorei(GLenum pname, GLint param) {
         else DIRECT(fn(__VA_ARGS__));       \
     }
 
-QUEUED(glActiveTexture, glActiveTexture, (GLenum texture), texture)
-QUEUED(glBindFramebuffer, glBindFramebuffer_stat, (GLenum target, GLuint fb), target, fb)
+// The same, noting the state for the battle 30 fps probe (ff7_interp.c) on the game thread
+#define QUEUED_NOTE(name, fn, params, note, ...)       \
+    void gq_##name params {                           \
+        if (on_game()) { note; QUEUE(fn, __VA_ARGS__); } \
+        else DIRECT(fn(__VA_ARGS__));                 \
+    }
+
+QUEUED_NOTE(glActiveTexture, glActiveTexture, (GLenum texture), ff7_ip_note(IP_ACTIVE_TEX, texture), texture)
+QUEUED_NOTE(glBindFramebuffer, glBindFramebuffer_stat, (GLenum target, GLuint fb), ff7_ip_note_fb(fb), target, fb)
 QUEUED(glBindRenderbuffer, glBindRenderbuffer, (GLenum target, GLuint rb), target, rb)
-QUEUED(glBindTexture, glBindTexture_oes, (GLenum target, GLuint texture), target, texture)
-QUEUED(glBlendFunc, glBlendFunc, (GLenum s, GLenum d), s, d)
+QUEUED_NOTE(glBindTexture, glBindTexture_oes, (GLenum target, GLuint texture), ff7_ip_note_texture(texture), target,
+            texture)
+QUEUED_NOTE(glBlendFunc, glBlendFunc, (GLenum s, GLenum d), (ff7_ip_note(IP_BLEND_S, s), ff7_ip_note(IP_BLEND_D, d)), s, d)
 QUEUED(glClear, glClear_stat, (GLbitfield mask), mask)
-QUEUED(glColorMask, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a), r, g, b, a)
-QUEUED(glCullFace, glCullFace, (GLenum mode), mode)
+QUEUED_NOTE(glColorMask, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a),
+            ff7_ip_note(IP_COLOR_MASK, r | g << 1 | b << 2 | a << 3), r, g, b, a)
+QUEUED_NOTE(glCullFace, glCullFace, (GLenum mode), ff7_ip_note(IP_CULL, mode), mode)
 QUEUED(glDeleteShader, glDeleteShader, (GLuint shader), shader)
-QUEUED(glDepthFunc, glDepthFunc, (GLenum func), func)
-QUEUED(glDepthMask, glDepthMask, (GLboolean flag), flag)
-QUEUED(glDisable, glDisable, (GLenum cap), cap)
-QUEUED(glEnable, glEnable, (GLenum cap), cap)
+QUEUED_NOTE(glDepthFunc, glDepthFunc, (GLenum func), ff7_ip_note(IP_DEPTH_FUNC, func), func)
+QUEUED_NOTE(glDepthMask, glDepthMask, (GLboolean flag), ff7_ip_note(IP_DEPTH_MASK, flag), flag)
+QUEUED_NOTE(glDisable, glDisable, (GLenum cap), ff7_ip_note_cap(cap, 0), cap)
+QUEUED_NOTE(glEnable, glEnable, (GLenum cap), ff7_ip_note_cap(cap, 1), cap)
 QUEUED(glFramebufferRenderbuffer, glFramebufferRenderbuffer,
        (GLenum target, GLenum attachment, GLenum rbtarget, GLuint rb), target, attachment, rbtarget, rb)
 QUEUED(glFramebufferTexture2D, glFramebufferTexture2D,
@@ -733,7 +747,8 @@ QUEUED(glFrontFace, glFrontFace, (GLenum mode), mode)
 QUEUED(glRenderbufferStorage, glRenderbufferStorage, (GLenum target, GLenum format, GLsizei w, GLsizei h),
        target, format, w, h)
 QUEUED(glTexParameteri, glTexParameteri_oes, (GLenum target, GLenum pname, GLint param), target, pname, param)
-QUEUED(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h), x, y, w, h)
+QUEUED_NOTE(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h), ff7_ip_note_viewport(x, y, w, h), x, y,
+            w, h)
 
 /*
  * glUseProgram / glUniform1i with the values already set are skipped on the
@@ -759,6 +774,7 @@ void gq_glUseProgram(GLuint program) {
         DIRECT(glUseProgram_variants(program));
         return;
     }
+    ff7_ip_note_program(program);
     if ((int) program == cur_prog) {
         st.skipped++;
         return;
@@ -773,6 +789,7 @@ void gq_glUniform1i(GLint location, GLint v0) {
         DIRECT(glUniform1i_variants(location, v0));
         return;
     }
+    ff7_ip_note_uniform(location, v0);
     if (cur_prog >= 0 && cur_prog < CACHE_PROGS && location >= 0 && location < CACHE_LOCS) {
         if (uniform_set[cur_prog][location] && uniform_val[cur_prog][location] == v0) {
             st.skipped++;

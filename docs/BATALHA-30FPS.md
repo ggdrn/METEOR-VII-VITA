@@ -152,11 +152,14 @@ lógica depois do que hoje.
 
 ## 5. Riscos e pontos a confirmar
 
-1. **Sincronização com a thread do jogo.** É preciso saber se a thread do
-   jogo espera o `sem_post` de `ff7_DrawFrame` antes de começar o próximo
-   quadro. Se esperar, o passo 4 de 4.3 tem de vir antes da espera de
-   33 ms. Senão o jogo cai para ~10 fps. Por isso a cópia R no passo 1: o
-   próximo quadro do jogo sobrescreve o framebuffer.
+1. **Sincronização com a thread do jogo** (respondido na fase 0, lendo o
+   código). A thread do jogo fecha cada quadro em `fw_SwapBuffers` →
+   `VIDEO_update`, e ela mesma desenha o framebuffer fora da tela na tela.
+   Depois dá `sem_post` (quadro pronto) e **espera** em `sem_wait` até o
+   próximo `ff7_DrawFrame` da thread principal soltá-la. Ou seja, o jogo
+   espera a tela. O passo 4 de 4.3 (liberar o jogo) tem de vir antes da
+   espera de 33 ms, senão o jogo cai para ~10 fps. Por isso a cópia R no
+   passo 1: o próximo quadro do jogo sobrescreve o framebuffer.
 2. **Estabilidade dos desenhos entre quadros.** O jogo junta vértices por
    estado. Se os lotes mudam de composição a cada quadro (recorte de
    triângulos, ordenação de transparências), sobra o casamento por uv. Se
@@ -206,3 +209,55 @@ cópia R e composição em dois swaps, ligado por
 
 O que não muda em nenhuma fase: a lógica da batalha, as velocidades e o
 save. Desligando o arquivo, tudo volta ao que é hoje.
+
+## 7. Fase 0 implementada (v0.6.39)
+
+`source/ff7_interp.c` e `source/ff7_interp_core.h`. Não muda nada na tela.
+
+**Como funciona:**
+
+- **Estado:** `gl_queue.c` anota, na thread do jogo, o estado GL de cada
+  chamada: framebuffer, textura, blend, profundidade, programa, uniforms,
+  matriz, viewport, cull e máscara de cor.
+- **Gravação:** em batalha (modo 2), cada `glDrawArrays` da thread do jogo
+  no framebuffer do jogo grava a chave de estado (um hash), a primitiva e o
+  x, y, u, v de cada vértice.
+- **Fim do quadro:** `fw_SwapBuffers` é interceptada (ela só faz
+  `VIDEO_update(); return 1;`). Na entrada, o quadro que terminou é casado
+  com o anterior. Os desenhos da composição na tela, que vêm logo depois
+  (o primeiro framebuffer que `VIDEO_update` liga), ficam de fora.
+- **Memória:** os buffers (1,4 MB, um bloco de memória) são alocados na
+  primeira batalha. Cabem 2.048 desenhos e 32.768 vértices por quadro; um
+  quadro maior conta como `overflows`.
+
+**O que medir:** uma batalha comum e uma com magias, limits e
+invocações. A cada 5 s em batalha, o log mostra:
+
+```
+interp probe (battle): F frames (P matched pairs, C cuts, O overflows) |
+  draws/frame D, matched X% (T triangle lists, N other) |
+  vertices/frame V: same mesh A%, by u/v B%, unmatched U% |
+  moving M% of matched, mean m px, max x px, jumps > 96 px J |
+  skipped S screen draws, K other formats (screen fb F) | cost c ms/frame
+```
+
+| Campo | O que é |
+|---|---|
+| `same mesh` | desenhos casados com os mesmos vértices na mesma ordem (o caso rápido, esperado nos modelos) |
+| `by u/v` | triângulos casados pelo hash das uv (ordem ou contagem mudaram) |
+| `unmatched` | vértices que, no quadro intermediário, ficariam como no quadro novo |
+| `moving` | dos casados, quantos se movem; `mean`/`max` em pixels da tela do jogo |
+| `cuts` | pares de quadros em que a maioria pula mais de 96 px (cortes de câmera) |
+| `cost` | tempo do casamento por quadro, na thread do jogo (só nesta medição) |
+
+**Como ler:**
+
+- **Seguir para a fase 1:** `same mesh` + `by u/v` acima de ~85% e quase
+  todo o movimento entre os casados.
+- **Ruim:** muito `unmatched` em quadros com movimento. Nesse caso o log
+  mostra quanto e em que tipo de desenho (`triangle lists` / `other`).
+
+Desligar: `ux0:data/ffvii-vita/interp_probe_off.txt`.
+
+Teste do casamento no Mac (quadros sintéticos com resposta conhecida):
+`cc -O2 -I source scripts/test_interp.c -o /tmp/ti -lm && /tmp/ti`.
