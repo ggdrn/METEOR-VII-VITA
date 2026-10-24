@@ -1435,3 +1435,25 @@ detectadas.
 
 Desligar: `ux0:data/ffvii-vita/vcolor_off.txt`. O log mostra a cada 5 s
 `vertex colors/s: ... sets, ... colors, ... paletted sets (native)`.
+
+## v0.6.38: matérias de invocação pelo menu do port
+
+Para medir as invocações na batalha sem ter chegado a elas no jogo, o menu do
+port (L + R + Start) ganhou **"MATERIAS DE INVOCACAO (TODAS, MASTER)"**.
+Ele põe no inventário de matérias as 17 invocações, de Choco/Mog (0x4A) a
+Invocação Mestre (0x5A), todas com AP máximo (0xFFFFFF, nível máximo), para
+cada uma poder ser usada várias vezes por batalha. Os IDs foram conferidos
+nos nomes de matéria do `kernel2.bin` do jogo.
+
+- O inventário fica em `0xDC04B4` (`savemap+0x77C`): 200 entradas de 4
+  bytes, `id | AP << 8`, com -1 marcando vaga livre. A própria rotina do
+  jogo que adiciona matéria (`0x5C864B`) usa o mesmo formato.
+- Só entram as que ainda não estão no inventário, nas primeiras vagas
+  livres. Apertar de novo não duplica. Matérias equipadas nos personagens
+  não são verificadas: uma invocação equipada ganha uma cópia no inventário.
+- Funciona num campo ou no mapa-múndi, entre quadros, na thread do jogo. O
+  log mostra `port menu: summon materia: N added (mastered), ...`.
+- Salvar depois mantém as matérias no save.
+
+O menu passou de 17 para 18 itens (linhas de 23 para 22 px; a caixa termina
+na linha 530 de 544).

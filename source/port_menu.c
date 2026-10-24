@@ -106,6 +106,11 @@ extern so_module so_mod;
 #define VA_WM_VEHICLES 0xdc095bu // savemap 0xC23: vehicles on the world map (script bits 0x3F8..)
 #define VA_WM_SUB 0xdc0c2eu // script bit 0x1A92 (byte 0x352 of the bank, 0x04): submarine
 #define VA_WM_NO_BUGGY 0xdc0aabu // script bit 0xE7F (0x80): no buggy when entering from a field
+#define VA_MATERIA 0xdc04b4u // savemap 0x77C: 200 materia, id | AP << 8 (-1: empty slot)
+#define NUM_MATERIA 200
+#define SUMMON_FIRST 0x4a      // Choco/Mog .. Master Summon (kernel2.bin materia names)
+#define SUMMON_LAST  0x5a
+#define AP_MASTER 0xffffffu    // the most a materia holds: every summon at its top level
 #define SCENES_PATH DATA_PATH "cenas.txt"
 #define MAX_SCENES 16
 
@@ -147,7 +152,7 @@ static const minigame games[] = {
     { "SNOWBOARD (FLIPERAMA)",      6,   0, 507,  -37,  273, 26 }, // games_2
 };
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
-enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
+enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, NUM_ITEMS };
 
 static const uint32_t * memmap;
@@ -173,6 +178,16 @@ static volatile int recording = -1; // scene being profiled
 static volatile int jumping;        // map jump written, waiting for it to end
 static volatile int world_request = -1; // vehicle to go to the world map in
 static int vehicle_cursor; // main thread
+/*
+ * Summon materia (v0.6.38): "MATERIAS DE INVOCACAO" puts the 17 summons
+ * (ids 0x4A-0x5A) in the materia inventory, mastered, to measure every
+ * summon in battle. Only the ones not in the inventory yet, in its first
+ * empty slots, as the game's own "add materia" does (0x5C864B: the id in the
+ * low byte, -1 = empty); materia equipped on a character is not looked at.
+ * From a field or the world map, between frames on the game thread. Saving
+ * afterwards keeps them.
+ */
+static volatile int summons_request;
 static scene scenes[MAX_SCENES];
 // A/B tests: wanted (main thread) and applied (game thread) states
 static volatile int ab_want[3] = { 1, 1, 1 }; // minigame natives, 30 fps cap, texture cache
@@ -429,6 +444,35 @@ void port_menu_game_tick(void) {
         }
     }
 
+    if (summons_request) {
+        summons_request = 0;
+        uint8_t * inv = x86(VA_MATERIA);
+        if (!inv || (mode != MODE_FIELD && mode != 3)) {
+            l_warn("port menu: summon materia not added (mode %d)", mode);
+        } else {
+            int have[SUMMON_LAST - SUMMON_FIRST + 1] = { 0 }, added = 0, full = 0;
+            for (int i = 0; i < NUM_MATERIA; i++) {
+                uint32_t m = (uint32_t) get32(inv + 4 * i);
+                if (m != 0xffffffffu && (m & 0xff) >= SUMMON_FIRST && (m & 0xff) <= SUMMON_LAST)
+                    have[(m & 0xff) - SUMMON_FIRST] = 1;
+            }
+            int slot = 0;
+            for (int id = SUMMON_FIRST; id <= SUMMON_LAST; id++) {
+                if (have[id - SUMMON_FIRST]) continue;
+                while (slot < NUM_MATERIA && (uint32_t) get32(inv + 4 * slot) != 0xffffffffu) slot++;
+                if (slot == NUM_MATERIA) {
+                    full++;
+                    continue;
+                }
+                uint32_t m = (uint32_t) id | AP_MASTER << 8;
+                memcpy(inv + 4 * slot, &m, 4);
+                added++;
+            }
+            l_info("port menu: summon materia: %d added (mastered), %d already in the inventory, %d without a free slot",
+                   added, SUMMON_LAST - SUMMON_FIRST + 1 - added - full, full);
+        }
+    }
+
     int r = request;
     if (r >= 0) {
         uint8_t * c = mode == MODE_FIELD ? control_block() : NULL;
@@ -545,6 +589,13 @@ static void activate(int item) {
             open = 0;
             wait_release = 1;
         }
+    } else if (item == ITEM_SUMMONS) {
+        if (game_mode != MODE_FIELD && game_mode != 3) {
+            set_message("SO NUM CAMPO OU NO MAPA-MUNDI");
+        } else {
+            summons_request = 1;
+            set_message("INVOCACOES NO INVENTARIO (VER O LOG)");
+        }
     } else if (item >= ITEM_AB_NATIVES && item <= ITEM_AB_TEXCACHE) {
         int k = item - ITEM_AB_NATIVES;
         ab_want[k] = !ab_want[k];
@@ -659,7 +710,7 @@ static const glyph font[] = {
 
 #define SCALE   3
 #define ADVANCE (6 * SCALE)
-#define LINE_H  23 // 17 items fit in 544 lines
+#define LINE_H  22 // 18 items fit in 544 lines
 #define MAX_VERTICES 30000
 
 static float verts[MAX_VERTICES * 2];
@@ -765,7 +816,7 @@ void port_menu_draw(void) {
 
     char line[64];
     if (open) {
-        const float x0 = 120, y0 = 16, x1 = 840; // 17 items: the box ends at 529 of 544 lines
+        const float x0 = 120, y0 = 16, x1 = 840; // 18 items: the box ends at 530 of 544 lines
         const float y1 = y0 + 30 + (NUM_ITEMS + 4) * LINE_H;
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
@@ -792,6 +843,8 @@ void port_menu_draw(void) {
                              scenes[scene_cursor].mode);
             } else if (i == ITEM_WORLD) {
                 snprintf(line, sizeof(line), "MAPA-MUNDI < %s >", vehicles[vehicle_cursor].name);
+            } else if (i == ITEM_SUMMONS) {
+                label = "MATERIAS DE INVOCACAO (TODAS, MASTER)";
             } else if (i == ITEM_AB_NATIVES) {
                 snprintf(line, sizeof(line), "A/B NATIVOS DOS MINI-GAMES: %s", ab_want[0] ? "SIM" : "NAO");
             } else if (i == ITEM_AB_CAP) {
@@ -804,7 +857,9 @@ void port_menu_draw(void) {
             else label = "FECHAR";
             if (i == cursor) rect(x0 + 10, y - 6, x1 - 10, y + 7 * SCALE + 6, RGBA(60, 90, 170, 255));
             int needs_field = i < NUM_GAMES || i == ITEM_GOTO || i == ITEM_WORLD || i == ITEM_TITLE;
-            uint32_t color = needs_field && game_mode != MODE_FIELD ? RGBA(130, 130, 140, 255) : RGBA(255, 255, 255, 255);
+            int greyed = (needs_field && game_mode != MODE_FIELD)
+                         || (i == ITEM_SUMMONS && game_mode != MODE_FIELD && game_mode != 3);
+            uint32_t color = greyed ? RGBA(130, 130, 140, 255) : RGBA(255, 255, 255, 255);
             text(x0 + 30, y, label, color);
         }
         y += 6;
