@@ -1377,3 +1377,24 @@ hangar do Highwind, doca do submarino); que o Highwind sai voando e o
 submarino na superfície; e se algum outro estado da história (por exemplo,
 discos 1/2, o bit `0xE7F` ou o progresso `savemap+0xBA4`) impede a criação
 do veículo. Se não embarcar, o log mostra o que foi escrito.
+
+## v0.6.36: mapa-múndi, triângulos em blocos (`ff7_world_tri.h`)
+
+O profile da v0.6.35 (mapa-múndi com batalhas) mostrou `world_tri_run`
+(0x75F68C) com 31.9% da thread do jogo no mapa-múndi. Um histograma de
+instruções no emulador (`WORLD_COST=1 test_world_tri.py`) mostrou que a
+tradução de endereços dominava. Mudanças, todas exatas:
+
+- leituras e escritas por bloco (`wt_block`/`wt_get`/`wt_put`): uma tradução
+  por registro (triângulo, entrada da lista, vértice de saída) em vez de uma
+  por campo, com volta ao caminho byte a byte quando o registro cruza página;
+- uv, normais e a cor lidos e escritos pelo ponteiro do frame (`fr`), checado
+  uma vez por chamada;
+- vértices de saída montados em bloco, com os produtos em float;
+- 0x68DAE1 (luz por vértice) chamado direto, com os argumentos escritos no
+  frame.
+
+Resultado no emulador: 0 divergências em 300 malhas (9075 triângulos), e
+**1602 → 1011 instruções ARM por triângulo** no código nativo (o código do
+.so chamado: 869 → 805). Mutações nos índices, na textura e no frame da
+chamada são detectadas.
