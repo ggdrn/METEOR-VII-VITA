@@ -144,9 +144,9 @@ static struct {
  * before and after it.
  */
 #define SH_CAPS  16
-#define SH_PROGS 16
-#define SH_LOCS  16
-#define SH_MATS  16
+#define SH_UNITS 8
+#define SH_UNIS  128 // uniform values set (program, location), any ids
+#define SH_MATS  32  // uniform matrices set (program, location)
 enum {
     SH_FB = 1, SH_ACTIVE = 2, SH_BLEND = 4, SH_DEPTH_FUNC = 8, SH_DEPTH_MASK = 0x10, SH_COLOR_MASK = 0x20,
     SH_CULL = 0x40, SH_FRONT = 0x80, SH_VIEWPORT = 0x100, SH_CLEAR_COLOR = 0x200, SH_CLEAR_DEPTH = 0x400,
@@ -157,20 +157,31 @@ typedef struct {
     uint32_t set;
     uint32_t fb, active, blend_s, blend_d, depth_func, depth_mask, color_mask[4], cull, front, viewport[4];
     uint32_t clear_color[4], clear_depth, depth_range[2], line_width, program;
-    uint32_t tex[2], tex_target[2], tex_set; // texture units 0 and 1
+    uint32_t tex[SH_UNITS], tex_target[SH_UNITS], tex_set;
     uint32_t ncaps, cap[SH_CAPS], cap_on[SH_CAPS];
-    uint16_t uni_set[SH_PROGS], mat_set[SH_PROGS];
-    int32_t uni[SH_PROGS][SH_LOCS];
-    float mat[SH_PROGS][SH_MATS][16];
+    uint32_t nunis, nmats;
+    struct { uint32_t prog; int32_t loc, val; } uni[SH_UNIS];
+    struct { uint32_t prog; int32_t loc; float m[16]; } mat[SH_MATS];
 } gq_shadow;
 
 static gq_shadow sh, rec_start[2]; // game thread only
 static uint8_t * rec_buf;          // recording: [original address, size, record] entries
 static uint32_t rec_cap, rec_len, rec_unsafe;
 static int32_t rec_last_draw = -1;
+static gq_rec_why rec_why;         // the first reason the recording cannot be replayed
+
+static inline void rec_bad_why(uint32_t why, uint32_t kind, uint32_t a, uint32_t b) {
+    if (!rec_buf) return;
+    if (!rec_unsafe) {
+        rec_why.kind = kind;
+        rec_why.a = a;
+        rec_why.b = b;
+    }
+    rec_unsafe |= why;
+}
 
 static inline void rec_bad(uint32_t why) {
-    if (rec_buf) rec_unsafe |= why;
+    rec_bad_why(why, why == GQ_REC_TEXTURE ? GQ_WHY_TEXTURE : why == GQ_REC_DIRECT ? GQ_WHY_DIRECT : GQ_WHY_OTHER, 0, 0);
 }
 
 static void sh_cap(uint32_t cap, uint32_t on) {
@@ -183,19 +194,53 @@ static void sh_cap(uint32_t cap, uint32_t on) {
         sh.cap[sh.ncaps] = cap;
         sh.cap_on[sh.ncaps++] = on;
     } else {
-        rec_bad(GQ_REC_SHADOW);
+        rec_bad_why(GQ_REC_SHADOW, GQ_WHY_CAPS, cap, sh.ncaps);
     }
 }
 
 static void sh_texture(uint32_t target, uint32_t texture) {
     uint32_t u = sh.set & SH_ACTIVE ? sh.active - GL_TEXTURE0 : 0;
-    if (u >= 2) {
-        rec_bad(GQ_REC_SHADOW);
+    if (u >= SH_UNITS) {
+        rec_bad_why(GQ_REC_SHADOW, GQ_WHY_UNIT, u, texture);
         return;
     }
     sh.tex[u] = texture;
     sh.tex_target[u] = target;
     sh.tex_set |= 1u << u;
+}
+
+static void sh_uniform(int32_t loc, int32_t val) {
+    for (uint32_t i = 0; i < sh.nunis; i++)
+        if (sh.uni[i].prog == sh.program && sh.uni[i].loc == loc) {
+            sh.uni[i].val = val;
+            return;
+        }
+    if (sh.nunis < SH_UNIS) {
+        sh.uni[sh.nunis].prog = sh.program;
+        sh.uni[sh.nunis].loc = loc;
+        sh.uni[sh.nunis++].val = val;
+    } else {
+        rec_bad_why(GQ_REC_SHADOW, GQ_WHY_UNIFORMS, sh.program, (uint32_t) loc);
+    }
+}
+
+static void sh_matrix(int32_t loc, GLsizei count, GLboolean transpose, const GLfloat * value) {
+    if (count != 1 || transpose) {
+        rec_bad_why(GQ_REC_SHADOW, GQ_WHY_MATRIX, (uint32_t) count, (uint32_t) loc);
+        return;
+    }
+    uint32_t i = 0;
+    while (i < sh.nmats && !(sh.mat[i].prog == sh.program && sh.mat[i].loc == loc)) i++;
+    if (i == sh.nmats) {
+        if (sh.nmats == SH_MATS) {
+            rec_bad_why(GQ_REC_SHADOW, GQ_WHY_MATRICES, sh.program, (uint32_t) loc);
+            return;
+        }
+        sh.nmats++;
+        sh.mat[i].prog = sh.program;
+        sh.mat[i].loc = loc;
+    }
+    memcpy(sh.mat[i].m, value, 16 * sizeof(GLfloat));
 }
 
 static inline void sh_val(uint32_t bit, uint32_t * field, uint32_t v) {
@@ -646,13 +691,7 @@ void gq_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w
 void gq_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat * value) {
     if (on_game() && count > 0 && value) {
         ff7_ip_note_words(IP_MATRIX, value, 16 * sizeof(GLfloat));
-        uint32_t p = sh.program;
-        if (count == 1 && !transpose && location >= 0 && location < SH_MATS && p < SH_PROGS) {
-            memcpy(sh.mat[p][location], value, 16 * sizeof(GLfloat));
-            sh.mat_set[p] |= 1u << location;
-        } else {
-            rec_bad(GQ_REC_SHADOW);
-        }
+        sh_matrix(location, count, transpose, value);
         const uint32_t a[] = { location, count, transpose, 0 };
         queue_call((void *) glUniformMatrix4fv_variants, 4, a, value, (uint32_t) count * 16 * sizeof(GLfloat), 3);
         return;
@@ -894,12 +933,7 @@ void gq_glUniform1i(GLint location, GLint v0) {
         return;
     }
     ff7_ip_note_uniform(location, v0);
-    if (sh.program < SH_PROGS && location >= 0 && location < SH_LOCS) {
-        sh.uni[sh.program][location] = v0;
-        sh.uni_set[sh.program] |= 1u << location;
-    } else {
-        rec_bad(GQ_REC_SHADOW);
-    }
+    sh_uniform(location, v0);
     if (cur_prog >= 0 && cur_prog < CACHE_PROGS && location >= 0 && location < CACHE_LOCS) {
         if (uniform_set[cur_prog][location] && uniform_val[cur_prog][location] == v0) {
             st.skipped++;
@@ -1086,13 +1120,31 @@ void gq_rec_begin(uint8_t * buf, uint32_t cap, int slot) {
     rec_unsafe = 0;
     rec_last_draw = -1;
     rec_cap = cap;
+    memset(&rec_why, 0, sizeof(rec_why));
     rec_buf = buf;
 }
 
-uint32_t gq_rec_end(uint32_t * unsafe) {
+uint32_t gq_rec_end(uint32_t * unsafe, gq_rec_why * why) {
+    if (rec_buf && (rec_unsafe & GQ_REC_OVERFLOW) && !rec_why.kind) rec_why.kind = GQ_WHY_OVERFLOW;
     rec_buf = NULL;
     if (unsafe) *unsafe = rec_unsafe;
+    if (why) *why = rec_why;
     return rec_len;
+}
+
+int gq_rec_attr(const uint8_t * buf, uint32_t rec, uint32_t index, const uint8_t ** ptr, uint32_t * stride,
+                int * size, uint32_t * type) {
+    const draw_t * d = (const draw_t *) (buf + rec + 8);
+    if (d->h.op != OP_DRAW) return 0;
+    for (int i = 0; i < d->h.n; i++)
+        if (d->attr[i].index == index) {
+            *ptr = (const uint8_t *) d + d->attr[i].off;
+            *stride = (uint32_t) d->attr[i].stride;
+            *size = d->attr[i].size;
+            *type = d->attr[i].type;
+            return 1;
+        }
+    return 0;
 }
 
 enum { RK_REFUSE, RK_COPY, RK_SKIP };
@@ -1117,7 +1169,7 @@ static int replay_kind(fn_t fn) {
 
 static void emit_state(const gq_shadow * s, uint32_t fb_from, uint32_t fb_to) {
     if (s->set & SH_FB) QUEUE(glBindFramebuffer_stat, GL_FRAMEBUFFER, s->fb == fb_from ? fb_to : s->fb);
-    for (uint32_t u = 0; u < 2; u++)
+    for (uint32_t u = 0; u < SH_UNITS; u++)
         if (s->tex_set & (1u << u)) {
             QUEUE(glActiveTexture, GL_TEXTURE0 + u);
             QUEUE(glBindTexture_oes, s->tex_target[u], s->tex[u]);
@@ -1139,30 +1191,36 @@ static void emit_state(const gq_shadow * s, uint32_t fb_from, uint32_t fb_to) {
         if (s->cap_on[i]) QUEUE(glEnable, s->cap[i]);
         else QUEUE(glDisable, s->cap[i]);
     }
-    for (uint32_t p = 1; p < SH_PROGS; p++) {
-        if (!s->uni_set[p] && !s->mat_set[p]) continue;
-        QUEUE(glUseProgram_variants, p);
-        for (uint32_t l = 0; l < SH_LOCS; l++)
-            if (s->uni_set[p] & (1u << l)) QUEUE(glUniform1i_variants, l, (uint32_t) s->uni[p][l]);
-        for (uint32_t m = 0; m < SH_MATS; m++)
-            if (s->mat_set[p] & (1u << m)) {
-                const uint32_t a[] = { m, 1, 0, 0 };
-                queue_call((void *) glUniformMatrix4fv_variants, 4, a, s->mat[p][m], 16 * sizeof(float), 3);
-            }
+    uint32_t prog = 0xffffffffu; // uniforms and matrices go to their programs
+    for (uint32_t i = 0; i < s->nunis; i++) {
+        if (s->uni[i].prog != prog) QUEUE(glUseProgram_variants, prog = s->uni[i].prog);
+        QUEUE(glUniform1i_variants, (uint32_t) s->uni[i].loc, (uint32_t) s->uni[i].val);
+    }
+    for (uint32_t i = 0; i < s->nmats; i++) {
+        if (s->mat[i].prog != prog) QUEUE(glUseProgram_variants, prog = s->mat[i].prog);
+        const uint32_t a[] = { (uint32_t) s->mat[i].loc, 1, 0, 0 };
+        queue_call((void *) glUniformMatrix4fv_variants, 4, a, s->mat[i].m, 16 * sizeof(float), 3);
     }
     if (s->set & SH_PROGRAM) QUEUE(glUseProgram_variants, s->program);
 }
 
 int gq_replay(const uint8_t * buf, uint32_t len, int slot, uint32_t fb_from, uint32_t fb_to, gq_lerp_fn lerp,
-              void * ctx) {
+              void * ctx, gq_rec_why * why) {
     if (!on_game()) return 0;
     for (uint32_t off = 0; off < len;) { // all or nothing
         const uint32_t * e = (const uint32_t *) (buf + off);
         const hdr_t * h = (const hdr_t *) (e + 2);
         if (h->op == OP_CALL) {
             const call_t * c = (const call_t *) h;
-            if (replay_kind(c->fn) == RK_REFUSE) return 0;
-            if (c->fn == (fn_t) glBindFramebuffer_stat && c->a[1] != fb_from) return 0;
+            int other_fb = c->fn == (fn_t) glBindFramebuffer_stat && c->a[1] != fb_from;
+            if (replay_kind(c->fn) == RK_REFUSE || other_fb) {
+                if (why) {
+                    why->kind = other_fb ? GQ_WHY_FRAMEBUFFER : GQ_WHY_CALL;
+                    why->a = other_fb ? c->a[1] : (uint32_t) c->fn;
+                    why->b = c->h.n ? c->a[0] : 0;
+                }
+                return 0;
+            }
         }
         off += 8 + e[1];
     }
@@ -1231,7 +1289,7 @@ int gq_make_target(uint32_t w, uint32_t h, uint32_t depth_rb, uint32_t * fb_out,
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     glBindFramebuffer(GL_FRAMEBUFFER, sh.set & SH_FB ? sh.fb : 0);
     uint32_t u = sh.set & SH_ACTIVE ? sh.active - GL_TEXTURE0 : 0;
-    int known = u < 2 && (sh.tex_set & (1u << u));
+    int known = u < SH_UNITS && (sh.tex_set & (1u << u));
     glBindTexture_oes(known ? sh.tex_target[u] : GL_TEXTURE_2D, known ? sh.tex[u] : 0);
     gl_queue_unlock();
     *fb_out = fb;

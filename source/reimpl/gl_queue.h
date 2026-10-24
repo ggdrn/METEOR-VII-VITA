@@ -65,12 +65,23 @@ void gl_queue_report(double seconds);
  * depth renderbuffer depth_rb (1, or minus the framebuffer status).
  */
 enum { GQ_REC_OVERFLOW = 1, GQ_REC_TEXTURE = 2, GQ_REC_DIRECT = 4, GQ_REC_SHADOW = 8 };
+// Why a frame cannot be replayed (the first reason; a, b: the values involved)
+enum {
+    GQ_WHY_NONE, GQ_WHY_OVERFLOW, GQ_WHY_TEXTURE, GQ_WHY_DIRECT, GQ_WHY_OTHER, GQ_WHY_CAPS, GQ_WHY_UNIT,
+    GQ_WHY_UNIFORMS, GQ_WHY_MATRIX, GQ_WHY_MATRICES, GQ_WHY_CALL, GQ_WHY_FRAMEBUFFER
+};
+typedef struct {
+    uint32_t kind, a, b;
+} gq_rec_why;
 typedef void (* gq_lerp_fn)(void * ctx, uint32_t rec, uint8_t * pos, uint32_t stride, int size, uint32_t count,
                             uint32_t mode);
 void gq_rec_begin(uint8_t * buf, uint32_t cap, int slot);
-uint32_t gq_rec_end(uint32_t * unsafe);
+uint32_t gq_rec_end(uint32_t * unsafe, gq_rec_why * why);
+// Attribute `index` of the draw recorded at offset rec of buf (inside the recording)
+int gq_rec_attr(const uint8_t * buf, uint32_t rec, uint32_t index, const uint8_t ** ptr, uint32_t * stride,
+                int * size, uint32_t * type);
 int gq_replay(const uint8_t * buf, uint32_t len, int slot, uint32_t fb_from, uint32_t fb_to, gq_lerp_fn lerp,
-              void * ctx);
+              void * ctx, gq_rec_why * why);
 int gq_make_target(uint32_t w, uint32_t h, uint32_t depth_rb, uint32_t * fb_out, uint32_t * tex_out);
 
 /* Entry points for the GL functions libjni_ff7.so imports (dynlib.c) */

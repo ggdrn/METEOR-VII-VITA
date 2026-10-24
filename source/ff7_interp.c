@@ -27,12 +27,14 @@
  *    VIDEO_update again with G: the main thread shows N+1.
  *
  * The game thread waits in the hook through those 33 ms (VIDEO_update only
- * returns once the main thread is back), so a frame is interpolated only
- * when its work plus the matching and replay leave time to show the
- * in-between frame half a battle frame after the previous one ("late"
- * otherwise, shown as is). The 15 fps limiter is not changed: a frame that
- * runs past 66.7 ms makes the battle catch up with a second logic step, as
- * it always did.
+ * returns once the main thread is back). The battle's limiter runs before
+ * the flip, so its next period is shortened by the hook's time (set_period):
+ * flips stay 66.7 ms apart and the battle keeps its speed. The in-between
+ * frame is shown half a battle frame after the last frame, or as soon as it
+ * is ready when that is past ("late" in the log: the frame's work, matching
+ * and replay took longer than the time left). A frame that runs past its
+ * period makes the battle catch up with a second logic step, as it always
+ * did.
  *
  * Every 5 s in battle the log shows the frames interpolated and why the
  * others were not, the matching figures (as the phase 0 probe), the time
@@ -65,6 +67,7 @@
 extern so_module so_mod;
 
 #define VA_MODE     0xcbf9dcu // uint16: 1 field, 2 battle, 3 world map...
+#define VA_PERIOD   0x9ab090u // double: the battle limiter's period in ticks ([game + 0x30] / 15, set at 0x41B6CF)
 #define MODE_BATTLE 2
 #define VIDEO_GOT   0xf4c97c  // GOT slot VIDEO_update reads: its framebuffer struct
 #define MAX_DRAWS   2048
@@ -93,6 +96,7 @@ static volatile int interp_on = 1;
 static ip_frame frames[2];
 static uint8_t * recs[2];
 static uint32_t rec_len[2], rec_unsafe[2];
+static gq_rec_why rec_why[2];
 static int cur; // frames[cur] / recs[cur] are being recorded, the other one is the previous frame
 static int have_prev;
 static ip_scratch scratch;
@@ -103,6 +107,42 @@ static int target_state; // 0 not made yet, 1 ready, -1 failed
 static uint32_t m_fb, m_tex;
 static SceUInt64 last_shown; // when the last frame was handed to the main thread (0: none in this battle)
 static uint32_t est_us = 8000;  // matching + replay, running average
+
+/*
+ * The battle loop 0x41BAB3 runs its limiter (0x41B965: spins until the
+ * period has passed since the frame's start) before the flip, so the time
+ * spent in this hook adds to every battle frame (v0.6.41: 66.7 + ~10 ms,
+ * 13 fps). While the interpolation is on, the next frame's period is
+ * shortened by the time the hook took (the hook holds the game thread ~33
+ * ms between the two frames it shows): from one flip to the next stays one
+ * battle frame. The game's own value is put back when the interpolation is
+ * off or the battle ends.
+ */
+static double period_base, period_set; // the game's period / the one written here (0: none)
+
+static void set_period(uint64_t hook_us) {
+    double * pp = (double *) mk_address(VA_PERIOD);
+    if (!pp) return;
+    double cur_p;
+    memcpy(&cur_p, pp, sizeof(cur_p));
+    if (cur_p != period_set || period_base <= 0.0) period_base = cur_p; // the game set it (new battle)
+    if (!(period_base > 0.0)) return;
+    double p = period_base - period_base * (double) hook_us / 66666.7;
+    if (p < period_base / 8) p = period_base / 8;
+    memcpy(pp, &p, sizeof(p));
+    period_set = p;
+}
+
+static void restore_period(void) {
+    if (period_set == 0.0) return;
+    double * pp = (double *) mk_address(VA_PERIOD);
+    if (pp) {
+        double cur_p;
+        memcpy(&cur_p, pp, sizeof(cur_p));
+        if (cur_p == period_set) memcpy(pp, &period_base, sizeof(period_base)); // still ours
+    }
+    period_set = 0.0;
+}
 
 static int expect_screen = 1;
 static uint32_t screen_fb = 0xffffffffu;
@@ -115,7 +155,7 @@ typedef struct {
     ip_stats s;
     uint32_t frames, skipped_draws, other_format;
     uint32_t interp, cut, late, textures, overflow, unsafe, refused, off, first;
-    uint64_t match_us, replay_us, gap_m_us, gap_n_us, hook_us, mid_vertices;
+    uint64_t match_us, replay_us, gap_m_us, gap_n_us, hook_us, mid_vertices, record_draws;
     uint32_t gaps_m;
 } figures;
 static figures acc, taken;
@@ -198,21 +238,30 @@ void ff7_interp_draw(uint32_t mode, int32_t first, int32_t count, const void * p
         acc.other_format++;
         return;
     }
-    uint32_t ps = pos_stride ? (uint32_t) pos_stride : (uint32_t) pos_size * 4;
-    const uint8_t * p = (const uint8_t *) pos + (uint32_t) first * ps;
-    const uint8_t * t = NULL;
-    uint32_t us = 0;
-    if (uv && uv_type == GL_FLOAT_ && uv_size >= 2) {
-        us = uv_stride ? (uint32_t) uv_stride : (uint32_t) uv_size * 4;
-        t = (const uint8_t *) uv + (uint32_t) first * us;
+    (void) first; (void) uv_size; (void) uv_type; (void) uv_stride;
+    // The vertices as the recording holds them (vertex `first` onwards): no copy
+    const uint8_t * p = NULL, * t = NULL;
+    uint32_t ps = 0, us = 0, ptype = 0, ttype = 0;
+    int psize = 0, tsize = 0;
+    if (rec < 0 || !gq_rec_attr(recs[cur], (uint32_t) rec, 0, &p, &ps, &psize, &ptype) || ptype != GL_FLOAT_
+        || psize < 2) {
+        frames[cur].overflow = 1; // not in the recording: the frame is shown as is
+        return;
     }
-    ip_add(&frames[cur], hash_words(ff7_ip_state, IP_STATE_WORDS), mode, (uint32_t) count, p, ps, pos_size >= 3, t, us,
+    if (!gq_rec_attr(recs[cur], (uint32_t) rec, 3, &t, &us, &tsize, &ttype) || ttype != GL_FLOAT_ || tsize < 2) {
+        t = NULL;
+        us = 0;
+    }
+    if (!ps) ps = (uint32_t) psize * 4;
+    if (t && !us) us = (uint32_t) tsize * 4;
+    acc.record_draws++;
+    ip_add(&frames[cur], hash_words(ff7_ip_state, IP_STATE_WORDS), mode, (uint32_t) count, p, ps, psize >= 3, t, us,
            (uint32_t) rec);
 }
 
 static int alloc_buffers(void) {
-    uint32_t draws = MAX_DRAWS * sizeof(ip_draw), verts = MAX_VERTS * sizeof(ip_vert);
-    uint32_t size = 2 * (draws + verts + REC_BYTES) + KEY_SLOTS * sizeof(ip_keyslot) + MAX_DRAWS * sizeof(int32_t)
+    uint32_t draws = MAX_DRAWS * sizeof(ip_draw);
+    uint32_t size = 2 * (draws + REC_BYTES) + KEY_SLOTS * sizeof(ip_keyslot) + MAX_DRAWS * sizeof(int32_t)
                     + TRI_SLOTS * sizeof(ip_trislot) + MAX_VERTS * sizeof(int32_t);
     size = (size + 0xfff) & ~0xfffu;
     SceUID id = sceKernelAllocMemBlock("ff7_interp", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
@@ -226,8 +275,6 @@ static int alloc_buffers(void) {
     for (int i = 0; i < 2; i++) {
         frames[i].d = (ip_draw *) m;
         m += draws;
-        frames[i].v = (ip_vert *) m;
-        m += verts;
         frames[i].maxd = MAX_DRAWS;
         frames[i].maxv = MAX_VERTS;
         recs[i] = m;
@@ -272,11 +319,26 @@ static uint32_t rd; // next draw of frames[rb]
 
 static void lerp(void * ctx, uint32_t rec, uint8_t * pos, uint32_t stride, int size, uint32_t count, uint32_t mode) {
     (void) ctx;
+    (void) mode;
     const ip_frame * B = &frames[rb];
     while (rd < B->nd && B->d[rd].rec < rec) rd++;
-    if (rd >= B->nd || B->d[rd].rec != rec || B->d[rd].count != count || size < 2) return;
+    if (rd >= B->nd || B->d[rd].rec != rec || B->d[rd].count != count || size < 2 || (size >= 3) != B->d[rd].pos_z)
+        return;
     const ip_draw * d = &B->d[rd++];
-    acc.mid_vertices += ip_mid(pos, stride, size >= 3, count, mode, map + d->first, frames[!rb].v);
+    acc.mid_vertices += ip_mid(&frames[!rb], d, map, pos, stride);
+}
+
+// The first refusals of each kind, with the values involved
+static void log_why(const char * what, const gq_rec_why * w) {
+    static unsigned logged[16];
+    static const char * const names[] = { "none", "records overflow", "texture upload/delete", "direct draw",
+                                          "other", "too many caps", "texture unit", "too many uniforms",
+                                          "matrix (count, location)", "too many matrices", "call that cannot be replayed",
+                                          "other framebuffer" };
+    uint32_t k = w->kind < 12 ? w->kind : 4;
+    if (k == GQ_WHY_TEXTURE || logged[k]++ >= 3) return;
+    l_warn("ff7_interp: %s: %s (0x%x, 0x%x)%s", what, names[k], w->a, w->b,
+           k == GQ_WHY_CALL ? " - the function's address in the .so is the first value" : "");
 }
 
 static int read_mode(void) {
@@ -299,16 +361,15 @@ static int swap_native(unsigned arg) {
     expect_screen = 1;
     if (ff7_ip_recording) {
         ff7_ip_recording = 0;
-        rec_len[b] = gq_rec_end(&rec_unsafe[b]);
+        rec_len[b] = gq_rec_end(&rec_unsafe[b], &rec_why[b]);
         have_b = 1;
         acc.frames++;
     }
     if (have_b && !have_prev) {
         acc.first++;
     } else if (have_b) {
-        ip_measure = !interp_on;
         SceUInt64 t0 = now_us();
-        int cut = ip_match(&frames[!b], &frames[b], &scratch, &acc.s, interp_on ? map : NULL);
+        int cut = ip_match(&frames[!b], &frames[b], &scratch, &acc.s, map);
         SceUInt64 t1 = now_us();
         acc.match_us += t1 - t0;
         if (!interp_on) acc.off++;
@@ -316,21 +377,32 @@ static int swap_native(unsigned arg) {
         else if (frames[b].overflow || frames[!b].overflow || (rec_unsafe[b] & GQ_REC_OVERFLOW)) acc.overflow++;
         else if (cut) acc.cut++;
         else if (rec_unsafe[b] & GQ_REC_TEXTURE) acc.textures++;
-        else if (rec_unsafe[b]) acc.unsafe++;
-        else if (last_shown && t1 + est_us + MARGIN_US > last_shown + HALF_US) acc.late++;
+        else if (rec_unsafe[b]) {
+            acc.unsafe++;
+            log_why("frame not interpolated", &rec_why[b]);
+        }
         else if (!target_ready()) acc.refused++;
         else {
             rb = b;
             rd = 0;
-            if (gq_replay(recs[b], rec_len[b], b, vs[VS_FB], m_fb, lerp, NULL)) interp = 1;
-            else acc.refused++;
+            gq_rec_why why = { 0, 0, 0 };
+            if (gq_replay(recs[b], rec_len[b], b, vs[VS_FB], m_fb, lerp, NULL, &why)) {
+                interp = 1;
+            } else {
+                acc.refused++;
+                log_why("frame not replayed", &why);
+            }
             SceUInt64 t2 = now_us();
             acc.replay_us += t2 - t1;
             est_us = (est_us * 7 + (uint32_t) (t2 - t0)) / 8;
         }
     }
     if (interp) {
-        if (last_shown) sleep_until(last_shown + HALF_US - MARGIN_US);
+        // half a battle frame after the last frame shown, or as soon as ready if that is past
+        if (last_shown) {
+            if (now_us() > last_shown + HALF_US - MARGIN_US + 4000) acc.late++;
+            sleep_until(last_shown + HALF_US - MARGIN_US);
+        }
         uint32_t g_tex = vs[VS_TEX];
         vs[VS_TEX] = m_tex;
         video_update(); // the main thread shows the in-between frame
@@ -350,12 +422,14 @@ static int swap_native(unsigned arg) {
         last_shown = now_us();
     }
     acc.hook_us += last_shown - t_in;
+    if (interp_on && mode == MODE_BATTLE) set_period(last_shown - t_in);
+    else restore_period();
 
     if (have_b) {
         cur = !cur;
         have_prev = 1;
     }
-    if (enabled && mode == MODE_BATTLE && (mem || alloc_buffers())) {
+    if (enabled && interp_on && mode == MODE_BATTLE && (mem || alloc_buffers())) { // off: nothing recorded
         ip_reset(&frames[cur]);
         gq_rec_begin(recs[cur], REC_BYTES, cur);
         ff7_ip_recording = 1;
@@ -424,11 +498,11 @@ void ff7_interp_report(double seconds) {
         if (f->frames) {
             double pairs = s->pairs ? (double) s->pairs : 1.0;
             double verts = s->verts ? (double) s->verts : 1.0;
-            l_info("battle 30 fps: %u battle frames, %u interpolated | not: %u cut, %u late, %u textures, %u overflow, "
+            l_info("battle 30 fps: %u battle frames, %u interpolated (%u late) | not: %u cut, %u textures, %u overflow, "
                    "%u other state, %u not replayable, %u off, %u first | in-between shown %.1f ms after the last "
                    "frame, new frame %.1f ms after it | hook %.1f ms/frame, matching %.2f ms, replay %.2f ms "
                    "(estimate %u us) | %llu vertices moved halfway",
-                   f->frames, f->interp, f->cut, f->late, f->textures, f->overflow, f->unsafe, f->refused, f->off,
+                   f->frames, f->interp, f->late, f->cut, f->textures, f->overflow, f->unsafe, f->refused, f->off,
                    f->first, f->gaps_m ? f->gap_m_us / 1000.0 / f->gaps_m : 0.0,
                    f->interp ? f->gap_n_us / 1000.0 / f->interp : 0.0, f->hook_us / 1000.0 / f->frames,
                    s->pairs ? f->match_us / 1000.0 / s->pairs : 0.0, f->interp ? f->replay_us / 1000.0 / f->interp : 0.0,

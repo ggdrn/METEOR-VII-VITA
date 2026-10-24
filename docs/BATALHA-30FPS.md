@@ -379,3 +379,45 @@ total de quadros.
 - efeitos e menus em lugares errados;
 - se o ritmo fica regular (sem quadros em pares);
 - se a batalha continua na velocidade certa.
+
+## 10. v0.6.41 deixou a batalha em 13 fps; correções da v0.6.42
+
+**O que o log da v0.6.41 mostrou:**
+
+- **Nenhum quadro interpolado.** Todos foram recusados como `other state`:
+  a sombra do estado só guardava uniforms e matrizes de programas e
+  localizações com id abaixo de 16 (e 2 unidades de textura), e o jogo usa
+  algum id acima disso.
+- **O custo foi pago mesmo assim.** Casamento de ~6,8 ms, gravação e cópia
+  dos vértices: o trabalho da thread do jogo subiu de ~35% para ~48% do
+  quadro.
+- **E esse custo entrou inteiro no quadro.** No laço da batalha
+  (`0x41BAB3`), o limitador (`0x41B965`) roda **antes** do flip
+  (`0x660EEB` → `SwapBuffers`), então o tempo gasto no gancho não é absorvido
+  pela espera do limitador: soma-se a cada quadro. 66,7 + ~10 ms = ~77 ms,
+  13 fps. Com a interpolação funcionando, a espera de 33 ms teria levado a
+  batalha a ~10 fps.
+
+**Correções:**
+
+1. **Limitador compensado.** Com a interpolação ligada, o período do
+   próximo quadro (`[0x9AB090]`, double, ticks ÷ 15) é encurtado pelo tempo
+   que o gancho levou. De um flip ao outro fica um quadro de batalha (66,7
+   ms), e a lógica continua um passo por quadro. Com a interpolação
+   desligada ou fora da batalha, o valor do jogo volta. (Efeito colateral: com
+   ela ligada, a batalha fica nos 15,0 fps exatos, em vez dos 14,8 de antes.)
+2. **Sombra sem limite de id.** Uniforms (até 128) e matrizes (até 32) ficam
+   em tabelas esparsas de (programa, localização, valor), com 8 unidades de
+   textura. Se um quadro ainda for recusado, o log mostra o motivo exato
+   (`ff7_interp: frame not interpolated: ...`), com os valores envolvidos, nas
+   3 primeiras vezes de cada tipo.
+3. **Núcleo sem cópias.** Os desenhos apontam para a própria gravação do
+   quadro, que a repetição já precisava. Mesmo modelo = mesmo hash das uv
+   (uma comparação por desenho); a medição de movimento e cortes olha 1
+   vértice em cada 4. O casamento deve cair de ~6,8 ms para menos de 1 ms.
+4. **Desligada = custo zero.** Com a interpolação desligada (menu ou
+   `battle_30fps_off.txt`), nada é gravado nem casado.
+5. **Sem recusa por atraso.** O quadro intermediário sai meio quadro depois
+   do anterior, ou assim que fica pronto se esse momento já passou. `late`
+   agora só conta esses atrasos; a cadência se ajusta sozinha a partir do
+   quadro seguinte.
