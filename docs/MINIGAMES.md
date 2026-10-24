@@ -1274,3 +1274,36 @@ para 16 itens (linhas de 26 para 24 px).
 
 **Pendente no Vita:** os textos com ✕/○ (por exemplo, a corrida de chocobo
 e o Gold Saucer) e a volta ao título por um campo.
+
+## v0.6.35: o crash na batalha era o profiler; mapa-múndi sem chamadas à `.so`
+
+**Crash (log e dump da v0.6.34).** O jogo caiu ~40 s depois de uma
+batalha começar, com a cena 2 (mapa-múndi) ainda gravando o perfil. O log
+não tem erro. O core dump veio truncado (`.psp2dmp.tmp`, 8 KB
+compactados), mas a parte que chegou já traz as threads e os registradores.
+A thread do jogo (`400101f7`) estava em `kuKernelMemProtect`, chamada pelo
+`abort_handler` do profiler, que devolve a permissão de execução aos 15 MB
+do código da `.so` a cada amostra. As outras threads estavam em pontos
+normais (áudio, vídeo, log). É a mesma fragilidade já vista com o profiler
+ligado (o console reiniciava). O jogo e os nativos não aparecem envolvidos.
+**Recomendação:** gravar perfis em trechos curtos e não deixar o profiler
+ligado entrando em batalhas.
+
+**Perfil do mapa-múndi (134–149 s, ~30 fps, thread do jogo 65–68%).** As
+maiores fatias são `world_tri_run` (22%) e uma `light_native` (20%), mas
+essa `light_native` é a do `ff7_world.c` (cor dos vértices do mapa,
+`0x68DAE1`, ~40 mil vértices/s), não a luz dos campos. As amostras caem nas
+chamadas que esses nativos ainda faziam à `.so`: `mk_address` em cada
+acesso e `_check_event` (a projeção, `0x75F263`, faz ~370 por malha).
+Agora as duas chamadas são embutidas, como nos outros módulos:
+
+- `ff7_world_tri.h`: `wt_addr`/`wt_event`, com tabela de páginas e
+  contador no `world_env`. `scripts/emu/test_world_tri.py` roda os dois
+  modos (embutido e chamando a `.so`): 300 malhas, zero divergências. As
+  chamadas reais de `_check_event` do próprio nativo só caem em múltiplos
+  de 2048. Duas mutações (contador e deslocamento na página) detectadas.
+- `ff7_world.c`: projeção, malha e cor de vértices passam por
+  `xaddr`/`xevent` (`ff7_so_inline_lookup`); sem a tabela, chamam as
+  funções como antes.
+
+**Pendente no Vita:** FPS e `work %` no mapa-múndi, com o mesmo trajeto.
