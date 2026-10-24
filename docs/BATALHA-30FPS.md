@@ -265,3 +265,44 @@ Desligar: `ux0:data/ffvii-vita/interp_probe_off.txt`.
 
 Teste do casamento no Mac (quadros sintéticos com resposta conhecida):
 `cc -O2 -I source scripts/test_interp.c -o /tmp/ti -lm && /tmp/ti`.
+
+## 8. Resultado da fase 0 (v0.6.40, 24/10/2026)
+
+Log de ~8 min com 6 batalhas: ataques, magias e invocações pesadas. Foram
+85 janelas de 5 s e 5.363 pares de quadros casados. Nenhum quadro estourou
+os buffers. A medição viu ~13,6 quadros/s, o ritmo da batalha.
+
+| Situação | Vértices/quadro | Mesmo modelo | Por u/v | Sem par | Cortes por 5 s |
+|---|---|---|---|---|---|
+| Batalha parada ou com movimento normal | ~21.500 | 99–100% | 0–0,5% | 0–0,7% | 0 |
+| Magias | 3.000–21.000 | 85–98% | 1–8% | 1–10% | 0–3 |
+| Invocações pesadas | 1.000–20.000 | 57–90% | 3–24% | 5–37% | 3–23 |
+| **Média ponderada** | | **90,7%** | **3,2%** | **6,2%** | 249 em 5.363 pares |
+
+- **Casamento:** 93,9% dos vértices acham par, acima dos ~85% combinados
+  para seguir. Na batalha comum, praticamente tudo casa no caso rápido
+  (mesmo modelo, mesma ordem).
+- **Movimento:** 83–96% dos vértices casados se movem de um quadro para o
+  outro, porque a câmera da batalha nunca para. Na batalha comum, o
+  deslocamento médio é de 1–6 px por quadro de 15 fps. É exatamente o
+  movimento que fica "pulado" a 15 fps e que o quadro intermediário
+  dividiria ao meio.
+- **Cortes:** nas invocações, até 1/3 dos pares são cortes de câmera. Ali o
+  quadro intermediário vira cópia (fica a 15 fps).
+- **Vértices fora da tela:** o máximo chega a milhões de pixels e há
+  centenas de milhares de saltos acima de 96 px nas magias e invocações. O
+  jogo manda vértices com coordenadas enormes (triângulos atrás da câmera
+  ou descartados). Isso distorce a média nessas janelas, mas o importante é
+  o efeito na fase 1: um triângulo com um vértice normal num quadro e
+  enorme no outro viraria uma faixa atravessando a tela. **Proteção
+  obrigatória:** se qualquer vértice de um triângulo pular mais que o
+  limite, o triângulo inteiro sai como no quadro novo, sem interpolar.
+- **Custo:** 6–12 ms por quadro de batalha na thread do jogo (só a
+  medição: cópia dos vértices e casamento). Na fase 1 isso sai da thread do
+  jogo e precisa ficar mais barato: o caso rápido não precisa de hash, só
+  da comparação das uv.
+
+**Decisão: seguir para a fase 1.** A batalha comum é o caso mais frequente
+e o mais favorável (~99% casado, movimento contínuo e pequeno). As magias
+ganham quase tudo. As invocações ganham parcialmente e caem para cópia nos
+cortes.
