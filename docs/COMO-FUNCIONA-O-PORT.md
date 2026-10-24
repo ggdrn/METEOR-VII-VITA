@@ -371,7 +371,7 @@ Android e foram refeitas do zero:
 |---|---|
 | [DESEMPENHO.md](DESEMPENHO.md) | diagnóstico, perfis e cada otimização com números |
 | [MINIGAMES.md](MINIGAMES.md) | modos de jogo, minigames, motor comum, menu do port |
-| [BATALHA-30FPS.md](BATALHA-30FPS.md) | por que a batalha continua a 15 fps |
+| [BATALHA-30FPS.md](BATALHA-30FPS.md) | batalha a 30 fps: o limitador de 15 fps e o estudo de interpolação |
 | [BOTOES-PS.md](BOTOES-PS.md) | troca dos ícones de botão |
 | [DATA.md](DATA.md) | como copiar os dados do jogo |
 | [../PLANO.md](../PLANO.md) | análise do APK, fases e riscos |
