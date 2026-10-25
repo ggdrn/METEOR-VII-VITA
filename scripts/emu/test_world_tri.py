@@ -14,7 +14,7 @@ Needs arm-vita-eabi-gcc on PATH (source scripts/env.sh) and `pip install unicorn
 import math, os, random, struct, subprocess, sys, tempfile
 from unicorn import UC_HOOK_CODE
 from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_SP, UC_ARM_REG_LR
-from ff7emu import Emu, B, FPU, MEMMAP, XVA, XH, REGS, END, HSTACK, CHECK_EVENT
+from ff7emu import Emu, B, FPU, MEMMAP, XVA, XH, REGS, END, HSTACK, CHECK_EVENT, EVCOUNT
 
 FUNC = 0x63d3bc       # _Z15func_0x0075f68cv
 MK_ADDRESS = 0x93d714
@@ -73,6 +73,15 @@ def main():
         emu.w32(B + MEMMAP + 4 * p, HOSTM + 0x1000 * i)
         uc.mem_write(HOSTM + 0x1000 * i, page(p))
     uc.mem_map(BLOB, 0x10000)
+    # WORLD_COST=1: ARM instructions of the native run, per source line of the blob
+    cost = {'on': 0, 'hist': {}, 'so': 0}
+    if os.environ.get('WORLD_COST'):
+        def in_blob(uc_, addr, size, user):
+            if cost['on']: cost['hist'][addr] = cost['hist'].get(addr, 0) + 1
+        def in_so(uc_, addr, size, user):
+            if cost['on']: cost['so'] += 1
+        uc.hook_add(UC_HOOK_CODE, in_blob, begin=BLOB, end=BLOB + 0x10000)
+        uc.hook_add(UC_HOOK_CODE, in_so, begin=B, end=B + 0xf49604)
     uc.mem_write(BLOB, blob)
     uc.mem_map(ENV, 0x1000)
     events = [0]
@@ -172,20 +181,31 @@ def main():
         emu.wva(sp_ - 4, struct.pack('<I', 0xdeadbeef))
         emu.setreg(4, sp_ - 4)
         pages_host = host(0xe38000) if host(0xe39000) == host(0xe38000) + 0x1000 else 0
-        env = struct.pack('<7I4I', B + MK_ADDRESS | 1, B + CHECK_EVENT | 1, B + REGS, B + FPU, pages_host,
-                          B + LIGHT | 1, B + ALLOC | 1, 0, 0, 0, 0)
+        # mk_address / _check_event inlined (page table, call counter) on most meshes
+        inline = it % 4 != 0
+        env = struct.pack('<7I4I2I', B + MK_ADDRESS | 1, B + CHECK_EVENT | 1, B + REGS, B + FPU, pages_host,
+                          B + LIGHT | 1, B + ALLOC | 1, 0, 0, 0, 0, B + MEMMAP if inline else 0,
+                          B + EVCOUNT if inline else 0)
         uc.mem_write(ENV, env)
         events[0] = 0
+        ev0 = random.choice([random.getrandbits(32), 0x7fe, 0xfffff7f0 | random.randrange(16)])
+        emu.w32(B + EVCOUNT, ev0); emu.ev_at = []
         uc.reg_write(UC_ARM_REG_R0, ENV)
         uc.reg_write(UC_ARM_REG_SP, HSTACK + 0xff000)
         uc.reg_write(UC_ARM_REG_LR, END | 1)
+        cost['on'] = 1
         uc.emu_start(entry | 1, END, count=5000000)
+        cost['on'] = 0
         ret = uc.reg_read(UC_ARM_REG_R0)
         n_x = bytes(uc.mem_read(XH, 0x200000))
         n_h = bytes(uc.mem_read(HOSTM, 0x1000 * len(pages)))
         n_f = bytes(uc.mem_read(B + FPU, 0x68))
         n_r = [emu.reg(i) for i in range(8)]
-        n_ev = events[0]
+        # _check_event: the real calls plus the ones counted inline; the real
+        # function only on every 2048th count when inlined
+        n_ev = (emu.r32(B + EVCOUNT) - ev0) & 0xffffffff
+        if inline and any(v & 0x7ff for v, lr in emu.ev_at if 0x58000000 <= lr < 0x58010000):
+            n_ev = -1
         cnt = struct.unpack('<4I', bytes(uc.mem_read(ENV + 28, 16)))
         for i in range(4): stats[i] += cnt[i]
 
@@ -212,6 +232,11 @@ def main():
             if bad <= 6: print('MISMATCH (mesh %d, %d triangles): %s' % (it, ntri, '; '.join(problems)))
     print('0x75F68C: %d mismatches in %d meshes (%d triangles, %d drawn, %d allocation slow paths, %d NaN compares)'
           % (bad, total, stats[0], stats[1], stats[2], stats[3]))
+    if cost['hist']:
+        n = sum(cost['hist'].values())
+        print('cost: %d ARM instructions in the native code (%.0f a triangle), %d in the .so it calls (%.0f a triangle)'
+              % (n, n / max(stats[0], 1), cost['so'], cost['so'] / max(stats[0], 1)))
+        open('/tmp/claude-501/world_hist.txt', 'w').write('\n'.join('%x %d' % kv for kv in sorted(cost['hist'].items())))
     sys.exit(1 if bad else 0)
 
 if __name__ == '__main__':

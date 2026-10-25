@@ -21,6 +21,12 @@ bool movie_frame(void);
 /** MyDecoder.RESET */
 void movie_stop(void);
 
+/** True from a successful START of a movie with video until RESET (any thread). */
+bool movie_is_playing(void);
+
+/** Height of the active video frame, or zero when no video is active. */
+int movie_video_height(void);
+
 /** MyDecoder.SET_TEXTURE: GL texture the game draws the movie with. */
 void movie_set_texture(unsigned int tex);
 

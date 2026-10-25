@@ -24,9 +24,11 @@ MEMMAP = 0x101de5c
 REGS = 0x1492c48
 FPU = 0x1492bc0
 CHECK_EVENT = 0xadb9f4
+EVCOUNT = 0x1492b78     # _check_event's call counter (natives bump it inline)
 
 class Emu:
-    def __init__(self, so_path):
+    def __init__(self, so_path, resolve_defined=False):
+        self.resolve_defined = resolve_defined  # GOT entries of the .so's own symbols (.dynsym at 0x18c)
         d = open(so_path, 'rb').read()
         self.d = d
         uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
@@ -47,6 +49,7 @@ class Emu:
         uc.hook_add(UC_HOOK_CODE, self._stub, begin=B + CHECK_EVENT, end=B + CHECK_EVENT + 1)
         uc.hook_add(UC_HOOK_CODE, self._mk, begin=B + 0x93d714, end=B + 0x93d715)
         self.calls = 0
+        self.ev_at = []
         self.unmapped = set()
         # ff7.exe constants used by the lighting code (page 0x7b7000): 255.0f at 0x7b7b44
         uc.mem_map(0x50000000, 0x1000)
@@ -63,8 +66,17 @@ class Emu:
                 if typ == 0x17:  # RELATIVE
                     v = struct.unpack_from('<I', self.uc.mem_read(B + r_off, 4))[0]
                     self.w32(B + r_off, (v + B) & 0xffffffff)
-                elif typ in (0x15, 0x16, 0x02):  # GLOB_DAT, JUMP_SLOT, ABS32 -> trap
-                    self.w32(B + r_off, END + 0x100)
+                elif typ in (0x15, 0x16, 0x02):  # GLOB_DAT, JUMP_SLOT, ABS32
+                    # symbols the .so defines (data such as the GL state globals)
+                    # resolve to it; imports go to a trap
+                    sym = r_info >> 8
+                    value, shndx = struct.unpack_from('<I', d, 0x18c + 16 * sym + 4)[0], \
+                        struct.unpack_from('<H', d, 0x18c + 16 * sym + 14)[0]
+                    if self.resolve_defined and shndx != 0 and value:
+                        add = struct.unpack('<I', self.uc.mem_read(B + r_off, 4))[0] if typ == 0x02 else 0
+                        self.w32(B + r_off, (B + value + add) & 0xffffffff)
+                    else:
+                        self.w32(B + r_off, END + 0x100)
 
     def _mk(self, uc, addr, size, user):
         va = uc.reg_read(UC_ARM_REG_R0)
@@ -72,8 +84,12 @@ class Emu:
             self.unmapped.add(va)
 
     def _stub(self, uc, addr, size, user):
-        # _check_event(): return
+        # _check_event(): counts the call (natives bump the counter themselves
+        # and call it only on every 2048th: ev_at keeps the counts it ran at)
+        n = (self.r32(B + EVCOUNT) + 1) & 0xffffffff
+        self.w32(B + EVCOUNT, n)
         lr = uc.reg_read(UC_ARM_REG_LR)
+        self.ev_at.append((n, lr))
         uc.reg_write(UC_ARM_REG_PC, lr)
 
     def w32(self, a, v): self.uc.mem_write(a, struct.pack('<I', v & 0xffffffff))

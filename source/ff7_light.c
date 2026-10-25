@@ -28,9 +28,11 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_light.h"
+#include "ff7_switch.h"
 #include "ff7_light_core.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
+#include "ff7_so_inline.h"
 
 #include "utils/logger.h"
 
@@ -59,6 +61,27 @@ typedef void (* check_event_fn)(void);
 
 static mk_address_fn mk_address;
 static check_event_fn check_event;
+
+/*
+ * mk_address and _check_event inlined (v0.6.32): every lit vertex called
+ * them ~10 times into the .so; the light was ~20% of the game thread in the
+ * chocobo ranch area after the race. Same results: the page table entry plus
+ * the offset (va 0 or an unmapped page go to the real function), and the
+ * call counter with every 2048th call going to the real _check_event.
+ */
+static uint8_t * const * memmap;
+static uint32_t * ev_count;
+
+static inline uint8_t * xaddr(uint32_t va) {
+    uint8_t * p = memmap ? memmap[va >> 12] : (uint8_t *) 0;
+    return p && va ? p + (va & 0xfff) : mk_address(va);
+}
+
+static inline void xevent(void) {
+    uint32_t c;
+    if (ev_count && ((c = *ev_count + 1) & 0x7ff)) *ev_count = c;
+    else check_event();
+}
 static volatile uint32_t * regs;
 static so_hook light_hook;
 static uint32_t prologue;
@@ -77,7 +100,7 @@ static inline void xread(uint32_t addr, void * dst, uint32_t n_bytes) {
     while (n_bytes) {
         uint32_t in_page = 0x1000 - (addr & 0xfff);
         uint32_t n = n_bytes < in_page ? n_bytes : in_page;
-        memcpy(d, mk_address(addr), n);
+        memcpy(d, xaddr(addr), n);
         d += n;
         addr += n;
         n_bytes -= n;
@@ -113,7 +136,7 @@ static uint32_t light(uint32_t m_addr, uint32_t n_addr, uint32_t rgb_addr, uint3
     out[2] = channel(rgb[2], l[0], m[3], &amb);
     out[1] = channel(rgb[1], l[1], m[7], &amb);
     out[0] = channel(rgb[0], l[2], m[11], &amb);
-    out[3] = *mk_address(src_addr + 3);
+    out[3] = *xaddr(src_addr + 3);
     return ((amb ? m_addr : rgb_addr) & ~0xffu) | out[3];
 }
 
@@ -152,12 +175,12 @@ static void light_native(void) {
         return;
     }
 
-    for (int i = 0; i < 4; i++) *mk_address(out + i) = res[i];
+    for (int i = 0; i < 4; i++) *xaddr(out + i) = res[i];
     regs[EAX] = out;
     regs[ECX] = src;
     regs[EDX] = edx;
-    check_event(); // 0x66CFE8's
-    check_event();
+    xevent(); // 0x66CFE8's
+    xevent();
     regs[ESP] = esp + 4; // ret
     calls++;
 }
@@ -184,7 +207,7 @@ static int light2(uint32_t color, uint32_t scale_addr, uint32_t m_addr, uint32_t
     xread(n_addr, n, sizeof(n));
     xread(rgb_addr, rgb, sizeof(rgb));
     int last;
-    if (!light_core_vertex2(color, scale, m, n, rgb, *mk_address(src_addr + 3), r->out, &last, &r->lt, &r->eq))
+    if (!light_core_vertex2(color, scale, m, n, rgb, *xaddr(src_addr + 3), r->out, &last, &r->lt, &r->eq))
         return 0;
     r->edx = ((last == LIGHT2_NORMAL ? m_addr : out_addr) & ~0xffu) | r->out[3];
     return 1;
@@ -195,15 +218,15 @@ static int light2_apply(uint32_t color, uint32_t scale, uint32_t m, uint32_t n, 
                         uint32_t out) {
     light2_result r;
     if (!light2(color, scale, m, n, rgb, src, out, &r)) return 0;
-    for (int i = 0; i < 4; i++) *mk_address(out + i) = r.out[i];
+    for (int i = 0; i < 4; i++) *xaddr(out + i) = r.out[i];
     regs[EAX] = out;
     regs[ECX] = src;
     regs[EDX] = r.edx;
     fpu[FPU_C0] = r.lt;
     fpu[FPU_C2] = 0;
     fpu[FPU_C3] = r.eq;
-    check_event(); // 0x66CFE8's
-    check_event();
+    xevent(); // 0x66CFE8's
+    xevent();
     calls2++;
     return 1;
 }
@@ -268,8 +291,8 @@ static inline uint32_t xrd32(uint32_t addr) {
 }
 
 static inline void xwr32(uint32_t addr, uint32_t v) {
-    if ((addr & 0xfff) <= 0xffc) memcpy(mk_address(addr), &v, 4);
-    else for (int i = 0; i < 4; i++) *mk_address(addr + i) = (uint8_t) (v >> (8 * i));
+    if ((addr & 0xfff) <= 0xffc) memcpy(xaddr(addr), &v, 4);
+    else for (int i = 0; i < 4; i++) *xaddr(addr + i) = (uint8_t) (v >> (8 * i));
 }
 
 // The x86 call: push the 7 arguments, call (the hooked entry), pop them
@@ -327,6 +350,7 @@ __attribute__((naked)) static void e92d_loop_stub(void) {
 }
 
 void ff7_light_patch(void) {
+    if (ff7_switch_off("ff7_light", DATA_PATH "light_off.txt")) return;
     uintptr_t fn = so_symbol(&so_mod, SYM_LIGHT);
     check_event = (check_event_fn) so_symbol(&so_mod, SYM_CHECK_EVENT);
     mk_address = (mk_address_fn) so_symbol(&so_mod, SYM_MK_ADDRESS);
@@ -336,6 +360,11 @@ void ff7_light_patch(void) {
     if (!fn || !check_event || !mk_address || !regs) {
         l_warn("ff7_light: unexpected .so layout, native lighting disabled");
         return;
+    }
+    if (!ff7_so_inline_lookup(&so_mod, (uintptr_t) mk_address, (uintptr_t) check_event, &memmap, &ev_count)) {
+        memmap = NULL;
+        ev_count = NULL;
+        l_warn("ff7_light: mk_address/_check_event not as expected, calling them (slower)");
     }
     selftest_left = ff7_selftest_count(SELFTEST_CALLS);
     selftest2_left = ff7_selftest_count(SELFTEST_CALLS);

@@ -14,6 +14,17 @@
  * analog and digital; with no d-pad it does nothing, so it goes as well
  * (recognized by the flag it toggles, TOUCH_MODE_FLAG). The Encounters
  * toggle, triggered buttons, swipers and the screen itself are untouched.
+ * The on-screen L2 / R2 (keys 0x47 / 0x4F, Home / End) are kept aside and put
+ * back into the layout while the game is in the submarine (mode 10): its
+ * layout is the field's (one list for both), so this is decided every frame
+ * the layout is drawn, not once.
+ *
+ * The kept buttons write their keys into st_keyboard, but once a physical
+ * button has been used updateGamepad() rewrites the 14 gamepad keys there
+ * every frame from the gamepad state, so a touch on R1 + R2 (0x85, the
+ * chocobo race) or L2 / R2 never reached the game. ff7_ui_touch_buttons()
+ * reports the buttons held through touch (an object with a touch id at +24
+ * that was not slid off, +0x3C) and main.c holds them as gamepad buttons.
  *
  * The first touches are logged with the objects of the current layout.
  *
@@ -23,6 +34,7 @@
 
 #include "ff7_ui.h"
 
+#include "ff7_unhook.h"
 #include "utils/logger.h"
 #include "utils/profiler.h"
 
@@ -82,7 +94,12 @@ static void call_original_touch_began(int id, float x, float y) {
     profiler_release();
 }
 static void * last_logged_layout;
-static void ** filtered[MAX_FILTERED];
+#define MAX_EXTRA 4
+static struct {
+    void ** list;
+    void * extra[MAX_EXTRA]; // L2 / R2 buttons taken out, shown in the submarine
+    int num_extra;
+} filtered[MAX_FILTERED];
 static int num_filtered;
 
 static int class_of(void * obj) {
@@ -95,6 +112,18 @@ static int class_of(void * obj) {
 static const char * class_name(void * obj) {
     int c = class_of(obj);
     return c >= 0 ? classes[c].name : "?";
+}
+
+#define GAME_MODE_VA 0xcbf9dc // uint16
+#define MODE_SUBMARINE 10
+#define KEY_L2 0x47
+#define KEY_R2 0x4f
+
+static int game_mode(void) {
+    static const uint8_t * const * memmap;
+    if (!memmap) memmap = (const uint8_t * const *) so_symbol(&so_mod, "MEMMAP");
+    const uint8_t * page = memmap ? memmap[GAME_MODE_VA >> 12] : NULL;
+    return page ? *(const uint16_t *) (page + (GAME_MODE_VA & 0xfff)) : -1;
 }
 
 static int is_virtual_gamepad(void * obj) {
@@ -125,28 +154,100 @@ static void log_layout(void ** list) {
     }
 }
 
+static int is_extra(void * obj) {
+    if (class_of(obj) != CLS_BUTTON_MAPPED) return 0;
+    uint32_t key = *(uint32_t *) ((uint8_t *) obj + 40);
+    return key == KEY_L2 || key == KEY_R2;
+}
+
 // Removes the virtual gamepad from a layout (in place, once per layout)
-static void filter_layout(void ** list) {
-    if (!list) return;
+static int filter_layout(void ** list) {
+    if (!list) return -1;
     for (int i = 0; i < num_filtered; i++)
-        if (filtered[i] == list) return;
-    if (num_filtered < MAX_FILTERED) filtered[num_filtered++] = list;
+        if (filtered[i].list == list) return i;
+    if (num_filtered == MAX_FILTERED) return -1;
+    int f = num_filtered++;
+    filtered[f].list = list;
 
     int out = 0, removed = 0;
     for (int i = 0; list[i] && i < MAX_LAYOUT; i++) {
-        if (is_virtual_gamepad(list[i])) { removed++; continue; }
+        if (is_virtual_gamepad(list[i])) {
+            if (is_extra(list[i]) && filtered[f].num_extra < MAX_EXTRA)
+                filtered[f].extra[filtered[f].num_extra++] = list[i];
+            removed++;
+            continue;
+        }
         list[out++] = list[i];
     }
     if (removed) {
         for (int i = out; i < out + removed; i++) list[i] = NULL;
-        l_info("ui: layout %p: removed %d virtual gamepad objects, %d kept", list, removed, out);
+        l_info("ui: layout %p: removed %d virtual gamepad objects (%d L2/R2 kept for the submarine), %d kept",
+               list, removed, filtered[f].num_extra, out);
+    }
+    return f;
+}
+
+/*
+ * When the layout had no L2 / R2 of its own: the first L2 and R2 buttons of
+ * the game's layout table _UI (64 lists of 32 objects; UI_determine() picks
+ * one by mode, the submarine gets the field's) or of a filtered layout.
+ */
+static void ** ui_table;
+static void * fallback[2];
+
+static void find_fallback(void) {
+    static int done;
+    if (done) return;
+    for (int f = 0; f < num_filtered; f++)
+        for (int e = 0; e < filtered[f].num_extra; e++) {
+            uint8_t * o = filtered[f].extra[e];
+            int k = *(uint32_t *) (o + 40) == KEY_R2;
+            if (!fallback[k]) fallback[k] = o;
+        }
+    for (int l = 0; ui_table && l < 64; l++) {
+        void ** list = ui_table + 32 * l;
+        for (int i = 0; i < 32 && list[i]; i++) {
+            if (!is_extra(list[i])) continue;
+            int k = *(uint32_t *) ((uint8_t *) list[i] + 40) == KEY_R2;
+            if (!fallback[k]) fallback[k] = list[i];
+        }
+    }
+    done = fallback[0] && fallback[1];
+    l_info("ui: on-screen L2 %p, R2 %p for the submarine (from the layout table)", fallback[0], fallback[1]);
+}
+
+// The L2 / R2 buttons in the layout in the submarine only (the list had room for them)
+static void sync_extras(int f) {
+    if (f < 0) return;
+    int want = game_mode() == MODE_SUBMARINE;
+    if (want && !filtered[f].num_extra) {
+        find_fallback();
+        for (int k = 0; k < 2; k++)
+            if (fallback[k] && filtered[f].num_extra < MAX_EXTRA) filtered[f].extra[filtered[f].num_extra++] = fallback[k];
+    }
+    void ** list = filtered[f].list;
+    for (int e = 0; e < filtered[f].num_extra; e++) {
+        uint8_t * obj = filtered[f].extra[e];
+        int at = -1, n = 0;
+        for (; list[n] && n < MAX_LAYOUT; n++)
+            if (list[n] == obj) at = n;
+        if (want && at < 0 && n < MAX_LAYOUT - 1) {
+            list[n] = obj;
+            list[n + 1] = NULL;
+            l_info("ui: layout %p: on-screen %s shown (submarine)", list,
+                   *(uint32_t *) (obj + 40) == KEY_L2 ? "L2" : "R2");
+        } else if (!want && at >= 0) {
+            for (int i = at; i < n; i++) list[i] = list[i + 1];
+            *(int32_t *) (obj + 24) = 0; // no longer touched
+            obj[0x3c] = 0;
+        }
     }
 }
 
 // UI_display(UIObject ** list): draws a layout every frame
 static void ui_display(void ** list) {
-    filter_layout(list);
-    SO_CONTINUE(int, display_hook, list);
+    sync_extras(filter_layout(list));
+    SO_CONTINUE_HELD(int, display_hook, list);
 }
 
 // UI_onTouchBegan's conversion to the 640x480 UI space (non-rotated surface)
@@ -198,12 +299,36 @@ static void ui_touch_began(int id, float x, float y) {
     if (log) log_toggles(list, "after ");
 }
 
+// The st_keyboard key of each ff7_onKey button (updateGamepad's mapping)
+static const uint8_t button_keys[14] = { 0x48, 0x4b, 0x50, 0x4d, 0x9c, 0x52, 0x53, 0x4e,
+                                         0x49, 0x51, 0x4c, 0x4a, KEY_L2, KEY_R2 };
+
+static unsigned key_buttons(uint32_t key) {
+    if (key == 0x83) return 1u << 8 | 1u << 9;  // ESCAPE: L1 + R1
+    if (key == 0x85) return 1u << 9 | 1u << 13; // R1 + R2
+    for (int b = 0; b < 14; b++)
+        if (button_keys[b] == key) return 1u << b;
+    return 0;
+}
+
+unsigned ff7_ui_touch_buttons(void) {
+    void ** list = ui_current ? *ui_current : NULL;
+    unsigned held = 0;
+    for (int i = 0; list && list[i] && i < MAX_LAYOUT; i++) {
+        uint8_t * o = list[i];
+        if (class_of(o) == CLS_BUTTON_MAPPED && *(int32_t *) (o + 24) && !o[0x3c])
+            held |= key_buttons(*(uint32_t *) (o + 40));
+    }
+    return held;
+}
+
 void ff7_ui_patch(void) {
     for (unsigned i = 0; i < NUM_CLASSES; i++) {
         uintptr_t vt = so_symbol(&so_mod, classes[i].vtable);
         vptrs[i] = vt ? vt + 8 : 0; // objects point past offset-to-top and RTTI
     }
     ui_current = (void ***) so_symbol(&so_mod, "UI_current");
+    ui_table = (void **) so_symbol(&so_mod, "_UI");
     if ((uintptr_t) ui_current == so_mod.text_base + TOUCH_MODE_FLAG + 0x38)
         touch_mode_flag = (uint8_t *) (so_mod.text_base + TOUCH_MODE_FLAG);
     else

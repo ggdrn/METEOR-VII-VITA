@@ -11,4 +11,10 @@
 /** Hides the virtual gamepad and logs the first touches. Call after relocation. */
 void ff7_ui_patch(void);
 
+/**
+ * The game buttons (bit = ff7_onKey id) held by the on-screen buttons kept
+ * in the current layout. Main thread (where the touches are handled).
+ */
+unsigned ff7_ui_touch_buttons(void);
+
 #endif // FF7_UI_H

@@ -1,0 +1,495 @@
+/*
+ * Copyright (C) 2010 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* BufferQueue implementation */
+
+/*
+ * FF7 Vita port: local copy of lib/opensles/libopensles/IBufferQueue.c.
+ * Change (v0.6.8): BufferQueue::Clear finishes the clear at once, with the
+ * steps the mixer would take (IOutputMixExt.c track_check), when the output
+ * thread is not mixing (opensles_mixer_idle, Vita.c), instead of waiting for
+ * the next mix pass. See IPlay.c for the same change to a stop.
+ * Change: buffers whose rate isn't an integer fraction of the output rate are
+ * resampled (linear interpolation, state carried across buffers) instead of
+ * repeating each frame output/input times rounded down. FF7's music engine
+ * (SQEX CoreSystem) outputs 32000 Hz: 44100 / 32000 rounded down is 1, so the
+ * music played as-is on the 44100 Hz port, 38% too fast.
+ */
+
+#include "sles_allinclusive.h"
+#include <psp2/kernel/processmgr.h>
+
+int opensles_mixer_idle(void);
+
+/*
+ * Resampler state per buffer queue, kept here so the library's IBufferQueue
+ * struct (lib/opensles, a submodule) stays as upstream has it. Slots are
+ * claimed with a compare-and-swap (queues of different players may enqueue
+ * from different threads) and freed by IBufferQueue_Destroy.
+ */
+#define BQ_RS_SLOTS 64
+typedef struct {
+    IBufferQueue *volatile bq;
+    uint32_t pos;      // 16.16 position, relative to last
+    int16_t last[2];   // last stereo frame of the previous buffer
+} bq_rs_t;
+static bq_rs_t bq_rs[BQ_RS_SLOTS];
+static bq_rs_t bq_rs_spare; // all slots taken: shared (only resampling quality suffers)
+
+static bq_rs_t *bq_rs_get(IBufferQueue *this)
+{
+    for (int i = 0; i < BQ_RS_SLOTS; i++)
+        if (bq_rs[i].bq == this)
+            return &bq_rs[i];
+    for (int i = 0; i < BQ_RS_SLOTS; i++)
+        if (NULL == bq_rs[i].bq && __sync_bool_compare_and_swap(&bq_rs[i].bq, NULL, this)) {
+            bq_rs[i].pos = 0;
+            bq_rs[i].last[0] = bq_rs[i].last[1] = 0;
+            return &bq_rs[i];
+        }
+    return &bq_rs_spare;
+}
+
+static void bq_rs_free(IBufferQueue *this)
+{
+    for (int i = 0; i < BQ_RS_SLOTS; i++)
+        if (bq_rs[i].bq == this)
+            bq_rs[i].bq = NULL;
+}
+
+/*
+ * Diagnostics (v0.6.23): the snowboard music (the only stereo buffer the
+ * game plays) is silent though its PCM reaches the DirectSound buffer
+ * (ff7_dsound.c). Every 5 s each stereo 16-bit queue that got buffers logs
+ * how many and how loud, and what the mixer will apply to it.
+ */
+#define BQ_DIAG_SLOTS 8
+static struct {
+    IBufferQueue *bq;
+    unsigned enqueues, bytes;
+    int peak;
+} bq_diag[BQ_DIAG_SLOTS];
+static SceUInt64 bq_diag_next;
+static int bq_diag_lines = 200;
+
+static void bq_diag_enqueue(IBufferQueue *this, const void *buf, SLuint32 size)
+{
+    if (this->channels != 2 || this->bps != 16 || bq_diag_lines <= 0)
+        return;
+    int k, free_k = -1;
+    for (k = 0; k < BQ_DIAG_SLOTS; k++) {
+        if (bq_diag[k].bq == this)
+            break;
+        if (!bq_diag[k].bq && free_k < 0)
+            free_k = k;
+    }
+    if (k == BQ_DIAG_SLOTS) {
+        if (free_k < 0)
+            return;
+        k = free_k;
+        bq_diag[k].bq = this;
+    }
+    bq_diag[k].enqueues++;
+    bq_diag[k].bytes += size;
+    const int16_t *pcm = (const int16_t *) buf;
+    for (SLuint32 i = 0; i < size / 2; i += 9) {
+        int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+        if (v > bq_diag[k].peak)
+            bq_diag[k].peak = v;
+    }
+    SceUInt64 now = sceKernelGetProcessTimeWide();
+    if (now < bq_diag_next)
+        return;
+    bq_diag_next = now + 5000000;
+    for (int i = 0; i < BQ_DIAG_SLOTS && bq_diag_lines > 0; i++) {
+        IBufferQueue *q = bq_diag[i].bq;
+        if (!q || !bq_diag[i].enqueues)
+            continue;
+        bq_diag_lines--;
+        CAudioPlayer *ap = SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(q) ? (CAudioPlayer *) q->mThis : NULL;
+        SL_LOGI("bq diag: stereo queue %p, %u Hz: %u buffers, %u bytes in 5 s, peak %d | count %u | player %p"
+                " state %u mute %u level %d mB gains %.3f %.3f track %p",
+                q, (unsigned) (q->samplerate / 1000), bq_diag[i].enqueues, bq_diag[i].bytes, bq_diag[i].peak,
+                (unsigned) q->mState.count, ap, ap ? (unsigned) ap->mPlay.mState : 0,
+                ap ? (unsigned) ap->mVolume.mMute : 0, ap ? (int) ap->mVolume.mLevel : 0,
+                ap ? (double) ap->mGains[0] : 0.0, ap ? (double) ap->mGains[1] : 0.0, ap ? (void *) ap->mTrack : NULL);
+        bq_diag[i].enqueues = bq_diag[i].bytes = 0;
+        bq_diag[i].peak = 0;
+    }
+}
+
+static inline int16_t bq_sample(const void *src, int k, int channels, int bps, int ch)
+{
+    if (channels == 1)
+        ch = 0;
+    if (bps == 8)
+        return (int16_t) (((int) ((const uint8_t *) src)[k * channels + ch] - 0x80) << 8);
+    return ((const int16_t *) src)[k * channels + ch];
+}
+
+/** Resamples `size` bytes of PCM (8/16-bit, mono/stereo) at this->samplerate
+ *  into a new stereo 16-bit buffer at out_rate (both in milliHz). */
+static void *bq_resample(IBufferQueue *this, const void *src, SLuint32 size, uint32_t out_rate,
+    SLuint32 *pOutSize)
+{
+    int frame_bytes = this->channels * (this->bps == 8 ? 1 : 2);
+    int n_in = size / frame_bytes;
+    uint32_t step = (uint32_t) (((uint64_t) this->samplerate << 16) / out_rate);
+    int max_out = (int) (((uint64_t) n_in * out_rate) / this->samplerate) + 2;
+    int16_t *dst = malloc(max_out * 4);
+    if (NULL == dst)
+        return NULL;
+
+    bq_rs_t *rs = bq_rs_get(this);
+    uint32_t pos = rs->pos;
+    int n_out = 0;
+    // frame index 0 is rs->last, index k > 0 is input frame k - 1
+    while ((int) (pos >> 16) < n_in && n_out < max_out) {
+        int i = pos >> 16;
+        int f = pos & 0xffff;
+        for (int ch = 0; ch < 2; ch++) {
+            int a = i == 0 ? rs->last[ch] : bq_sample(src, i - 1, this->channels, this->bps, ch);
+            int b = bq_sample(src, i, this->channels, this->bps, ch);
+            dst[n_out * 2 + ch] = (int16_t) (a + (((b - a) * f) >> 16));
+        }
+        n_out++;
+        pos += step;
+    }
+    if (n_in > 0) {
+        rs->pos = pos - ((uint32_t) n_in << 16);
+        for (int ch = 0; ch < 2; ch++)
+            rs->last[ch] = bq_sample(src, n_in - 1, this->channels, this->bps, ch);
+    }
+    *pOutSize = n_out * 4;
+    return dst;
+}
+
+static void bq_resample_reset(IBufferQueue *this)
+{
+    bq_rs_t *rs = bq_rs_get(this);
+    rs->pos = 0;
+    rs->last[0] = rs->last[1] = 0;
+}
+
+
+/** Determine the state of the audio player or audio recorder associated with a buffer queue.
+ *  Note that PLAYSTATE and RECORDSTATE values are equivalent (where PLAYING == RECORDING).
+ */
+
+static SLuint32 getAssociatedState(IBufferQueue *this)
+{
+    SLuint32 state;
+    switch (InterfaceToObjectID(this)) {
+    case SL_OBJECTID_AUDIOPLAYER:
+        state = ((CAudioPlayer *) this->mThis)->mPlay.mState;
+        break;
+    case SL_OBJECTID_AUDIORECORDER:
+        state = ((CAudioRecorder *) this->mThis)->mRecord.mState;
+        break;
+    default:
+        // unreachable, but just in case we will assume it is stopped
+        assert(SL_BOOLEAN_FALSE);
+        state = SL_PLAYSTATE_STOPPED;
+        break;
+    }
+    return state;
+}
+
+void IBufferQueue_ReleaseArrayBuffers(IBufferQueue *this)
+{
+    if ((NULL == this) || (NULL == this->mArray)) {
+        return;
+    }
+
+    for (unsigned i = 0; i < this->mNumBuffers + 1; ++i) {
+        BufferHeader_release(&this->mArray[i]);
+    }
+}
+
+SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint32 size)
+{
+    SL_ENTER_INTERFACE
+    //SL_LOGV("IBufferQueue_Enqueue(%p, %p, %lu)", self, pBuffer, size);
+
+    // Note that Enqueue while a Clear is pending is equivalent to Enqueue followed by Clear
+    
+    if (NULL == pBuffer || 0 == size) {
+        result = SL_RESULT_PARAMETER_INVALID;
+    } else {
+        IBufferQueue *this = (IBufferQueue *) self;
+        interface_lock_exclusive(this);
+        BufferHeader *oldRear = this->mRear, *newRear;
+        if ((newRear = oldRear + 1) == &this->mArray[this->mNumBuffers + 1]) {
+            newRear = this->mArray;
+        }
+        if (newRear == this->mFront) {
+            result = SL_RESULT_BUFFER_INSUFFICIENT;
+        } else {
+            bq_diag_enqueue(this, pBuffer, size);
+            uint32_t out_rate = (&_opensles_user_freq!=NULL?_opensles_user_freq:44100) * 1000;
+            int num_cycles = out_rate / this->samplerate;
+            int multiplier = 1;
+            void *ownedBuffer = NULL;
+            SLuint32 ownedSize = 0;
+            if (out_rate % this->samplerate != 0) {
+                ownedBuffer = bq_resample(this, pBuffer, size, out_rate, &ownedSize);
+                if (NULL == ownedBuffer) {
+                    interface_unlock_exclusive(this);
+                    result = SL_RESULT_RESOURCE_ERROR;
+                    goto fail;
+                }
+                pBuffer = ownedBuffer;
+            } else {
+            if (this->channels == 1)
+                multiplier *= 2;
+            if (this->bps == 8)
+                multiplier *= 2;
+            if (num_cycles != 1 || this->channels == 1 || this->bps == 8) {
+                ownedBuffer = calloc(1, size * num_cycles * multiplier);
+                if (NULL == ownedBuffer) {
+                    interface_unlock_exclusive(this);
+                    result = SL_RESULT_RESOURCE_ERROR;
+                    goto fail;
+                }
+                if (this->bps != 8) {
+                    if (this->channels == 2) { // PCM16 Stereo
+                        uint32_t *src = (uint32_t *)pBuffer;
+                        uint32_t *dst = (uint32_t *)ownedBuffer;
+                        for (int j = 0; j < size; j += 4) {
+                            for (int i = 0; i < num_cycles; i++) {
+                                dst[i] = *src;
+                            }
+                            src++;
+                            dst += num_cycles;
+                        }
+                    } else { // PCM16 Mono
+                        uint16_t *src = (uint16_t *)pBuffer;
+                        uint16_t *dst = (uint16_t *)ownedBuffer;
+                        for (int j = 0; j < size; j += 2) {
+                            for (int i = 0; i < num_cycles; i++) {
+                                dst[i*2] = *src;
+                                dst[i*2+1] = *src;
+                            }
+                            src++;
+                            dst += num_cycles * 2;
+                        }
+                    }
+                } else {
+                    if (this->channels == 2) { // PCM8 Stereo
+                        uint8_t *src = (uint8_t *)pBuffer;
+                        int16_t *dst = (int16_t *)ownedBuffer;
+                        for (int j = 0; j < size; j += 2) {
+                            for (int i = 0; i < num_cycles; i++) {
+                                dst[i*2] = ((int16_t)src[0] - 0x80) << 8;
+                                dst[i*2+1] = ((int16_t)src[1] - 0x80) << 8;
+                            }
+                            src += 2;
+                            dst += num_cycles * 2;
+                        }
+                    } else { // PCM8 Mono
+                        uint8_t *src = (uint8_t *)pBuffer;
+                        int16_t *dst = (int16_t *)ownedBuffer;
+                        for (int j = 0; j < size; j++) {
+                            for (int i = 0; i < num_cycles; i++) {
+                                dst[i*2] = ((int16_t)*src - 0x80) << 8;
+                                dst[i*2+1] = ((int16_t)*src - 0x80) << 8;
+                            }
+                            src++;
+                            dst += num_cycles * 2;
+                        }
+                    }
+                }
+                pBuffer = ownedBuffer;
+            }
+            ownedSize = size * num_cycles * multiplier;
+            }
+            assert(NULL == oldRear->mOwnedBuffer);
+            oldRear->mBuffer = pBuffer;
+            oldRear->mSize = ownedSize;
+            oldRear->mOwnedBuffer = ownedBuffer;
+            this->mRear = newRear;
+            ++this->mState.count;
+            if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
+                CAudioPlayer *audioPlayer = (CAudioPlayer *) this->mThis;
+                audioPlayer->mPlay.mHeadAtEnd = SL_BOOLEAN_FALSE;
+                audioPlayer->mPlay.mHeadStalled = SL_BOOLEAN_FALSE;
+            }
+            result = SL_RESULT_SUCCESS;
+        }
+        // set enqueue attribute if state is PLAYING and the first buffer is enqueued
+        interface_unlock_exclusive_attributes(this, ((SL_RESULT_SUCCESS == result) &&
+            (1 == this->mState.count) && (SL_PLAYSTATE_PLAYING == getAssociatedState(this))) ?
+            ATTR_ENQUEUE : ATTR_NONE);
+    }
+fail:
+    SL_LEAVE_INTERFACE
+}
+
+
+SLresult IBufferQueue_Clear(SLBufferQueueItf self)
+{
+    SL_ENTER_INTERFACE
+
+    result = SL_RESULT_SUCCESS;
+    IBufferQueue *this = (IBufferQueue *) self;
+    interface_lock_exclusive(this);
+
+#ifdef ANDROID
+    if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
+        CAudioPlayer *audioPlayer = (CAudioPlayer *) this->mThis;
+        // flush associated audio player
+        result = android_audioPlayer_bufferQueue_onClear(audioPlayer);
+        if (SL_RESULT_SUCCESS == result) {
+            IBufferQueue_ReleaseArrayBuffers(this);
+            this->mFront = &this->mArray[0];
+            this->mRear = &this->mArray[0];
+            this->mState.count = 0;
+            this->mState.playIndex = 0;
+            this->mSizeConsumed = 0;
+        }
+    }
+#endif
+
+#ifdef USE_OUTPUTMIXEXT
+    // mixer might be reading from the front buffer, so tread carefully here
+    bq_resample_reset(this);
+    this->mClearRequested = SL_BOOLEAN_TRUE;
+    for (;;) {
+        if (!this->mClearRequested)
+            break;
+        if (opensles_mixer_idle() && SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
+            // no mix pass can touch this player meanwhile: clear as the mixer would
+            CAudioPlayer *audioPlayer = (CAudioPlayer *) this->mThis;
+            IBufferQueue_ReleaseArrayBuffers(this);
+            this->mFront = &this->mArray[0];
+            this->mRear = &this->mArray[0];
+            this->mState.count = 0;
+            this->mState.playIndex = 0;
+            this->mClearRequested = SL_BOOLEAN_FALSE;
+            if (NULL != audioPlayer->mTrack) {
+                audioPlayer->mTrack->mReader = NULL;
+                audioPlayer->mTrack->mAvail = 0;
+            }
+            interface_cond_broadcast(this);
+            break;
+        }
+        interface_cond_wait(this);
+    }
+#endif
+
+    interface_unlock_exclusive(this);
+
+    SL_LEAVE_INTERFACE
+}
+
+
+static SLresult IBufferQueue_GetState(SLBufferQueueItf self, SLBufferQueueState *pState)
+{
+    SL_ENTER_INTERFACE
+
+    // Note that GetState while a Clear is pending is equivalent to GetState before the Clear
+
+    if (NULL == pState) {
+        result = SL_RESULT_PARAMETER_INVALID;
+    } else {
+        IBufferQueue *this = (IBufferQueue *) self;
+        SLBufferQueueState state;
+        interface_lock_shared(this);
+    #ifdef __cplusplus // Avoid aggregate assignment trouble seen in C++ builds.
+        state.count = this->mState.count;
+        state.playIndex = this->mState.playIndex;
+#else
+        state = this->mState;
+#endif
+        interface_unlock_shared(this);
+        *pState = state;
+        result = SL_RESULT_SUCCESS;
+    }
+
+    SL_LEAVE_INTERFACE
+}
+
+
+SLresult IBufferQueue_RegisterCallback(SLBufferQueueItf self,
+    slBufferQueueCallback callback, void *pContext)
+{
+    SL_ENTER_INTERFACE
+
+    IBufferQueue *this = (IBufferQueue *) self;
+    interface_lock_exclusive(this);
+    // verify pre-condition that media object is in the SL_PLAYSTATE_STOPPED state
+    if (SL_PLAYSTATE_STOPPED == getAssociatedState(this)) {
+        this->mCallback = callback;
+        this->mContext = pContext;
+        result = SL_RESULT_SUCCESS;
+    } else {
+        result = SL_RESULT_PRECONDITIONS_VIOLATED;
+    }
+    interface_unlock_exclusive(this);
+
+    SL_LEAVE_INTERFACE
+}
+
+
+static const struct SLBufferQueueItf_ IBufferQueue_Itf = {
+    IBufferQueue_Enqueue,
+    IBufferQueue_Clear,
+    IBufferQueue_GetState,
+    IBufferQueue_RegisterCallback
+};
+
+void IBufferQueue_init(void *self)
+{
+    //SL_LOGV("IBufferQueue_init(%p) entering", self);
+    IBufferQueue *this = (IBufferQueue *) self;
+    this->mItf = &IBufferQueue_Itf;
+    this->mState.count = 0;
+    this->mState.playIndex = 0;
+    this->mCallback = NULL;
+    this->mContext = NULL;
+    this->mNumBuffers = 0;
+    this->mClearRequested = SL_BOOLEAN_FALSE;
+    this->mArray = NULL;
+    this->mFront = NULL;
+    this->mRear = NULL;
+#ifdef ANDROID
+    this->mSizeConsumed = 0;
+#endif
+    bq_resample_reset(this);
+    BufferHeader *bufferHeader = this->mTypical;
+    unsigned i;
+    for (i = 0; i < BUFFER_HEADER_TYPICAL+1; ++i, ++bufferHeader) {
+        BufferHeader_reset(bufferHeader);
+    }
+}
+
+
+/** \brief Free the buffer queue, if it was larger than typical.
+  * Called by CAudioPlayer_Destroy and CAudioRecorder_Destroy.
+  */
+
+void IBufferQueue_Destroy(IBufferQueue *this)
+{
+    for (int i = 0; i < BQ_DIAG_SLOTS; i++)
+        if (bq_diag[i].bq == this)
+            bq_diag[i].bq = NULL;
+    bq_rs_free(this);
+    IBufferQueue_ReleaseArrayBuffers(this);
+    if ((NULL != this->mArray) && (this->mArray != this->mTypical)) {
+        free(this->mArray);
+        this->mArray = NULL;
+    }
+}

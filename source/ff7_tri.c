@@ -9,6 +9,13 @@
  * same work inline (see ff7_tri_core.h for the exact behavior), between the
  * original glBegin() and glEnd().
  *
+ * The porters' renderers of pre-projected triangle lists (the minigames'
+ * native primitives and most 2D/3D effects end up there) are native too:
+ * C_006A8A3E and, since v0.6.33, C_006A8242, C_006A83AE and C_006A8BFC
+ * (ff7_tri2_core.h; per vertex they called fake_glColor4ub, glTexCoord2f and
+ * glVertex3f of the GL 1.x emulation, each reloading its globals through the
+ * GOT: ~8% of the game thread in the chocobo race).
+ *
  * Checked offline against the original under emulation (scripts/emu/
  * test_tri.py: VERTICES, pCurVertex and the current color identical) and on
  * the first calls in game: the native result is built in a scratch buffer,
@@ -23,7 +30,9 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_tri.h"
+#include "ff7_switch.h"
 #include "ff7_tri_core.h"
+#include "ff7_tri2_core.h"
 #include "ff7_selftest.h"
 
 #include "utils/logger.h"
@@ -36,9 +45,12 @@
 extern so_module so_mod;
 
 #define SYM_TRI     "_Z10C_006A8002iPtP19t_dx_rend_vertex_20P8t_matrix"
+/* Highway minigame renderer: same layout but no matrix multiply */
+#define SYM_TRI2    "_Z10C_006A8A3EiPtP19t_dx_rend_vertex_20"
 #define SYM_BEGIN   "glBegin"
 #define SYM_END     "glEnd"
-#define TRI_PROLOGUE 0x47f0e92d // push.w {r4-r10, lr}
+#define TRI_PROLOGUE  0x47f0e92d /* push.w {r4-r10, lr} — C_006A8002 */
+#define TRI2_PROLOGUE 0x43f8e92d /* push.w {r3-r9, lr}  — C_006A8A3E */
 #define CUR_VERTEX  0xf4f4d8    // pCurVertex
 #define LAST_VERTEX 0xf4f4dc    // pLastVertex
 #define VERTICES    0x146263c
@@ -55,12 +67,17 @@ typedef void (* begin_fn)(int mode);
 typedef void (* end_fn)(void);
 
 static so_hook tri_hook;
+static so_hook tri2_hook;        /* C_006A8A3E (highway) */
 static begin_fn gl_begin;
 static end_fn gl_end;
 static tri_state state;
 static uint8_t * vertices;
 static int selftest_left = SELFTEST_CALLS, disabled;
 static unsigned long long calls, verts_out;
+
+/* --- C_006A8A3E stats --- */
+static int tri2_disabled;
+static unsigned long long tri2_calls, tri2_verts_out;
 
 static int selftest(int count, const uint16_t * idx, const uint8_t * verts, const float * m) {
     size_t room = *state.last > vertices ? (size_t) (*state.last - vertices) : 0;
@@ -116,7 +133,81 @@ static void tri_native(int count, const uint16_t * idx, const uint8_t * verts, c
     calls++;
 }
 
+/*
+ * C_006A8A3E — highway minigame triangle renderer.
+ * Already inside a glBegin/glEnd block; tail-calls glEnd().
+ * No matrix multiply, no keep_alpha: straight copy from vertex buffer.
+ *
+ * Checked offline via scripts/emu/test_tri2.py (x/y/z and u/v match;
+ * the emulator cannot verify colours because fake_glColor4ub uses GOT
+ * indirection that ff7emu.py does not resolve). The colour logic mirrors
+ * ff7_tri_core.h exactly: input offsets from the disassembly of the
+ * original function are byte-for-byte the same as what the original writes
+ * to the global CUR_R/G/B/A and then glVertex3f copies to the buffer.
+ * If the Vita selftest (selftest_on.txt) flags a mismatch, tri2_disabled
+ * is set and all calls fall through to the original.
+ */
+static void tri2_native(int count, const uint16_t * idx, const uint8_t * verts) {
+    if (tri2_disabled) {
+        SO_CONTINUE(int, tri2_hook, count, idx, verts);
+        return;
+    }
+    gl_begin(4); /* GL_TRIANGLES */
+    uint8_t * start = *state.cur;
+    tri2_core_draw(&state, count, idx, verts);
+    tri2_verts_out += (*state.cur - start) / 0x18;
+    gl_end();
+    tri2_calls++;
+}
+
+/*
+ * C_006A8242 (flat color), C_006A83AE (smooth color), C_006A8BFC (smooth
+ * color and u/v): the same loop as C_006A8A3E in its other modes.
+ */
+static struct {
+    const char * sym, * name;
+    int mode;
+    so_hook hook;
+    unsigned long long calls, verts;
+} lists[] = {
+    { "_Z10C_006A8242iPtP19t_dx_rend_vertex_20", "C_006A8242", TRI2_FLAT | TRI2_NO_UV },
+    { "_Z10C_006A83AEiPtP19t_dx_rend_vertex_20", "C_006A83AE", TRI2_SMOOTH | TRI2_NO_UV },
+    { "_Z10C_006A8BFCiPtP19t_dx_rend_vertex_20", "C_006A8BFC", TRI2_SMOOTH | TRI2_UV },
+};
+#define NUM_LISTS ((int) (sizeof(lists) / sizeof(lists[0])))
+
+static inline void list_draw(int i, int count, const uint16_t * idx, const uint8_t * verts) {
+    gl_begin(4); // GL_TRIANGLES
+    uint8_t * start = *state.cur;
+    tri2_core_draw_mode(&state, lists[i].mode, count, idx, verts);
+    lists[i].verts += (*state.cur - start) / 0x18;
+    gl_end();
+    lists[i].calls++;
+}
+
+static void list0_native(int count, const uint16_t * idx, const uint8_t * verts) { list_draw(0, count, idx, verts); }
+static void list1_native(int count, const uint16_t * idx, const uint8_t * verts) { list_draw(1, count, idx, verts); }
+static void list2_native(int count, const uint16_t * idx, const uint8_t * verts) { list_draw(2, count, idx, verts); }
+
+static void lists_patch(void) {
+    static void (* const natives[NUM_LISTS])(int, const uint16_t *, const uint8_t *) = { list0_native, list1_native,
+                                                                                          list2_native };
+    if (ff7_switch_off("ff7_tri (C_006A8242, C_006A83AE, C_006A8BFC)", DATA_PATH "trilists_off.txt")) return;
+    uintptr_t fn[NUM_LISTS];
+    for (int i = 0; i < NUM_LISTS; i++) {
+        fn[i] = so_symbol(&so_mod, lists[i].sym);
+        if (!fn[i] || *(uint32_t *) (fn[i] & ~1) != TRI2_PROLOGUE) { // the same push.w {r3-r9, lr}
+            l_warn("ff7_tri: %s not found or unexpected prologue, triangle list renderers not hooked", lists[i].name);
+            return;
+        }
+    }
+    for (int i = 0; i < NUM_LISTS; i++) lists[i].hook = hook_addr(fn[i], (uintptr_t) natives[i]);
+    l_info("ff7_tri: native triangle list renderers (C_006A8242, C_006A83AE, C_006A8BFC) installed");
+}
+
 void ff7_tri_patch(void) {
+    int tri_off = ff7_switch_off("ff7_tri (C_006A8002)", DATA_PATH "tri_off.txt");
+    int tri2_off = ff7_switch_off("ff7_tri (C_006A8A3E)", DATA_PATH "tri2_off.txt");
     uintptr_t fn = so_symbol(&so_mod, SYM_TRI);
     gl_begin = (begin_fn) so_symbol(&so_mod, SYM_BEGIN);
     gl_end = (end_fn) so_symbol(&so_mod, SYM_END);
@@ -136,12 +227,34 @@ void ff7_tri_patch(void) {
     state.keep_alpha = (const uint32_t *) (b + KEEP_ALPHA);
     vertices = (uint8_t *) (b + VERTICES);
     selftest_left = ff7_selftest_count(SELFTEST_CALLS);
-    tri_hook = hook_addr(fn, (uintptr_t) &tri_native);
-    l_info("ff7_tri: native triangle renderer installed (selftest on %d calls)", selftest_left);
+    if (!tri_off) {
+        tri_hook = hook_addr(fn, (uintptr_t) &tri_native);
+        l_info("ff7_tri: native triangle renderer installed (selftest on %d calls)", selftest_left);
+    }
+    lists_patch();
+    if (tri2_off) return;
+
+    /* C_006A8A3E — highway renderer (no matrix, same vertex buffer) */
+    uintptr_t fn2 = so_symbol(&so_mod, SYM_TRI2);
+    if (!fn2 || *(uint32_t *) (fn2 & ~1) != TRI2_PROLOGUE) {
+        l_warn("ff7_tri: C_006A8A3E not found or unexpected prologue, highway renderer not hooked");
+        return;
+    }
+    tri2_hook = hook_addr(fn2, (uintptr_t) &tri2_native);
+    l_info("ff7_tri: native highway triangle renderer (C_006A8A3E) installed");
 }
 
 void ff7_tri_report(double seconds) {
-    if (seconds <= 0 || !calls) return;
-    l_info("triangle lists/s: %.0f native, %.0f vertices/s", calls / seconds, verts_out / seconds);
+    if (seconds <= 0) return;
+    if (calls)
+        l_info("triangle lists/s: %.0f native, %.0f vertices/s", calls / seconds, verts_out / seconds);
+    if (tri2_calls)
+        l_info("highway triangles/s (C_006A8A3E): %.0f native, %.0f vertices/s", tri2_calls / seconds, tri2_verts_out / seconds);
     calls = verts_out = 0;
+    tri2_calls = tri2_verts_out = 0;
+    if (lists[0].calls | lists[1].calls | lists[2].calls)
+        l_info("pre-projected triangle lists/s: %.0f flat, %.0f smooth, %.0f smooth+uv native; %.0f vertices/s",
+               lists[0].calls / seconds, lists[1].calls / seconds, lists[2].calls / seconds,
+               (lists[0].verts + lists[1].verts + lists[2].verts) / seconds);
+    for (int i = 0; i < NUM_LISTS; i++) lists[i].calls = lists[i].verts = 0;
 }

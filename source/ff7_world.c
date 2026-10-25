@@ -53,6 +53,7 @@
 #include "ff7_world_tri.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
+#include "ff7_so_inline.h"
 
 #include "utils/logger.h"
 #include "utils/utils.h"
@@ -119,6 +120,29 @@ typedef void (* check_event_fn)(void);
 
 static mk_address_fn mk_address;
 static check_event_fn check_event;
+
+/*
+ * mk_address and _check_event inlined (v0.6.35): the projection made ~370
+ * _check_event calls per mesh and the vertex colors ~10 calls per vertex,
+ * each into the .so (a third of the world map's game thread in the v0.6.34
+ * profile). Same results: the page table entry plus the offset (va 0 or an
+ * unmapped page go to the real function), and the call counter with every
+ * 2048th call going to the real _check_event.
+ */
+static uint8_t * const * memmap;
+static uint32_t * ev_count;
+
+static inline uint8_t * xaddr(uint32_t va) {
+    uint8_t * p = memmap ? memmap[va >> 12] : (uint8_t *) 0;
+    return p && va ? p + (va & 0xfff) : mk_address(va);
+}
+
+static inline void xevent(void) {
+    uint32_t c;
+    if (ev_count && ((c = *ev_count + 1) & 0x7ff)) *ev_count = c;
+    else check_event();
+}
+
 static volatile uint32_t * regs;
 static uint8_t * fpu;
 static so_hook project_hook;
@@ -141,13 +165,13 @@ static unsigned long long mesh_calls, mesh_fallbacks;
 
 static inline uint32_t rd32(uint32_t va) {
     uint32_t v;
-    memcpy(&v, mk_address(va), 4);
+    memcpy(&v, xaddr(va), 4);
     return v;
 }
 
 // Host address of VA_PAGES if both pages are mapped back to back, else NULL
 static uint8_t * pages(void) {
-    uint8_t * lo = mk_address(VA_PAGES), * hi = mk_address(VA_PAGES + 0x1000);
+    uint8_t * lo = xaddr(VA_PAGES), * hi = xaddr(VA_PAGES + 0x1000);
     return hi == lo + 0x1000 ? lo : NULL;
 }
 
@@ -159,7 +183,7 @@ static int project(uint8_t * mem) {
     int32_t right = (int32_t) (rd32(VA_WIDTH) + (uint32_t) left);
     int32_t bottom = (int32_t) (rd32(VA_HEIGHT) + (uint32_t) top);
     float k;
-    memcpy(&k, mk_address(VA_K), 4);
+    memcpy(&k, xaddr(VA_K), 4);
     return world_core_project(AT(const float *, VA_MATRIX), AT(const float (*)[3], VA_IN),
                               AT(float (*)[4], VA_OUT), AT(float (*)[3], VA_PROJ),
                               AT(int32_t *, VA_FLAGS), k, left, top, right, bottom);
@@ -201,7 +225,7 @@ static void project_native(void) {
     regs[EAX] = 123; // the x86 loop's last index, count and next index
     regs[ECX] = 0;
     regs[EDX] = 126;
-    for (int i = 0; i < CHECK_EVENTS; i++) check_event();
+    for (int i = 0; i < CHECK_EVENTS; i++) xevent();
     regs[ESP] += 4; // ret (EBP is restored by the original's epilogue: untouched here)
     calls++;
 }
@@ -212,7 +236,7 @@ static inline void xread(uint32_t va, void * dst, uint32_t n_bytes) {
     while (n_bytes) {
         uint32_t in_page = 0x1000 - (va & 0xfff);
         uint32_t n = n_bytes < in_page ? n_bytes : in_page;
-        memcpy(d, mk_address(va), n);
+        memcpy(d, xaddr(va), n);
         d += n;
         va += n;
         n_bytes -= n;
@@ -237,11 +261,11 @@ static int light(uint32_t m_va, uint32_t n_va, uint32_t rgb_va, uint32_t src_va,
     xread(m_va, m, sizeof(m));
     xread(n_va, n, sizeof(n));
     xread(rgb_va, rgb, sizeof(rgb));
-    memcpy(&zero, mk_address(VA_ZERO), 4);
-    memcpy(&sat, mk_address(VA_SAT), 4);
+    memcpy(&zero, xaddr(VA_ZERO), 4);
+    memcpy(&sat, xaddr(VA_SAT), 4);
     int path[3];
     if (!world_core_light(m, n, rgb, zero, sat, r->out, path, &r->lt, &r->eq)) return 0;
-    r->out[3] = *mk_address(src_va + 3);
+    r->out[3] = *xaddr(src_va + 3);
     uint32_t sel = world_core_light_edx(path);
     uint32_t hi = sel == WORLD_EDX_RGB ? rgb_va : sel == WORLD_EDX_OUT ? out_va : m_va;
     r->edx = (hi & ~0xffu) | r->out[3];
@@ -279,22 +303,22 @@ static void light_native(void) {
 
     // Same order as the x86 code: out[2], out[1], out[0], out[3]
     static const int order[4] = { 2, 1, 0, 3 };
-    for (int i = 0; i < 4; i++) *mk_address(out + order[i]) = r.out[order[i]];
+    for (int i = 0; i < 4; i++) *xaddr(out + order[i]) = r.out[order[i]];
     regs[EAX] = out;
     regs[ECX] = src;
     regs[EDX] = r.edx;
     fpu[FPU_C0] = (uint8_t) r.lt;
     fpu[FPU_C2] = 0;
     fpu[FPU_C3] = (uint8_t) r.eq;
-    check_event(); // 0x66CFE8's
-    check_event();
+    xevent(); // 0x66CFE8's
+    xevent();
     regs[ESP] = esp + 4; // ret
     light_calls++;
 }
 
 static inline void xwr32(uint32_t va, uint32_t v) {
-    if ((va & 0xfff) <= 0xffc) memcpy(mk_address(va), &v, 4);
-    else for (int i = 0; i < 4; i++) *mk_address(va + i) = (uint8_t) (v >> (8 * i));
+    if ((va & 0xfff) <= 0xffc) memcpy(xaddr(va), &v, 4);
+    else for (int i = 0; i < 4; i++) *xaddr(va + i) = (uint8_t) (v >> (8 * i));
 }
 
 /*
@@ -344,8 +368,8 @@ static void mesh_native(void) {
     int32_t c = (int32_t) ((rd32(VA_WIDTH) >> 1) + rd32(VA_LEFT));
     int32_t v0 = (int32_t) rd32(ebp - 4);
     float k1, k2;
-    memcpy(&k1, mk_address(VA_K1), 4);
-    memcpy(&k2, mk_address(VA_K2), 4);
+    memcpy(&k1, xaddr(VA_K1), 4);
+    memcpy(&k2, xaddr(VA_K2), 4);
 #define AT(type, va) ((type) (mem + ((va) - VA_PAGES)))
     int32_t eax, ecx;
     int zd = world_core_mesh(src, (int32_t) step, AT(const float *, VA_MATRIX), AT(const float *, VA_M2),
@@ -356,7 +380,7 @@ static void mesh_native(void) {
     regs[ECX] = (uint32_t) ecx;
     regs[EDX] = (WORLD_MESH_VERTICES - 1) * 12;
     regs[EBP] = ebp_in; // pop ebp
-    for (int i = 0; i < 1 + 4 * WORLD_MESH_VERTICES; i++) check_event();
+    for (int i = 0; i < 1 + 4 * WORLD_MESH_VERTICES; i++) xevent();
     regs[ESP] = esp + 4; // ret
     mesh_calls++;
 
@@ -405,6 +429,8 @@ static void tris_patch(uintptr_t light_fn) {
     }
     tri_env.mk_address = mk_address;
     tri_env.check_event = check_event;
+    tri_env.memmap = memmap;
+    tri_env.ev_count = ev_count;
     tri_env.regs = regs;
     tri_env.fpu = fpu;
     tri_env.f_68dae1 = (void (*)(void)) light_fn; // its entry: the native hook
@@ -428,6 +454,11 @@ void ff7_world_patch(void) {
         || f < so_mod.text_base || f >= so_mod.text_base + 0x1498e40) {
         l_warn("ff7_world: unexpected .so layout, native world map projection disabled");
         return;
+    }
+    if (!ff7_so_inline_lookup(&so_mod, (uintptr_t) mk_address, (uintptr_t) check_event, &memmap, &ev_count)) {
+        memmap = NULL;
+        ev_count = NULL;
+        l_warn("ff7_world: mk_address/_check_event not as expected, calling them (slower)");
     }
     selftest_left = ff7_selftest_count(SELFTEST_CALLS);
     project_hook = hook_addr(fn, (uintptr_t) &project_native);

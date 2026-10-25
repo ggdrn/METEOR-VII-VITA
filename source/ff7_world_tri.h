@@ -47,6 +47,8 @@ typedef struct world_env {
     void (* f_68dae1)(void);  // vertex color (the native hook in game)
     void (* f_66e272)(void);  // vertex buffer allocation (its slow path)
     uint32_t counters[4];     // triangles: seen, drawn, allocation slow paths, x87 NaN compares
+    uint8_t * const * memmap; // mk_address's page table, or NULL: call it
+    uint32_t * ev_count;      // _check_event's call counter, or NULL: call it
 } world_env;
 
 enum { WT_EAX = 0, WT_ECX = 1, WT_EDX = 2, WT_ESP = 4, WT_EBP = 5 };
@@ -56,10 +58,27 @@ enum { WT_EAX = 0, WT_ECX = 1, WT_EDX = 2, WT_ESP = 4, WT_EBP = 5 };
 #define WT_FPU_C3  0x64
 #define WT_FPU_ZE  0x56
 
+/*
+ * mk_address and _check_event inlined (v0.6.35; ~a third of the world map's
+ * game thread went to calling them): the page table entry plus the offset
+ * (va 0 or an unmapped page go to the real function), and the call counter
+ * with every 2048th call going to the real _check_event.
+ */
+static inline uint8_t * wt_addr(const world_env * e, uint32_t va) {
+    uint8_t * p = e->memmap ? e->memmap[va >> 12] : (uint8_t *) 0;
+    return p && va ? p + (va & 0xfff) : e->mk_address(va);
+}
+
+static inline void wt_event(const world_env * e) {
+    uint32_t c;
+    if (e->ev_count && ((c = *e->ev_count + 1) & 0x7ff)) *e->ev_count = c;
+    else e->check_event();
+}
+
 static inline uint8_t * wt_host(const world_env * e, uint32_t va) {
     uint32_t off = va - 0xe38000u;
     if (off < 0x2000 && e->pages) return e->pages + off;
-    return e->mk_address(va);
+    return wt_addr(e, va);
 }
 
 static inline uint32_t wt_rd32(const world_env * e, uint32_t va) {
@@ -68,7 +87,7 @@ static inline uint32_t wt_rd32(const world_env * e, uint32_t va) {
         __builtin_memcpy(&v, wt_host(e, va), 4);
     } else {
         v = 0;
-        for (int i = 0; i < 4; i++) v |= (uint32_t) *e->mk_address(va + i) << (8 * i);
+        for (int i = 0; i < 4; i++) v |= (uint32_t) *wt_addr(e, va + i) << (8 * i);
     }
     return v;
 }
@@ -77,7 +96,7 @@ static inline void wt_wr32(const world_env * e, uint32_t va, uint32_t v) {
     if ((va & 0xfff) <= 0xffc) {
         __builtin_memcpy(wt_host(e, va), &v, 4);
     } else {
-        for (int i = 0; i < 4; i++) *e->mk_address(va + i) = (uint8_t) (v >> (8 * i));
+        for (int i = 0; i < 4; i++) *wt_addr(e, va + i) = (uint8_t) (v >> (8 * i));
     }
 }
 
@@ -109,9 +128,29 @@ static inline void wt_wrf(const world_env * e, uint32_t va, float f) {
     wt_wr32(e, va, wt_bits(f));
 }
 
+// Host address of [va, va + len) if it lies in one page, else NULL (then
+// field by field): one translation per record instead of one per field
+static inline uint8_t * wt_block(const world_env * e, uint32_t va, uint32_t len) {
+    return (va & 0xfff) + len <= 0x1000 ? wt_host(e, va) : (uint8_t *) 0;
+}
+
+static inline uint32_t wt_get(const world_env * e, const uint8_t * b, uint32_t va, uint32_t off) {
+    uint32_t v;
+    if (b) {
+        __builtin_memcpy(&v, b + off, 4);
+        return v;
+    }
+    return wt_rd32(e, va + off);
+}
+
+static inline void wt_put(const world_env * e, uint8_t * b, uint32_t va, uint32_t off, uint32_t v) {
+    if (b) __builtin_memcpy(b + off, &v, 4);
+    else wt_wr32(e, va + off, v);
+}
+
 // vcvt.s32.f32 (0x75F090): truncates, saturates, NaN -> 0; one _check_event
 static inline int32_t wt_int(const world_env * e, float f) {
-    e->check_event();
+    wt_event(e);
     if (f != f) return 0;
     if (f >= 2147483648.0f) return 2147483647;
     if (f <= -2147483648.0f) return (int32_t) 0x80000000u;
@@ -162,7 +201,7 @@ static inline float wt_area(world_env * e, uint32_t a, uint32_t b, uint32_t c) {
     s = s - ax * cy;
     s = s - bx * ay;
     s = s - cx * by;
-    e->check_event();
+    wt_event(e);
     return (float) s;
 }
 
@@ -191,7 +230,7 @@ static inline void wt_sort(world_env * e, const float z[3], int32_t * lo, int32_
             *mid = 1;
         }
     }
-    e->check_event();
+    wt_event(e);
 }
 
 // 0x66E272 (1, t): room for one triangle in the texture's vertex buffer.
@@ -199,29 +238,31 @@ static inline void wt_sort(world_env * e, const float z[3], int32_t * lo, int32_
 // others go to the recompiled function.
 static inline int wt_alloc(world_env * e, uint32_t t, uint32_t esp) {
     if (!t) {
-        e->check_event();
+        wt_event(e);
         return 0;
     }
-    uint32_t pt = wt_rd32(e, t + 0x30);
-    if (wt_rd32(e, t + 0x54) < wt_rd32(e, pt) || 1 > (int32_t) wt_rd32(e, t + 0x50)) {
+    uint8_t * tb = wt_block(e, t, 0x90);
+    uint32_t pt = wt_get(e, tb, t, 0x30);
+    if (wt_get(e, tb, t, 0x54) < wt_rd32(e, pt) || 1 > (int32_t) wt_get(e, tb, t, 0x50)) {
         uint32_t args[2] = { 1, t };
         e->counters[2]++;
         wt_call(e, e->f_66e272, esp, 2, args);
         return e->regs[WT_EAX] != 0;
     }
-    uint32_t p = wt_rd32(e, t + 0x8c);
-    wt_wr32(e, p + 0x8, wt_rd32(e, p + 0x8) + 1);
-    wt_wr32(e, t + 0x4c, wt_rd32(e, t + 0x4c) + 1);
-    wt_wr32(e, t + 0x50, wt_rd32(e, t + 0x50) - 1);
-    wt_wr32(e, t + 0x70, wt_rd32(e, t + 0x80));
-    wt_wr32(e, t + 0x74, wt_rd32(e, t + 0x84));
-    wt_wr32(e, t + 0x78, wt_rd32(e, t + 0x88));
-    wt_wr32(e, t + 0x80, wt_rd32(e, t + 0x80) + wt_rd32(e, t + 0x40));
-    wt_wr32(e, t + 0x84, wt_rd32(e, t + 0x84) + wt_rd32(e, t + 0x44));
-    wt_wr32(e, t + 0x88, wt_rd32(e, t + 0x88) + 1);
-    wt_wr32(e, p + 0xc, wt_rd32(e, p + 0xc) + wt_rd32(e, t + 0x38));
-    wt_wr32(e, p + 0x18, wt_rd32(e, p + 0x18) + wt_rd32(e, t + 0x3c));
-    e->check_event();
+    uint32_t p = wt_get(e, tb, t, 0x8c);
+    uint8_t * pb = wt_block(e, p, 0x1c); // may overlap t's fields: written in the x86 order
+    wt_put(e, pb, p, 0x8, wt_get(e, pb, p, 0x8) + 1);
+    wt_put(e, tb, t, 0x4c, wt_get(e, tb, t, 0x4c) + 1);
+    wt_put(e, tb, t, 0x50, wt_get(e, tb, t, 0x50) - 1);
+    wt_put(e, tb, t, 0x70, wt_get(e, tb, t, 0x80));
+    wt_put(e, tb, t, 0x74, wt_get(e, tb, t, 0x84));
+    wt_put(e, tb, t, 0x78, wt_get(e, tb, t, 0x88));
+    wt_put(e, tb, t, 0x80, wt_get(e, tb, t, 0x80) + wt_get(e, tb, t, 0x40));
+    wt_put(e, tb, t, 0x84, wt_get(e, tb, t, 0x84) + wt_get(e, tb, t, 0x44));
+    wt_put(e, tb, t, 0x88, wt_get(e, tb, t, 0x88) + 1);
+    wt_put(e, pb, p, 0xc, wt_get(e, pb, p, 0xc) + wt_get(e, tb, t, 0x38));
+    wt_put(e, pb, p, 0x18, wt_get(e, pb, p, 0x18) + wt_get(e, tb, t, 0x3c));
+    wt_event(e);
     return 1;
 }
 
@@ -239,10 +280,11 @@ static inline int world_tri_run(world_env * e) {
     uint32_t esp = regs[WT_ESP], ebp_in = regs[WT_EBP];
     uint32_t ebp = esp - 4;
     uint32_t frame = ebp - 0x174; // ESP after the prologue (sub esp, 0x170; push esi)
-    {
-        uint8_t * lo = e->mk_address(frame - 0x40), * hi = e->mk_address(ebp + 0x14);
-        if (hi != lo + (ebp + 0x14 - (frame - 0x40))) return 0;
-    }
+    // the frame (and the arguments above it) as one host block: its locals are
+    // used through `fr` (frame_lo is its x86 address)
+    const uint32_t frame_lo = frame - 0x40;
+    uint8_t * fr = wt_addr(e, frame_lo);
+    if (wt_addr(e, ebp + 0x14) != fr + (ebp + 0x14 - frame_lo)) return 0;
     uint32_t tri = wt_rd32(e, esp + 4), end = wt_rd32(e, esp + 8), normals = wt_rd32(e, esp + 12);
     uint32_t arg4 = wt_rd32(e, esp + 16);
 
@@ -262,7 +304,9 @@ static inline int world_tri_run(world_env * e) {
     uint32_t edx = 0;
     do {
         e->counters[0]++;
-        uint32_t idx[3] = { wt_rd8(e, tri), wt_rd8(e, tri + 1), wt_rd8(e, tri + 2) };
+        const uint8_t * trb = wt_block(e, tri, 12);
+        uint32_t idx[3];
+        for (int k = 0; k < 3; k++) idx[k] = trb ? trb[k] : wt_rd8(e, tri + k);
         uint32_t f = wt_rd32(e, WT_FLAGS + 4 * idx[0]) | wt_rd32(e, WT_FLAGS + 4 * idx[1])
                    | wt_rd32(e, WT_FLAGS + 4 * idx[2]);
         if (!(f & 0xff) || !(f & 0xff00)) {
@@ -350,39 +394,60 @@ static inline int world_tri_run(world_env * e) {
                 }
             }
 
-            uint32_t tex = (wt_rd32(e, tri + 8) >> 16) & 0x1ff;
-            e->check_event(); // 0x74C969
+            uint32_t tex = (wt_get(e, trb, tri, 8) >> 16) & 0x1ff;
+            wt_event(e); // 0x74C969
             if (!wt_rd32(e, 0x96994c)) goto next;
             if (!wt_alloc(e, wt_rd32(e, 0xe2bbd8 + 4 * tex), frame)) goto next;
             e->counters[1]++;
 
+            // u, v from the triangle bytes minus the texture's origin, times its scale
+            // (the x86 code rereads these per coordinate; only reads in between)
             float uv[6];
-            for (int k = 0; k < 6; k++) {
-                uint32_t base = wt_rd32(e, 0xe2d168);
-                int32_t d = (int32_t) wt_rd8(e, tri + 4 + k) - (int32_t) wt_rd16(e, base + 4 * tex + 2 * (k & 1));
-                uint32_t t = wt_rd32(e, 0xe2bbd8 + 4 * tex);
-                uv[k] = (float) ((double) d * (double) wt_rdf(e, t + 0x24 + 4 * (k & 1)));
+            {
+                uint32_t base = wt_rd32(e, 0xe2d168) + 4 * tex, t = wt_rd32(e, 0xe2bbd8 + 4 * tex);
+                int32_t org[2] = { (int32_t) wt_rd16(e, base), (int32_t) wt_rd16(e, base + 2) };
+                double scale[2] = { wt_rdf(e, t + 0x24), wt_rdf(e, t + 0x28) };
+                const uint8_t * tb = wt_block(e, tri + 4, 6);
+                for (int k = 0; k < 6; k++) {
+                    int32_t d = (int32_t) (tb ? tb[k] : wt_rd8(e, tri + 4 + k)) - org[k & 1];
+                    uv[k] = (float) ((double) d * scale[k & 1]);
+                }
             }
             float kn = wt_rdf(e, 0x7b7efc);
-            for (int k = 0; k < 3; k++)
-                for (int c = 0; c < 3; c++)
-                    wt_wrf(e, n_va[k] + 4 * c,
-                           (float) ((double) (int16_t) wt_rd16(e, nv[k] + 2 * c) * (double) kn));
             for (int k = 0; k < 3; k++) {
+                const uint8_t * nb = wt_block(e, nv[k], 6);
+                for (int c = 0; c < 3; c++) {
+                    int16_t n;
+                    if (nb) __builtin_memcpy(&n, nb + 2 * c, 2);
+                    else n = (int16_t) wt_rd16(e, nv[k] + 2 * c);
+                    __builtin_memcpy(fr + (n_va[k] + 4 * c - frame_lo), &(float) { (float) ((double) n * (double) kn) }, 4);
+                }
+            }
+            for (int k = 0; k < 3; k++) { // 0x68DAE1 (cdecl), its arguments pushed in the frame
                 uint32_t args[5] = { wt_rd32(e, 0xe360f4) + 0xf8, n_va[k], col_va + 16 * k, src_va + 4 * k,
                                      o_va[k] };
-                wt_call(e, e->f_68dae1, frame, 5, args);
+                __builtin_memcpy(fr + (frame - 20 - frame_lo), args, sizeof(args));
+                regs[WT_ESP] = frame - 24;
+                e->f_68dae1();
+                regs[WT_ESP] = frame;
             }
             float one = wt_rdf(e, 0x7b7ef8);
             for (int k = 0; k < 3; k++) {
-                float inv = wt_div(e, one, wt_rdf(e, ov[k] + 0xc));
+                const uint8_t * ob = wt_block(e, ov[k], 16);
+                float o[4];
+                if (ob) __builtin_memcpy(o, ob, 16);
+                else for (int c = 0; c < 4; c++) o[c] = wt_rdf(e, ov[k] + 4 * c);
+                float inv = wt_div(e, one, o[3]);
                 uint32_t vb = wt_rd32(e, wt_rd32(e, 0xe2bbd8 + 4 * tex) + 0x70) + 0x20 * k;
-                for (int c = 0; c < 3; c++)
-                    wt_wrf(e, vb + 4 * c, (float) ((double) wt_rdf(e, ov[k] + 4 * c) * (double) inv));
-                wt_wrf(e, vb + 0xc, inv);
-                wt_wr32(e, vb + 0x10, wt_rd32(e, o_va[k]));
-                wt_wrf(e, vb + 0x18, uv[2 * k]);
-                wt_wrf(e, vb + 0x1c, uv[2 * k + 1]);
+                uint8_t * vbb = wt_block(e, vb, 0x20);
+                uint32_t color;
+                __builtin_memcpy(&color, fr + (o_va[k] - frame_lo), 4);
+                // a float product rounds as the x87 double one stored as float:
+                // the double product of two floats is exact
+                uint32_t w[8] = { wt_bits(o[0] * inv), wt_bits(o[1] * inv), wt_bits(o[2] * inv), wt_bits(inv),
+                                  color, 0, wt_bits(uv[2 * k]), wt_bits(uv[2 * k + 1]) };
+                for (int c = 0; c < 8; c++)
+                    if (c != 5) wt_put(e, vbb, vb, 4 * c, w[c]);
             }
         }
     next: // the first two rejections skip this
@@ -397,7 +462,7 @@ static inline int world_tri_run(world_env * e) {
     regs[WT_ECX] = tri;
     regs[WT_EDX] = edx;
     regs[WT_EBP] = ebp_in;
-    e->check_event();
+    wt_event(e);
     regs[WT_ESP] = esp + 4; // ret
     return 1;
 }

@@ -24,6 +24,7 @@
 #pragma GCC optimize ("no-fast-math")
 
 #include "ff7_math.h"
+#include "ff7_switch.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
 
@@ -97,6 +98,7 @@ NATIVE_TRIG(cos_native, cos, cos_hook, selftest_cos, disabled_cos)
 NATIVE_TRIG(sin_native, sin, sin_hook, selftest_sin, disabled_sin)
 
 void ff7_math_patch(void) {
+    if (ff7_switch_off("ff7_math", DATA_PATH "math_off.txt")) return;
     uintptr_t c = so_symbol(&so_mod, SYM_COS), s = so_symbol(&so_mod, SYM_SIN);
     check_event = (check_event_fn) so_symbol(&so_mod, SYM_CHECK_EVENT);
     regs = ff7_x86_regs();

@@ -45,6 +45,7 @@
 #include "reimpl/gl_queue.h"
 
 #include "reimpl/gl_variants.h"
+#include "ff7_interp.h"
 #include "utils/cpu.h"
 #include "utils/glstats.h"
 #include "utils/glutil.h"
@@ -410,6 +411,9 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         DIRECT((active ? apply_attribs() : (void) 0, glDrawArrays_stat(mode, first, count)));
         return;
     }
+    if (ff7_ip_recording && attribs[0].enabled) // battle 30 fps probe: x/y and u/v of the draw
+        ff7_interp_draw(mode, first, count, attribs[0].ptr, attribs[0].size, attribs[0].type, attribs[0].stride,
+                        attribs[3].enabled ? attribs[3].ptr : NULL, attribs[3].size, attribs[3].type, attribs[3].stride);
     // Bytes each enabled array reads for vertices first .. first + count - 1
     int n = 0;
     uint8_t idx[MAX_ATTRIBS];
@@ -529,8 +533,13 @@ static unsigned pixel_size(GLenum format, GLenum type) {
     }
 }
 
+// ff7_texture.c: a page it left unconverted for this upload goes as indices + palette
+int ff7_texture_upload(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLenum format,
+                       GLenum type, const void * pixels);
+
 void gq_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h,
                      GLint border, GLenum format, GLenum type, const void * pixels) {
+    if (ff7_texture_upload(target, level, internalformat, w, h, format, type, pixels)) return;
     if (on_game()) {
         unsigned bpp = pixel_size(format, type);
         uint32_t bytes = 0;
@@ -550,6 +559,7 @@ void gq_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w
 
 void gq_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat * value) {
     if (on_game() && count > 0 && value) {
+        ff7_ip_note_words(IP_MATRIX, value, 16 * sizeof(GLfloat));
         const uint32_t a[] = { location, count, transpose, 0 };
         queue_call((void *) glUniformMatrix4fv_variants, 4, a, value, (uint32_t) count * 16 * sizeof(GLfloat), 3);
         return;
@@ -557,13 +567,137 @@ void gq_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, c
     DIRECT(glUniformMatrix4fv_variants(location, count, transpose, value));
 }
 
+/*
+ * Paletted textures (ff7_texture.c): an 8-bit page goes to the GPU as its
+ * indices plus the 256 colors a conversion would have produced, a GXM P8
+ * texture (the GPU looks the palette up when it samples, filtering included).
+ * vitaGL's own GL_COLOR_INDEX8_EXT upload stores pixel by pixel through
+ * callbacks, so the texture is set up directly (vglSetupTexture: vitaGL owns
+ * the index data and frees it with the texture). vitaGL does not own the
+ * palette: kept per texture name here and freed once the texture is deleted
+ * (or specified again) and the GPU is past the frames that drew with it.
+ * These run on the thread that runs GL (the render thread when queued).
+ */
+void * gpu_alloc_palette(const void * data, uint32_t w, uint32_t bpe); // vitaGL internals
+void gpu_free_palette(void * pal);
+void * gpu_alloc_mapped_aligned_for_gpu(size_t alignment, size_t size);
+
+#define PAL_TEXTURES 16384 // vitaGL's TEXTURES_NUM
+#define PAL_DEFER    1024
+#define PAL_FRAMES   8     // frames a released palette is kept (vitaGL purges its own after 4)
+
+static void * pal_of[PAL_TEXTURES];
+static struct {
+    void * pal;
+    uint32_t frame;
+} pal_defer[PAL_DEFER];
+static unsigned pal_defer_head, pal_defer_tail; // ring: tail..head pending
+static unsigned pal_live, pal_uploads, pal_failed;
+
+static void pal_purge(void) {
+    while (pal_defer_tail != pal_defer_head) {
+        unsigned i = pal_defer_tail % PAL_DEFER;
+        if (vglGetFrameNumber() - pal_defer[i].frame <= PAL_FRAMES) break;
+        gpu_free_palette(pal_defer[i].pal);
+        pal_defer_tail++;
+    }
+}
+
+static void pal_release(GLuint id) {
+    if (id >= PAL_TEXTURES || !pal_of[id]) return;
+    if (pal_defer_head - pal_defer_tail == PAL_DEFER) pal_defer_tail++; // full (never seen): leak the oldest
+    pal_defer[pal_defer_head % PAL_DEFER].pal = pal_of[id];
+    pal_defer[pal_defer_head % PAL_DEFER].frame = vglGetFrameNumber();
+    pal_defer_head++;
+    pal_of[id] = NULL;
+    pal_live--;
+}
+
+// data: the 256 colors (GL_RGBA bytes), then w x h indices
+static void pal_teximage(GLenum target, GLsizei w, GLsizei h, const uint8_t * data) {
+    pal_purge();
+    GLint id = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &id);
+    uint32_t stride = ((uint32_t) w + 7) & ~7u;
+    uint8_t * px = gpu_alloc_mapped_aligned_for_gpu(16, stride * (uint32_t) h);
+    void * pal = px ? gpu_alloc_palette(data, 256, 4) : NULL;
+    if (!pal || id <= 0 || id >= PAL_TEXTURES) {
+        // no memory (or no name to keep the palette by): the colors as RGBA
+        if (pal) gpu_free_palette(pal);
+        if (px) vglFree(px);
+        uint32_t * rgba = malloc((size_t) w * (size_t) h * 4);
+        if (rgba) {
+            const uint32_t * c = (const uint32_t *) data;
+            for (uint32_t i = 0; i < (uint32_t) w * (uint32_t) h; i++) rgba[i] = c[data[1024 + i]];
+            glTexImage2D_stat(target, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            free(rgba);
+        }
+        pal_failed++;
+        return;
+    }
+    for (GLsizei y = 0; y < h; y++) memcpy(px + (uint32_t) y * stride, data + 1024 + (uint32_t) y * (uint32_t) w, (size_t) w);
+    pal_release((GLuint) id);
+    vglSetupTexture(GL_TEXTURE_2D, px, SCE_GXM_TEXTURE_FORMAT_P8_ABGR, SCE_GXM_TEXTURE_LINEAR, w, h, 1);
+    sceGxmTextureSetPalette(vglGetGxmTexture(GL_TEXTURE_2D), pal);
+    pal_of[id] = pal;
+    pal_live++;
+    pal_uploads++;
+}
+
+void gl_queue_palette_report(double seconds) {
+    if (seconds <= 0 || (!pal_uploads && !pal_failed)) return;
+    l_info("paletted textures/s: %.1f uploaded as P8 (%u live, %u palettes waiting to be freed), %.1f as RGBA"
+           " (no memory)", pal_uploads / seconds, pal_live, pal_defer_head - pal_defer_tail, pal_failed / seconds);
+    pal_uploads = pal_failed = 0;
+}
+
+static void delete_textures(GLsizei n, const GLuint * textures) {
+    glDeleteTextures(n, textures);
+    for (GLsizei i = 0; i < n; i++) pal_release(textures[i]);
+    pal_purge();
+}
+
+void gl_queue_paletted_texture(GLenum target, GLsizei w, GLsizei h, const uint32_t * pal, const uint8_t * rows,
+                               int stride) {
+    uint32_t len = 1024 + (uint32_t) w * (uint32_t) h;
+    uint8_t * d;
+    call_t * c = NULL;
+    if (on_game() && len <= MAX_PAYLOAD) {
+        uint32_t args_end = align8(sizeof(call_t) + 4 * sizeof(uint32_t));
+        uint32_t size = args_end + align8(len);
+        c = reserve(size);
+        c->h.op = OP_CALL;
+        c->h.n = 4;
+        c->h.size = size;
+        c->fn = (fn_t) pal_teximage;
+        d = (uint8_t *) c + args_end;
+    } else {
+        d = malloc(len);
+        if (!d) return;
+    }
+    memcpy(d, pal, 1024);
+    for (GLsizei y = 0; y < h; y++) memcpy(d + 1024 + (uint32_t) y * (uint32_t) w, rows + y * stride, (size_t) w);
+    if (c) {
+        c->a[0] = target;
+        c->a[1] = (uint32_t) w;
+        c->a[2] = (uint32_t) h;
+        c->a[3] = (uint32_t) d;
+        st.bytes += len;
+        st.calls++;
+        publish(c->h.size, 0);
+    } else {
+        DIRECT(pal_teximage(target, w, h, d));
+        free(d);
+    }
+}
+
 void gq_glDeleteTextures(GLsizei n, const GLuint * textures) {
     if (on_game() && n > 0 && textures) {
         const uint32_t a[] = { n, 0 };
-        queue_call((void *) glDeleteTextures, 2, a, textures, (uint32_t) n * sizeof(GLuint), 1);
+        queue_call((void *) delete_textures, 2, a, textures, (uint32_t) n * sizeof(GLuint), 1);
         return;
     }
-    DIRECT(glDeleteTextures(n, textures));
+    DIRECT(delete_textures(n, textures));
 }
 
 void gq_glPixelStorei(GLenum pname, GLint param) {
@@ -582,19 +716,28 @@ void gq_glPixelStorei(GLenum pname, GLint param) {
         else DIRECT(fn(__VA_ARGS__));       \
     }
 
-QUEUED(glActiveTexture, glActiveTexture, (GLenum texture), texture)
-QUEUED(glBindFramebuffer, glBindFramebuffer_stat, (GLenum target, GLuint fb), target, fb)
+// The same, noting the state for the battle 30 fps probe (ff7_interp.c) on the game thread
+#define QUEUED_NOTE(name, fn, params, note, ...)       \
+    void gq_##name params {                           \
+        if (on_game()) { note; QUEUE(fn, __VA_ARGS__); } \
+        else DIRECT(fn(__VA_ARGS__));                 \
+    }
+
+QUEUED_NOTE(glActiveTexture, glActiveTexture, (GLenum texture), ff7_ip_note(IP_ACTIVE_TEX, texture), texture)
+QUEUED_NOTE(glBindFramebuffer, glBindFramebuffer_stat, (GLenum target, GLuint fb), ff7_ip_note_fb(fb), target, fb)
 QUEUED(glBindRenderbuffer, glBindRenderbuffer, (GLenum target, GLuint rb), target, rb)
-QUEUED(glBindTexture, glBindTexture_oes, (GLenum target, GLuint texture), target, texture)
-QUEUED(glBlendFunc, glBlendFunc, (GLenum s, GLenum d), s, d)
+QUEUED_NOTE(glBindTexture, glBindTexture_oes, (GLenum target, GLuint texture), ff7_ip_note_texture(texture), target,
+            texture)
+QUEUED_NOTE(glBlendFunc, glBlendFunc, (GLenum s, GLenum d), (ff7_ip_note(IP_BLEND_S, s), ff7_ip_note(IP_BLEND_D, d)), s, d)
 QUEUED(glClear, glClear_stat, (GLbitfield mask), mask)
-QUEUED(glColorMask, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a), r, g, b, a)
-QUEUED(glCullFace, glCullFace, (GLenum mode), mode)
+QUEUED_NOTE(glColorMask, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a),
+            ff7_ip_note(IP_COLOR_MASK, r | g << 1 | b << 2 | a << 3), r, g, b, a)
+QUEUED_NOTE(glCullFace, glCullFace, (GLenum mode), ff7_ip_note(IP_CULL, mode), mode)
 QUEUED(glDeleteShader, glDeleteShader, (GLuint shader), shader)
-QUEUED(glDepthFunc, glDepthFunc, (GLenum func), func)
-QUEUED(glDepthMask, glDepthMask, (GLboolean flag), flag)
-QUEUED(glDisable, glDisable, (GLenum cap), cap)
-QUEUED(glEnable, glEnable, (GLenum cap), cap)
+QUEUED_NOTE(glDepthFunc, glDepthFunc, (GLenum func), ff7_ip_note(IP_DEPTH_FUNC, func), func)
+QUEUED_NOTE(glDepthMask, glDepthMask, (GLboolean flag), ff7_ip_note(IP_DEPTH_MASK, flag), flag)
+QUEUED_NOTE(glDisable, glDisable, (GLenum cap), ff7_ip_note_cap(cap, 0), cap)
+QUEUED_NOTE(glEnable, glEnable, (GLenum cap), ff7_ip_note_cap(cap, 1), cap)
 QUEUED(glFramebufferRenderbuffer, glFramebufferRenderbuffer,
        (GLenum target, GLenum attachment, GLenum rbtarget, GLuint rb), target, attachment, rbtarget, rb)
 QUEUED(glFramebufferTexture2D, glFramebufferTexture2D,
@@ -604,7 +747,8 @@ QUEUED(glFrontFace, glFrontFace, (GLenum mode), mode)
 QUEUED(glRenderbufferStorage, glRenderbufferStorage, (GLenum target, GLenum format, GLsizei w, GLsizei h),
        target, format, w, h)
 QUEUED(glTexParameteri, glTexParameteri_oes, (GLenum target, GLenum pname, GLint param), target, pname, param)
-QUEUED(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h), x, y, w, h)
+QUEUED_NOTE(glViewport, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h), ff7_ip_note_viewport(x, y, w, h), x, y,
+            w, h)
 
 /*
  * glUseProgram / glUniform1i with the values already set are skipped on the
@@ -630,6 +774,7 @@ void gq_glUseProgram(GLuint program) {
         DIRECT(glUseProgram_variants(program));
         return;
     }
+    ff7_ip_note_program(program);
     if ((int) program == cur_prog) {
         st.skipped++;
         return;
@@ -644,6 +789,7 @@ void gq_glUniform1i(GLint location, GLint v0) {
         DIRECT(glUniform1i_variants(location, v0));
         return;
     }
+    ff7_ip_note_uniform(location, v0);
     if (cur_prog >= 0 && cur_prog < CACHE_PROGS && location >= 0 && location < CACHE_LOCS) {
         if (uniform_set[cur_prog][location] && uniform_val[cur_prog][location] == v0) {
             st.skipped++;

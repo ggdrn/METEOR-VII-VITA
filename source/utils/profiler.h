@@ -26,6 +26,15 @@ void profiler_start(volatile SceUInt64 * frame_start, SceUInt64 threshold_us);
 void profiler_hold(void);
 void profiler_release(void);
 
+/** Starts sampling at once in profile_all mode (or resumes if paused). */
+void profiler_start_now(void);
+
+/** Pauses (1) or resumes (0) sampling; no-op if the profiler never started. */
+void profiler_set_paused(int paused);
+
+/** 1 while the profiler is started and not paused. */
+int profiler_active(void);
+
 /** Logs sampler counters (diagnostics). */
 void profiler_report(void);
 

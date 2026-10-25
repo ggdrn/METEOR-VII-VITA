@@ -97,7 +97,7 @@ Plugin obrigatório: `kubridge.skprx` no `config.txt` do taiHEN (`*KERNEL`).
 - [ ] Botões do Vita → `AKEYCODE_BUTTON_*`/DPAD em `onKey`; Start/Select → menus; Back → `onKeyBack`
 - [ ] Analógico esquerdo → DPAD
 - [ ] Touch frontal → `onTouchBegan/Moved/Ended` (escala 960×544)
-- [ ] Ícones de botão: usar `button_jp_en.png` (layout Xbox/PlayStation?) — avaliar troca para símbolos PS
+- [x] Ícones de botão: símbolos PS no atlas `button_*.png` e no texto das falas/mapa-múndi — ver `docs/BOTOES-PS.md` (`psbuttons_off.txt` volta ao original)
 
 ### Fase 5 — Vídeos (FMVs)
 - [ ] `MyDecoder`: nestegg (demux WebM) + libvpx (VP8) + libvorbis, em thread separada

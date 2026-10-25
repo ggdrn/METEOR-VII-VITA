@@ -23,12 +23,40 @@
  * Change: Play::SetPlayState(STOPPED) no longer waits forever for the mixer to
  * acknowledge; after STOP_ACK_TIMEOUT_MS the transition is completed here
  * (the same steps the mixer would take) and a warning is logged.
+ *
+ * v0.6.8: when the output thread is not mixing (opensles_mixer_idle, see
+ * Vita.c), the stop is completed here at once with those same steps instead
+ * of waiting for the next mix pass (up to an output period, ~23 ms). The
+ * snowboard minigame stops and restarts sound effects all the time: the game
+ * thread spent ~16% of its time in that wait (v0.6.7 profile).
  */
 #include <errno.h>
 #include <time.h>
 
 #define STOP_ACK_TIMEOUT_MS 250
 #define STOP_ACK_STEP_MS    25
+
+int opensles_mixer_idle(void);
+
+// What the mixer does for SL_PLAYSTATE_STOPPING (IOutputMixExt.c track_check)
+static void play_complete_stop(IPlay *this, CAudioPlayer *audioPlayer)
+{
+    this->mPosition = (SLmillisecond) 0;
+    this->mFramesSinceLastSeek = 0;
+    this->mFramesSincePositionUpdate = 0;
+    this->mLastSeekPosition = 0;
+    this->mState = SL_PLAYSTATE_STOPPED;
+    if (NULL != audioPlayer) {
+        audioPlayer->mSeek.mPos = SL_TIME_UNKNOWN;
+        Track *track = audioPlayer->mTrack;
+        const BufferHeader *front = audioPlayer->mBufferQueue.mFront;
+        if (NULL != track && front != audioPlayer->mBufferQueue.mRear) {
+            track->mReader = front->mBuffer;
+            track->mAvail = front->mSize;
+        }
+    }
+    interface_cond_broadcast(this);
+}
 
 // interface_cond_wait() with a timeout; returns the milliseconds waited
 static unsigned play_cond_wait_ms(IPlay *this)
@@ -136,28 +164,19 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
                 break;
 
             case (SL_PLAYSTATE_STOPPING << 2) | SL_PLAYSTATE_STOPPED:
-                // either spurious wakeup, or someone else requested same transition
+                // either spurious wakeup, or someone else requested same transition;
+                // with the mixer idle, finish it now (see play_complete_stop)
+                if (opensles_mixer_idle()) {
+                    play_complete_stop(this, audioPlayer);
+                    break;
+                }
                 if (waited_ms < STOP_ACK_TIMEOUT_MS) {
                     continue;
                 }
                 // The mixer never serviced this player: finish the stop ourselves
                 SL_LOGW("SetPlayState(STOPPED): no mixer ack after %u ms (player %p, track %p); forcing",
                     waited_ms, audioPlayer, NULL != audioPlayer ? (void *) audioPlayer->mTrack : NULL);
-                this->mPosition = (SLmillisecond) 0;
-                this->mFramesSinceLastSeek = 0;
-                this->mFramesSincePositionUpdate = 0;
-                this->mLastSeekPosition = 0;
-                this->mState = SL_PLAYSTATE_STOPPED;
-                if (NULL != audioPlayer) {
-                    audioPlayer->mSeek.mPos = SL_TIME_UNKNOWN;
-                    Track *track = audioPlayer->mTrack;
-                    const BufferHeader *front = audioPlayer->mBufferQueue.mFront;
-                    if (NULL != track && front != audioPlayer->mBufferQueue.mRear) {
-                        track->mReader = front->mBuffer;
-                        track->mAvail = front->mSize;
-                    }
-                }
-                interface_cond_broadcast(this);
+                play_complete_stop(this, audioPlayer);
                 break;
 
             case (SL_PLAYSTATE_STOPPING << 2) | SL_PLAYSTATE_PAUSED:
@@ -172,6 +191,10 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
                 this->mHeadStalled = SL_BOOLEAN_FALSE;
                 this->mMarkerReached = SL_BOOLEAN_FALSE;
                 this->mState = SL_PLAYSTATE_STOPPING;
+                if (opensles_mixer_idle()) { // no mix pass can touch this player meanwhile
+                    play_complete_stop(this, audioPlayer);
+                    break;
+                }
                 continue;
 
             default:

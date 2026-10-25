@@ -19,6 +19,13 @@
  * records, and the last value it would have written at every address is
  * compared with memory. On a mismatch the native renderer disables itself.
  *
+ * v0.6.9: 0x66E272 is hooked only while the self-test runs. Before, the
+ * recorder hook was installed at every boot and, with self-tests off (the
+ * default), never removed: every call to 0x66E272 in every mode went through
+ * SO_CONTINUE (two rewrites of its entry and two cache flushes), which the
+ * minigame profiles showed as 11-19% of the game thread, and which raced the
+ * profiler's text permission changes (console reboots with it on).
+ *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
  */
@@ -403,8 +410,10 @@ void ff7_bg_patch(void) {
         return;
     }
     selftest_left = ff7_selftest_count(SELFTEST_FRAMES);
-    alloc_hook = hook_addr(alloc, (uintptr_t) &alloc_recorder);
-    alloc_hooked = 1;
+    if (selftest_left > 0) { // the recorder is only for the self-test (see above)
+        alloc_hook = hook_addr(alloc, (uintptr_t) &alloc_recorder);
+        alloc_hooked = 1;
+    }
     bg_hook = hook_addr(bg, (uintptr_t) &bg_native);
     l_info("ff7_bg: native field background renderer installed (selftest on %d frames)", selftest_left);
 }

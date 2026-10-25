@@ -5,6 +5,7 @@
  * of the MIT license. See the LICENSE file for details.
  */
 
+#include "port_menu.h"
 #include "utils/glstats.h"
 #include "utils/logger.h"
 
@@ -142,6 +143,7 @@ static int precise_usleep(unsigned int usec) {
 int usleep_stat(unsigned int usec) {
     if (!on_gl_thread()) return usleep(usec);
     ff7_music_poll(); // a track read in the background starts here
+    port_menu_game_tick(); // port menu: minigame launch, automatic profiling
     gl_queue_kick();  // the frame's last draws run while the game sleeps
     SceUInt64 t0 = now_us();
     game_idle = 1;
