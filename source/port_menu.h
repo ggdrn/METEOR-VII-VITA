@@ -1,5 +1,5 @@
 /*
- * Port menu (Start + L + R): minigame shortcuts and profiler control
+ * Port menu (Start + L + R): cheats, gameplay options, minigame shortcuts and profiler control
  * (see port_menu.c).
  *
  * This software may be modified and distributed under the terms

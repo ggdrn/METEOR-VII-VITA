@@ -1457,3 +1457,43 @@ nos nomes de matéria do `kernel2.bin` do jogo.
 
 O menu passou de 17 para 18 itens (linhas de 23 para 22 px; a caixa termina
 na linha 530 de 544).
+
+## v0.6.40: menu do port em abas (cheats, gameplay, debug)
+
+Dentro do menu (L + R + Start), **L** e **R** trocam de aba. O que já existia
+foi para **DEBUG**. As escolhas de CHEATS e GAMEPLAY ficam salvas em
+`ux0:data/ffvii-vita/cheats.txt` e são aplicadas na thread do jogo, entre
+quadros.
+
+**CHEATS**
+
+- **HP e MP infinitos.** Na batalha, os atores do grupo (`0x9AB0DC`, 0x68
+  bytes cada; 0-2 grupo, 4-9 inimigos): HP `+0x2C` = máximo `+0x30`
+  (dwords), MP `+0x28` = máximo `+0x2A` (words), como a cura total do
+  próprio jogo (`0x5DB593`). Fora da batalha, os registros dos personagens no
+  save (`0xDBFD8C`, 0x84 bytes): HP `+0x2C` = `+0x38`, MP `+0x30` = `+0x3A`.
+  Personagem nocauteado (HP 0) continua nocauteado.
+- **EXP e gil 2x/3x/4x.** Quando um inimigo morre, `0x430DD0` soma o EXP
+  (`+0x5C`) e o gil (`+0x58`) do ator dele aos totais da batalha (`0x99E2C0`
+  EXP, `0x99E2C8` gil), que a tela de espólios (`0x6C6B30`) passa para o save.
+  O port multiplica uma vez os valores de cada inimigo assim que aparecem na
+  batalha; subida de nível e Gil Extra funcionam normalmente.
+- **Matérias.** Escolhe uma invocação, ou uma matéria por cor (verde,
+  amarela, roxa, azul, vermelha), e o nível (1 = AP 0, ou máximo = AP
+  0xFFFFFF; na Hab. Inimiga, todas as habilidades aprendidas). X põe uma no
+  primeiro espaço livre do inventário (`0xDC04B4`). IDs, cores (tipo no
+  `kernel.bin`, nibble baixo: 0/1/4 independente, 2/3/6/7/8 comando, 5
+  suporte, 9/A magia, B/C invocação) e nomes (`kernel2.bin`) tirados dos dados
+  do jogo. "Todas as invocações (master)" continua lá.
+
+**GAMEPLAY**
+
+- **Velocidade nos campos 2x/3x/4x.** A velocidade de movimento da entidade do
+  jogador (`+0x76`, como `field_event_data` do FFNx) vezes o fator. Os scripts
+  (MSPED) definem a velocidade ao carregar um campo: um valor diferente do
+  escrito vira a nova base. Andar e correr ficam mais rápidos.
+- **Velocidade no mapa-múndi 2x/3x/4x.** O multiplicador de movimento do
+  mapa-múndi `[0xDFC480]` (o jogo põe 2 ao entrar, `0x74E1E9`), pelo qual a
+  velocidade de cada veículo é multiplicada (30 a pé, 45 buggy, 120 Highwind).
+  Ele também entra em outras contas do mapa-múndi, então outras coisas ali
+  podem acelerar junto.

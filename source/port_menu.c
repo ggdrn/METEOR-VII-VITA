@@ -1,5 +1,5 @@
 /*
- * Port menu: hold L + R and press Start.
+ * Port menu: hold L + R and press Start; inside it, L and R switch tabs.
  *
  * Shortcuts to every 3D minigame and to the world map in each vehicle, for
  * measuring them without reaching them in a save (docs/MINIGAMES.md), and
@@ -65,6 +65,34 @@
  * (port_menu_apply_ab: from the frame limiter's sleep, and from the
  * minigames' frame entry in ff7_framecap.c, since they never sleep).
  *
+ * Tabs (v0.6.40): L and R switch between CHEATS, GAMEPLAY and DEBUG (all of
+ * the above). The cheat and gameplay choices are saved in DATA_PATH
+ * "cheats.txt" and applied by the game thread between frames
+ * (apply_cheats):
+ *   - Infinite HP/MP. In a battle, the party's actors (0x68 bytes each at
+ *     0x9AB0DC; 0-2 party, 4-9 enemies): HP +0x2C = max +0x30 (dwords), MP
+ *     +0x28 = max +0x2A (words), as the game's own full restore (0x5DB593)
+ *     does. Elsewhere, the save's character records (0x84 bytes at 0xDBFD8C,
+ *     savemap 0x54): HP +0x2C = max +0x38, MP +0x30 = max +0x3A. A KO'd
+ *     character (HP 0) is left KO'd.
+ *   - EXP / gil x2..x4. Each enemy dying adds its actor's EXP (+0x5C) and gil
+ *     (+0x58) to the battle's totals (0x430DD0: 0x99E2C0 EXP, 0x99E2C8 gil,
+ *     which the spoils screen 0x6C6B30 moves into the save). The enemies'
+ *     values are multiplied once, as soon as they show up in the battle;
+ *     level ups and Gil Plus work as usual.
+ *   - Materia: one chosen materia (by color, or a summon) into the first
+ *     free inventory slot, at level 1 (AP 0) or mastered (AP 0xFFFFFF; for
+ *     Enemy Skill, every skill learned). Ids and colors from the game's
+ *     kernel.bin (materia type, low nibble: 0/1/4 independent, 2/3/6/7/8
+ *     command, 5 support, 9/A magic, B/C summon) and kernel2.bin (names).
+ *   - Field speed x2..x4: the player entity's movement speed (field entity
+ *     +0x76, as FFNx's field_event_data) times the factor. Scripts set it
+ *     (MSPED) when a field loads: a value other than the one written is the
+ *     new base. Walking and running both get faster.
+ *   - World map speed x2..x4: the world map's movement multiplier [0xDFC480]
+ *     (2, set when the world map starts, 0x74E1E9), which every vehicle's
+ *     speed is multiplied by (30 on foot, 45 buggy, 120 Highwind).
+ *
  * Drawing: one fixed-function vitaGL draw of colored rectangles (a 5x7
  * font drawn as runs of pixels), on the main thread with GL locked, right
  * before the swap. Every piece of GL state it changes is saved and restored
@@ -111,7 +139,15 @@ extern so_module so_mod;
 #define SUMMON_FIRST 0x4a      // Choco/Mog .. Master Summon (kernel2.bin materia names)
 #define SUMMON_LAST  0x5a
 #define AP_MASTER 0xffffffu    // the most a materia holds: every summon at its top level
+#define VA_ACTORS 0x9ab0dcu    // battle actors, 0x68 bytes: 0-2 party, 4-9 enemies
+#define ACTOR_SIZE 0x68
+#define VA_CHARS 0xdbfd8cu     // savemap 0x54: 9 character records of 0x84 bytes
+#define CHAR_SIZE 0x84
+#define VA_WM_SPEED 0xdfc480u  // int32: world map movement multiplier (2)
+#define MODE_BATTLE 2
+#define MODE_WORLD 3
 #define SCENES_PATH DATA_PATH "cenas.txt"
+#define CHEATS_PATH DATA_PATH "cheats.txt"
 #define MAX_SCENES 16
 
 typedef struct {
@@ -153,7 +189,77 @@ static const minigame games[] = {
 };
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
 enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
-       ITEM_TITLE, ITEM_CLOSE, NUM_ITEMS };
+       ITEM_TITLE, ITEM_CLOSE, ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR, ITEM_MATERIA_PICK,
+       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED };
+
+// Tabs (L / R): the items of each, in order
+static const uint8_t tab_cheats[] = { ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR,
+                                      ITEM_MATERIA_PICK, ITEM_SUMMONS, ITEM_CLOSE };
+static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_CLOSE };
+static const uint8_t tab_debug[] = { 0, 1, 2, 3, 4, 5, 6, ITEM_RECORD, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP,
+                                     ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_TITLE, ITEM_CLOSE };
+typedef struct {
+    const char * name;
+    const uint8_t * items;
+    int count;
+} tab;
+static const tab tabs[] = {
+    { "CHEATS",   tab_cheats,   (int) sizeof(tab_cheats) },
+    { "GAMEPLAY", tab_gameplay, (int) sizeof(tab_gameplay) },
+    { "DEBUG",    tab_debug,    (int) sizeof(tab_debug) },
+};
+#define NUM_TABS ((int) (sizeof(tabs) / sizeof(tabs[0])))
+#define MAX_TAB_ITEMS ((int) sizeof(tab_debug))
+
+// Materia ids and names (kernel.bin types, kernel2.bin names of the game's data), by color
+typedef struct { uint8_t id; const char * name; } materia_name;
+static const materia_name mat_green[] = {
+    { 0x31, "FOGO" }, { 0x32, "GELO" }, { 0x33, "TERRA" }, { 0x34, "RELAMPAGO" }, { 0x35, "RESTAURAR" },
+    { 0x36, "CURAR" }, { 0x37, "REVIVER" }, { 0x38, "SELAR" }, { 0x39, "MISTIFICAR" }, { 0x3a, "TRANSFORMAR" },
+    { 0x3b, "SAIR" }, { 0x3c, "VENENO" }, { 0x3d, "GRAVIDADE" }, { 0x3e, "BARREIRA" }, { 0x40, "COMETA" },
+    { 0x41, "TEMPO" }, { 0x44, "DESTRUIR" }, { 0x45, "CONTER" }, { 0x46, "CURA TOTAL" }, { 0x47, "ESCUDO" },
+    { 0x48, "ULTIMA" }, { 0x49, "MAGIA MESTRE" },
+};
+static const materia_name mat_yellow[] = {
+    { 0x0e, "CORTAR TODOS" }, { 0x0f, "CORTE DUPLO" }, { 0x13, "W-MAGIA" }, { 0x14, "W-INVOCACAO" },
+    { 0x15, "W-ITEM" }, { 0x24, "ROUBAR" }, { 0x25, "SENSOR" }, { 0x27, "LANCAR" }, { 0x28, "MORFAR" },
+    { 0x29, "GOLPE MORTAL" }, { 0x2a, "MANIPULAR" }, { 0x2b, "MIMICA" }, { 0x2c, "HAB. INIMIGA" },
+    { 0x30, "COMANDO MESTRE" },
+};
+static const materia_name mat_purple[] = {
+    { 0x00, "MP EXTRA" }, { 0x01, "HP EXTRA" }, { 0x02, "VELOCIDADE EXTRA" }, { 0x03, "MAGIA EXTRA" },
+    { 0x04, "SORTE EXTRA" }, { 0x05, "EXP EXTRA" }, { 0x06, "GIL EXTRA" }, { 0x07, "AFASTA INIMIGOS" },
+    { 0x08, "ATRAI INIMIGOS" }, { 0x09, "ATRAI CHOCOBOS" }, { 0x0a, "PREVENTIVO" }, { 0x0b, "LONGO ALCANCE" },
+    { 0x0c, "SUPER TODOS" }, { 0x0d, "CONTRA ATAQUE" }, { 0x10, "COBERTURA" }, { 0x11, "SUBAQUATICO" },
+    { 0x12, "HP<->MP" },
+};
+static const materia_name mat_blue[] = {
+    { 0x17, "TODOS" }, { 0x18, "CONFRONTO" }, { 0x19, "CONFRONTO MAGICO" }, { 0x1a, "MP TURBO" },
+    { 0x1b, "ABSORVER MP" }, { 0x1c, "ABSORVER HP" }, { 0x1d, "ELEMENTAL" }, { 0x1e, "EFEITO ADICIONAL" },
+    { 0x1f, "ATAQUE FURTIVO" }, { 0x20, "ATAQUE FINAL" }, { 0x21, "CORTE ADICIONAL" }, { 0x22, "ROUBO SIMULTANEO" },
+    { 0x23, "QUADRI MAGICA" },
+};
+static const materia_name mat_red[] = { // SUMMON_FIRST .. SUMMON_LAST
+    { 0x4a, "CHOCO/MOG" }, { 0x4b, "SHIVA" }, { 0x4c, "IFRIT" }, { 0x4d, "RAMUH" }, { 0x4e, "TITA" },
+    { 0x4f, "ODIN" }, { 0x50, "LEVIATA" }, { 0x51, "BAHAMUT" }, { 0x52, "KUJATA" }, { 0x53, "ALEXANDER" },
+    { 0x54, "FENIX" }, { 0x55, "NEO BAHAMUT" }, { 0x56, "HADES" }, { 0x57, "TYPHON" }, { 0x58, "BAHAMUT ZERO" },
+    { 0x59, "CAV. TABULA RED." }, { 0x5a, "INVOCACAO MESTRE" },
+};
+typedef struct {
+    const char * name;
+    const materia_name * list;
+    int count;
+} materia_color;
+#define MATERIA_COLOR(n, l) { n, l, (int) (sizeof(l) / sizeof(l[0])) }
+static const materia_color materia_colors[] = {
+    MATERIA_COLOR("VERDE (MAGIA)", mat_green),
+    MATERIA_COLOR("AMARELA (COMANDO)", mat_yellow),
+    MATERIA_COLOR("ROXA (INDEPENDENTE)", mat_purple),
+    MATERIA_COLOR("AZUL (SUPORTE)", mat_blue),
+    MATERIA_COLOR("VERMELHA (INVOCACAO)", mat_red),
+};
+#define NUM_COLORS ((int) (sizeof(materia_colors) / sizeof(materia_colors[0])))
+#define NUM_SUMMONS ((int) (sizeof(mat_red) / sizeof(mat_red[0])))
 
 static const uint32_t * memmap;
 
@@ -194,9 +300,17 @@ static volatile int ab_want[3] = { 1, 1, 1 }; // minigame natives, 30 fps cap, t
 static int ab_applied[3] = { 1, 1, 1 };
 static volatile int num_scenes;
 static int scene_cursor; // main thread
+// Cheats and gameplay (main thread writes, game thread applies; saved in CHEATS_PATH)
+static volatile int cheat_hpmp;
+static volatile int cheat_exp = 1, cheat_gil = 1;           // reward factors, 1..4
+static volatile int speed_field = 1, speed_world = 1;       // movement factors, 1..4
+static int materia_max = 1;                                  // add at: 0 level 1 (AP 0), 1 mastered
+static int summon_cursor, color_cursor, materia_cursor;      // main thread
+static volatile int materia_request = -1;                    // id | AP << 8 to add
+static volatile int materia_result;                          // game thread: 1 added, 2 inventory full, 3 wrong mode
 
 // Main thread
-static int open, cursor, wait_release;
+static int open, cursor, wait_release, cur_tab;
 static char message[64];
 static SceUInt64 message_until;
 
@@ -225,6 +339,13 @@ static uint8_t * control_block(void) {
 
 static void put16(uint8_t * p, uint16_t v) { memcpy(p, &v, 2); }
 static uint16_t get16(const uint8_t * p) { uint16_t v; memcpy(&v, p, 2); return v; }
+static void put32(uint8_t * p, uint32_t v) { memcpy(p, &v, 4); }
+
+// va .. va + len - 1 on one mapped page or two contiguous ones
+static uint8_t * x86_span(uint32_t va, uint32_t len) {
+    uint8_t * lo = x86(va), * hi = x86(va + len - 1);
+    return lo && hi == lo + len - 1 ? lo : NULL;
+}
 
 static void set_message(const char * m) {
     snprintf(message, sizeof(message), "%s", m);
@@ -279,6 +400,35 @@ static void save_scenes(void) {
     fclose(f);
 }
 
+static int clamp_factor(int v) { return v < 1 ? 1 : v > 4 ? 4 : v; }
+
+static void load_cheats(void) {
+    FILE * f = fopen(CHEATS_PATH, "r");
+    if (!f) return;
+    char key[32];
+    int v;
+    while (fscanf(f, "%31s %d", key, &v) == 2) {
+        if (!strcmp(key, "hpmp")) cheat_hpmp = v != 0;
+        else if (!strcmp(key, "exp")) cheat_exp = clamp_factor(v);
+        else if (!strcmp(key, "gil")) cheat_gil = clamp_factor(v);
+        else if (!strcmp(key, "materia_max")) materia_max = v != 0;
+        else if (!strcmp(key, "speed_field")) speed_field = clamp_factor(v);
+        else if (!strcmp(key, "speed_world")) speed_world = clamp_factor(v);
+    }
+    fclose(f);
+}
+
+static void save_cheats(void) {
+    FILE * f = fopen(CHEATS_PATH, "w");
+    if (!f) {
+        l_error("port menu: could not write %s", CHEATS_PATH);
+        return;
+    }
+    fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\n", cheat_hpmp, cheat_exp,
+            cheat_gil, materia_max, speed_field, speed_world);
+    fclose(f);
+}
+
 // Where the player is (game thread). Fields other than mode are 0 outside a field.
 static int capture_scene(scene * sc, int mode) {
     memset(sc, 0, sizeof(*sc));
@@ -300,7 +450,142 @@ static int capture_scene(scene * sc, int mode) {
 void port_menu_init(void) {
     memmap = (const uint32_t *) so_symbol(&so_mod, "MEMMAP");
     load_scenes();
+    load_cheats();
     l_info("port menu: hold L + R and press Start (minigame shortcuts, profiler, %d saved scenes)", num_scenes);
+    l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d", cheat_hpmp,
+           cheat_exp, cheat_gil, speed_field, speed_world);
+}
+
+// ---------------------------------------------------------------- cheats (game thread)
+
+// First free slot of the materia inventory (-1: full)
+static int add_materia(uint32_t m) {
+    uint8_t * inv = x86_span(VA_MATERIA, 4 * NUM_MATERIA);
+    if (!inv) return -1;
+    for (int i = 0; i < NUM_MATERIA; i++) {
+        if ((uint32_t) get32(inv + 4 * i) == 0xffffffffu) {
+            put32(inv + 4 * i, m);
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void refill_hpmp(int mode) {
+    if (mode == MODE_BATTLE) {
+        for (int i = 0; i < 3; i++) { // the party's actors
+            uint8_t * a = x86_span(VA_ACTORS + ACTOR_SIZE * i, 0x34);
+            if (!a) continue;
+            uint32_t hp = (uint32_t) get32(a + 0x2c), max_hp = (uint32_t) get32(a + 0x30);
+            if (hp && hp < max_hp) put32(a + 0x2c, max_hp);
+            uint16_t mp = get16(a + 0x28), max_mp = get16(a + 0x2a);
+            if (mp < max_mp) put16(a + 0x28, max_mp);
+        }
+        return; // the battle writes its HP/MP back to the save when it ends
+    }
+    for (int i = 0; i < 9; i++) {
+        uint8_t * c = x86_span(VA_CHARS + CHAR_SIZE * i, 0x3c);
+        if (!c) continue;
+        uint16_t hp = get16(c + 0x2c), max_hp = get16(c + 0x38);
+        if (hp && hp < max_hp && max_hp <= 9999) put16(c + 0x2c, max_hp);
+        uint16_t mp = get16(c + 0x30), max_mp = get16(c + 0x3a);
+        if (mp < max_mp && max_mp <= 999) put16(c + 0x30, max_mp);
+    }
+}
+
+/*
+ * EXP and gil of the enemies (actors 4-9: +0x58 gil, +0x5C EXP), multiplied
+ * once: a value other than the one written is new (a new battle, an enemy
+ * that joins). Forgotten outside a battle.
+ */
+static void scale_rewards(int mode) {
+    static uint32_t written[6][2];
+    static int valid[6][2];
+    if (mode != MODE_BATTLE) {
+        memset(valid, 0, sizeof(valid));
+        return;
+    }
+    const int factor[2] = { cheat_gil, cheat_exp };
+    for (int e = 0; e < 6; e++) {
+        uint8_t * a = x86_span(VA_ACTORS + ACTOR_SIZE * (4 + e) + 0x58, 8);
+        if (!a) continue;
+        for (int k = 0; k < 2; k++) {
+            uint32_t v = (uint32_t) get32(a + 4 * k);
+            if (valid[e][k] && v == written[e][k]) continue;
+            uint64_t w = (uint64_t) v * (uint32_t) factor[k];
+            if (w > 0x7fffffffu) w = 0x7fffffffu;
+            if (w != v) put32(a + 4 * k, (uint32_t) w);
+            written[e][k] = (uint32_t) w;
+            valid[e][k] = 1;
+        }
+    }
+}
+
+/*
+ * Field: the player entity's movement speed (+0x76) = base * factor. A value
+ * other than the one written is a new base (MSPED, a new field); kept across
+ * battles and menus, where the field stays loaded. Factor 1 puts the base back.
+ */
+static void scale_field_speed(int mode) {
+    static uint32_t entity;
+    static uint16_t base, written;
+    static int valid;
+    if (mode != MODE_FIELD) return;
+    uint8_t * c = control_block(), * ents = x86(VA_ENTITIES);
+    if (!c || !ents) return;
+    uint32_t e = (uint32_t) get32(ents) + 0x88u * get16(c + 0x2a) + 0x76;
+    uint8_t * p = x86_span(e, 2);
+    if (!p) return;
+    if (e != entity) {
+        entity = e;
+        valid = 0;
+    }
+    uint16_t v = get16(p);
+    if (!valid || v != written) base = v;
+    uint32_t w = (uint32_t) base * (uint32_t) speed_field;
+    if (w > 0x7fff) w = 0x7fff;
+    if (w != v) put16(p, (uint16_t) w);
+    written = (uint16_t) w;
+    valid = 1;
+}
+
+// World map: the movement multiplier [0xDFC480] = base (2) * factor, as above
+static void scale_world_speed(int mode) {
+    static int32_t base, written;
+    static int valid;
+    if (mode != MODE_WORLD) return;
+    uint8_t * p = x86_span(VA_WM_SPEED, 4);
+    if (!p) return;
+    int32_t v = get32(p);
+    if (!valid || v != written) {
+        if (v < 1 || v > 4) return; // not the game's value: leave it
+        base = v;
+    }
+    int32_t w = base * speed_world;
+    if (w != v) put32(p, (uint32_t) w);
+    written = w;
+    valid = 1;
+}
+
+static void apply_cheats(int mode) {
+    if (cheat_hpmp) refill_hpmp(mode);
+    scale_rewards(mode);
+    scale_field_speed(mode);
+    scale_world_speed(mode);
+
+    int m = materia_request;
+    if (m != -1) {
+        materia_request = -1;
+        if (mode != MODE_FIELD && mode != MODE_WORLD) {
+            materia_result = 3;
+            l_warn("port menu: materia 0x%02X not added (mode %d)", m & 0xff, mode);
+        } else {
+            int slot = add_materia((uint32_t) m);
+            materia_result = slot >= 0 ? 1 : 2;
+            l_info("port menu: materia 0x%02X, AP 0x%X: %s %d", m & 0xff, (uint32_t) m >> 8,
+                   slot >= 0 ? "slot" : "inventory full", slot);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- game thread
@@ -327,6 +612,7 @@ void port_menu_game_tick(void) {
     port_menu_apply_ab();
     int mode = read_mode();
     game_mode = mode;
+    apply_cheats(mode);
 
     if (record_request) {
         record_request = 0;
@@ -535,6 +821,65 @@ int port_menu_is_open(void) {
     return open;
 }
 
+static int step(int v, int n, int dir) { return (v + (dir < 0 ? n - 1 : 1)) % n; }
+
+static const char * factor_name(int f) {
+    static const char * const names[] = { "NORMAL", "2X", "3X", "4X" };
+    return names[clamp_factor(f) - 1];
+}
+
+// LEFT / RIGHT on an item (dir -1 / 1)
+static void change(int item, int dir) {
+    char m[64];
+    m[0] = 0;
+    switch (item) {
+        case ITEM_GOTO:
+            if (num_scenes) scene_cursor = step(scene_cursor, num_scenes, dir);
+            return;
+        case ITEM_WORLD:
+            vehicle_cursor = step(vehicle_cursor, NUM_VEHICLES, dir);
+            return;
+        case ITEM_SUMMON_PICK:
+            summon_cursor = step(summon_cursor, NUM_SUMMONS, dir);
+            return;
+        case ITEM_COLOR:
+            color_cursor = step(color_cursor, NUM_COLORS, dir);
+            materia_cursor = 0;
+            return;
+        case ITEM_MATERIA_PICK:
+            materia_cursor = step(materia_cursor, materia_colors[color_cursor].count, dir);
+            return;
+        case ITEM_HPMP:
+            cheat_hpmp = !cheat_hpmp;
+            snprintf(m, sizeof(m), "HP E MP INFINITOS: %s", cheat_hpmp ? "LIGADO" : "DESLIGADO");
+            break;
+        case ITEM_LEVEL:
+            materia_max = !materia_max;
+            save_cheats();
+            return;
+        case ITEM_EXP:
+            cheat_exp = step(cheat_exp - 1, 4, dir) + 1;
+            snprintf(m, sizeof(m), "EXP: %s (A PARTIR DA PROXIMA BATALHA)", factor_name(cheat_exp));
+            break;
+        case ITEM_GIL:
+            cheat_gil = step(cheat_gil - 1, 4, dir) + 1;
+            snprintf(m, sizeof(m), "GIL: %s (A PARTIR DA PROXIMA BATALHA)", factor_name(cheat_gil));
+            break;
+        case ITEM_FIELD_SPEED:
+            speed_field = step(speed_field - 1, 4, dir) + 1;
+            break;
+        case ITEM_WORLD_SPEED:
+            speed_world = step(speed_world - 1, 4, dir) + 1;
+            break;
+        default:
+            return;
+    }
+    if (m[0]) set_message(m);
+    l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d", cheat_hpmp,
+           cheat_exp, cheat_gil, speed_field, speed_world);
+    save_cheats();
+}
+
 static void activate(int item) {
     if (item < NUM_GAMES) {
         if (game_mode != MODE_FIELD) {
@@ -629,9 +974,23 @@ static void activate(int item) {
             set_message("PROFILER LIGADO: PROFILE.BIN");
             l_info("port menu: profiler on (manual, mode %d)", game_mode);
         }
-    } else {
+    } else if (item == ITEM_SUMMON_PICK || item == ITEM_MATERIA_PICK) {
+        const materia_name * mn = item == ITEM_SUMMON_PICK ? &mat_red[summon_cursor]
+                                                           : &materia_colors[color_cursor].list[materia_cursor];
+        if (game_mode != MODE_FIELD && game_mode != MODE_WORLD) {
+            set_message("SO NUM CAMPO OU NO MAPA-MUNDI");
+        } else {
+            materia_result = 0;
+            materia_request = (int) ((uint32_t) mn->id | (materia_max ? AP_MASTER : 0) << 8);
+            char m[64];
+            snprintf(m, sizeof(m), "%s (%s)...", mn->name, materia_max ? "MAXIMO" : "NIVEL 1");
+            set_message(m);
+        }
+    } else if (item == ITEM_CLOSE) {
         open = 0;
         wait_release = 1;
+    } else {
+        change(item, 1); // the options: X steps them as RIGHT
     }
 }
 
@@ -658,21 +1017,24 @@ uint32_t port_menu_input(uint32_t buttons) {
         return buttons;
     }
 
+    const tab * t = &tabs[cur_tab];
     if (combo || (pressed & SCE_CTRL_CIRCLE)) {
         open = 0;
         wait_release = 1;
+    } else if (pressed & (BTN_L | BTN_R)) { // L / R: tab
+        cur_tab = step(cur_tab, NUM_TABS, pressed & BTN_L ? -1 : 1);
+        cursor = 0;
+        title_armed = 0;
     } else if (pressed & SCE_CTRL_UP) {
-        cursor = (cursor + NUM_ITEMS - 1) % NUM_ITEMS;
+        cursor = step(cursor, t->count, -1);
         title_armed = 0;
     } else if (pressed & SCE_CTRL_DOWN) {
-        cursor = (cursor + 1) % NUM_ITEMS;
+        cursor = step(cursor, t->count, 1);
         title_armed = 0;
-    } else if ((pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) && cursor == ITEM_GOTO && num_scenes) {
-        scene_cursor = (scene_cursor + (pressed & SCE_CTRL_LEFT ? num_scenes - 1 : 1)) % num_scenes;
-    } else if ((pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) && cursor == ITEM_WORLD) {
-        vehicle_cursor = (vehicle_cursor + (pressed & SCE_CTRL_LEFT ? NUM_VEHICLES - 1 : 1)) % NUM_VEHICLES;
+    } else if (pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) {
+        change(t->items[cursor], pressed & SCE_CTRL_LEFT ? -1 : 1);
     } else if (pressed & SCE_CTRL_CROSS) {
-        activate(cursor);
+        activate(t->items[cursor]);
     }
     return 0;
 }
@@ -811,25 +1173,62 @@ void port_menu_draw(void) {
         fps_t0 = now;
     }
 
+    // Result of a materia added by the game thread
+    static const char * const materia_results[] = { NULL, "MATERIA NO INVENTARIO", "INVENTARIO DE MATERIAS CHEIO",
+                                                    "SO NUM CAMPO OU NO MAPA-MUNDI" };
+    int mr = materia_result;
+    if (mr > 0 && mr <= 3) {
+        materia_result = 0;
+        set_message(materia_results[mr]);
+    }
+
     int show_message = message[0] && now < message_until;
     if (!open && !show_message) return;
 
     char line[64];
     if (open) {
-        const float x0 = 120, y0 = 16, x1 = 840; // 18 items: the box ends at 530 of 544 lines
-        const float y1 = y0 + 30 + (NUM_ITEMS + 4) * LINE_H;
+        const tab * t = &tabs[cur_tab];
+        const float x0 = 120, y0 = 16, x1 = 840; // 17 items + the tabs: the box ends at 530 of 544 lines
+        const float y1 = y0 + 30 + (MAX_TAB_ITEMS + 5) * LINE_H;
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
         float y = y0 + 15;
         text(x0 + 20, y, "MENU DO PORT", RGBA(255, 255, 255, 255));
+        y += LINE_H + 2;
+        // Tabs: L  CHEATS  GAMEPLAY  DEBUG  R
+        float tx = x0 + 20;
+        text(tx, y, "L", RGBA(170, 190, 230, 255));
+        tx += 2 * ADVANCE;
+        for (int i = 0; i < NUM_TABS; i++) {
+            float w = (float) strlen(tabs[i].name) * ADVANCE;
+            if (i == cur_tab) rect(tx - 6, y - 5, tx + w, y + 7 * SCALE + 5, RGBA(60, 90, 170, 255));
+            text(tx, y, tabs[i].name, i == cur_tab ? RGBA(255, 255, 255, 255) : RGBA(130, 140, 170, 255));
+            tx += w + ADVANCE;
+        }
+        text(tx, y, "R", RGBA(170, 190, 230, 255));
         y += LINE_H;
         snprintf(line, sizeof(line), "MODO %d   %.1f FPS   PROFILER %s", game_mode, fps,
                  profiler_active() ? "LIGADO" : "DESLIGADO");
         text(x0 + 20, y, line, RGBA(170, 190, 230, 255));
         y += LINE_H + 6;
-        for (int i = 0; i < NUM_ITEMS; i++, y += LINE_H) {
+        for (int n = 0; n < t->count; n++, y += LINE_H) {
+            int i = t->items[n];
             const char * label = line;
             if (i < NUM_GAMES) label = games[i].name;
+            else if (i == ITEM_HPMP) snprintf(line, sizeof(line), "HP E MP INFINITOS: %s", cheat_hpmp ? "SIM" : "NAO");
+            else if (i == ITEM_EXP) snprintf(line, sizeof(line), "EXP NAS BATALHAS < %s >", factor_name(cheat_exp));
+            else if (i == ITEM_GIL) snprintf(line, sizeof(line), "GIL NAS BATALHAS < %s >", factor_name(cheat_gil));
+            else if (i == ITEM_LEVEL)
+                snprintf(line, sizeof(line), "NIVEL DA MATERIA < %s >", materia_max ? "MAXIMO" : "1 (ZERADA)");
+            else if (i == ITEM_SUMMON_PICK) snprintf(line, sizeof(line), "INVOCACAO < %s >", mat_red[summon_cursor].name);
+            else if (i == ITEM_COLOR) snprintf(line, sizeof(line), "COR < %s >", materia_colors[color_cursor].name);
+            else if (i == ITEM_MATERIA_PICK)
+                snprintf(line, sizeof(line), "MATERIA < %s > %d/%d", materia_colors[color_cursor].list[materia_cursor].name,
+                         materia_cursor + 1, materia_colors[color_cursor].count);
+            else if (i == ITEM_FIELD_SPEED)
+                snprintf(line, sizeof(line), "VELOCIDADE NOS CAMPOS < %s >", factor_name(speed_field));
+            else if (i == ITEM_WORLD_SPEED)
+                snprintf(line, sizeof(line), "VELOCIDADE NO MAPA-MUNDI < %s >", factor_name(speed_world));
             else if (i == ITEM_RECORD) {
                 if (recording >= 0) snprintf(line, sizeof(line), "GRAVANDO CENA %d: PARAR", recording + 1);
                 else snprintf(line, sizeof(line), "GRAVAR CENA (MARCADOR + PROFILER)");
@@ -855,16 +1254,25 @@ void port_menu_draw(void) {
             else if (i == ITEM_PROFILER) snprintf(line, sizeof(line), "PROFILER AGORA: %s", profiler_active() ? "PAUSAR" : "INICIAR");
             else if (i == ITEM_TITLE) label = title_armed ? "VOLTAR AO TITULO: CONFIRMAR" : "VOLTAR AO TITULO (CARREGAR SAVE)";
             else label = "FECHAR";
-            if (i == cursor) rect(x0 + 10, y - 6, x1 - 10, y + 7 * SCALE + 6, RGBA(60, 90, 170, 255));
+            if (n == cursor) rect(x0 + 10, y - 6, x1 - 10, y + 7 * SCALE + 6, RGBA(60, 90, 170, 255));
             int needs_field = i < NUM_GAMES || i == ITEM_GOTO || i == ITEM_WORLD || i == ITEM_TITLE;
+            int adds_materia = i == ITEM_SUMMONS || i == ITEM_SUMMON_PICK || i == ITEM_MATERIA_PICK;
             int greyed = (needs_field && game_mode != MODE_FIELD)
-                         || (i == ITEM_SUMMONS && game_mode != MODE_FIELD && game_mode != 3);
+                         || (adds_materia && game_mode != MODE_FIELD && game_mode != MODE_WORLD);
             uint32_t color = greyed ? RGBA(130, 130, 140, 255) : RGBA(255, 255, 255, 255);
             text(x0 + 30, y, label, color);
         }
         y += 6;
-        text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: CENA/VEICULO", RGBA(170, 190, 230, 255));
-        if (game_mode != MODE_FIELD) text(x0 + 20, y + LINE_H, "MINI-GAMES: SO A PARTIR DE UM CAMPO", RGBA(230, 190, 120, 255));
+        if (cur_tab == 0) {
+            text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: MUDAR", RGBA(170, 190, 230, 255));
+            text(x0 + 20, y + LINE_H, "X EM INVOCACAO/MATERIA: ADICIONA", RGBA(170, 190, 230, 255));
+        } else if (cur_tab == 1) {
+            text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: MUDAR", RGBA(170, 190, 230, 255));
+        } else {
+            text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: CENA/VEICULO", RGBA(170, 190, 230, 255));
+            if (game_mode != MODE_FIELD)
+                text(x0 + 20, y + LINE_H, "MINI-GAMES: SO A PARTIR DE UM CAMPO", RGBA(230, 190, 120, 255));
+        }
     }
     if (show_message) {
         int w = (int) strlen(message) * ADVANCE + 40;
