@@ -90,6 +90,8 @@
  *     which rewrites the entity's speed (+0x76) from it every frame. Walking
  *     and running get faster; the collision size, also made from the base,
  *     does not change.
+ *   - Dialog skip: presses OK for every field MESSAGE window, never for an
+ *     ASK (see dialog_skip_buttons).
  *   - World map speed x2..x4: the speed on foot, an immediate 30 in the
  *     recompiled code (scale_world_speed); vehicles are left as they are.
  *
@@ -109,6 +111,7 @@
 #include "ff7_snowboard.h"
 #include "ff7_texture.h"
 #include "ff7_unhook.h"
+#include "ff7_anim.h"
 
 #include "utils/logger.h"
 #include "utils/profiler.h"
@@ -193,12 +196,12 @@ static const minigame games[] = {
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
 enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR, ITEM_MATERIA_PICK,
-       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED };
+       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP };
 
 // Tabs (L / R): the items of each, in order
 static const uint8_t tab_cheats[] = { ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR,
                                       ITEM_MATERIA_PICK, ITEM_SUMMONS, ITEM_CLOSE };
-static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_CLOSE };
+static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_CLOSE };
 static const uint8_t tab_debug[] = { 0, 1, 2, 3, 4, 5, 6, ITEM_RECORD, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP,
                                      ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_TITLE, ITEM_CLOSE };
 typedef struct {
@@ -307,6 +310,7 @@ static int scene_cursor; // main thread
 static volatile int cheat_hpmp;
 static volatile int cheat_exp = 1, cheat_gil = 1;           // reward factors, 1..4
 static volatile int speed_field = 1, speed_world = 1;       // movement factors, 1..4
+static volatile int auto_skip;                              // skip the field's dialogs
 static int materia_max = 1;                                  // add at: 0 level 1 (AP 0), 1 mastered
 static int summon_cursor, color_cursor, materia_cursor;      // main thread
 static volatile int materia_request = -1;                    // id | AP << 8 to add
@@ -417,6 +421,7 @@ static void load_cheats(void) {
         else if (!strcmp(key, "materia_max")) materia_max = v != 0;
         else if (!strcmp(key, "speed_field")) speed_field = clamp_factor(v);
         else if (!strcmp(key, "speed_world")) speed_world = clamp_factor(v);
+        else if (!strcmp(key, "auto_skip")) auto_skip = v != 0;
     }
     fclose(f);
 }
@@ -427,8 +432,8 @@ static void save_cheats(void) {
         l_error("port menu: could not write %s", CHEATS_PATH);
         return;
     }
-    fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\n", cheat_hpmp, cheat_exp,
-            cheat_gil, materia_max, speed_field, speed_world);
+    fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\nauto_skip %d\n", cheat_hpmp,
+            cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip);
     fclose(f);
 }
 
@@ -599,11 +604,93 @@ static void scale_world_speed(void) {
     l_info("port menu: world map walk speed %d (x%d)", v, applied);
 }
 
+/*
+ * Dialog skip (Gameplay): the field's message loop 0x630D50 runs every frame
+ * while a MESSAGE opcode (0x618DBD, 0x618F86, 0x61900A) shows a window; ASK
+ * (questions) has a loop of its own (0x6310A1) and is never skipped. A hook
+ * on 0x630D50 (game thread) notes the window (byte [ESP + 4], as the loop
+ * reads [EBP + 8]) and the time. While a window was seen in the last 150 ms,
+ * the main thread adds Cross (OK, docs/BOTOES-PS.md) to the pad, except while
+ * the window closes (state 7, so no press reaches the field after it): held for
+ * 3 polls, released for 3, so the game sees each press. The first press
+ * shows the whole page, the next one turns it or closes the window. A window
+ * whose state (window_mode, 0xCFF5B8 + 0x30 * id + 0x2C) and text pointer
+ * (0xCBF578 + 4 * id) stay the same for 20 presses is left alone (a window
+ * the player cannot close) until it closes.
+ */
+#define MESSAGE_LOOP_SYM "_Z15func_0x00630d50v"
+#define VA_WINDOWS 0xcff5b8u   // 4 text boxes of 0x30 bytes; +0x2C window_mode
+#define VA_DIALOG_PTR 0xcbf578u // the text pointer of each window
+#define NUM_WINDOWS 4
+static so_hook message_hook;
+static volatile uint32_t message_seen_ms[NUM_WINDOWS];
+
+static uint32_t now_ms(void) { return (uint32_t) (sceKernelGetProcessTimeWide() / 1000); }
+
+static void message_loop_seen(void) {
+    volatile uint32_t * regs = ff7_x86_regs();
+    uint8_t * arg = regs ? x86(regs[4] + 4) : NULL; // ESP + 4: the window id
+    int w = arg ? *arg : -1;
+    SO_CONTINUE_HELD(int, message_hook);
+    if (w >= 0 && w < NUM_WINDOWS) message_seen_ms[w] = now_ms() | 1;
+}
+
+static void install_dialog_skip(void) {
+    static int installed, broken;
+    if (installed || broken || !auto_skip) return;
+    uintptr_t fn = so_symbol(&so_mod, MESSAGE_LOOP_SYM);
+    if (!fn || !ff7_x86_regs()) {
+        l_warn("port menu: %s not found, dialog skip off", MESSAGE_LOOP_SYM);
+        broken = 1;
+        return;
+    }
+    profiler_hold();
+    message_hook = hook_addr(fn, (uintptr_t) &message_loop_seen);
+    profiler_release();
+    installed = 1;
+    l_info("port menu: dialog skip hook on %s", MESSAGE_LOOP_SYM);
+}
+
+// Main thread, every pad poll: Cross to add for the dialog skip (0: none)
+static uint32_t dialog_skip_buttons(void) {
+    static int phase, presses[NUM_WINDOWS];
+    static uint16_t last_mode[NUM_WINDOWS];
+    static uint32_t last_ptr[NUM_WINDOWS];
+    if (!auto_skip || game_mode != MODE_FIELD) return 0;
+    uint32_t t = now_ms();
+    int want = 0;
+    for (int w = 0; w < NUM_WINDOWS; w++) {
+        uint32_t seen = message_seen_ms[w];
+        uint8_t * win = x86_span(VA_WINDOWS + 0x30 * w + 0x2c, 2), * ptr = x86_span(VA_DIALOG_PTR + 4 * w, 4);
+        if (!seen || t - seen > 150 || !win || !ptr) {
+            presses[w] = 0;
+            continue;
+        }
+        uint16_t m = get16(win);
+        uint32_t p = (uint32_t) get32(ptr);
+        if (m == 0 || m != last_mode[w] || p != last_ptr[w]) presses[w] = 0;
+        last_mode[w] = m;
+        last_ptr[w] = p;
+        if (m != 0 && m != 7 && presses[w] < 20) { // 7: closing
+            want = 1;
+            if (phase == 0) presses[w]++;
+        }
+    }
+    if (!want) {
+        phase = 0;
+        return 0;
+    }
+    int down = phase < 3;
+    phase = (phase + 1) % 6;
+    return down ? SCE_CTRL_CROSS : 0;
+}
+
 static void apply_cheats(int mode) {
     if (cheat_hpmp) refill_hpmp(mode);
     scale_rewards(mode);
     scale_field_speed();
     scale_world_speed();
+    install_dialog_skip();
 
     int m = materia_request;
     if (m != -1) {
@@ -903,12 +990,16 @@ static void change(int item, int dir) {
         case ITEM_WORLD_SPEED:
             speed_world = step(speed_world - 1, 4, dir) + 1;
             break;
+        case ITEM_AUTO_SKIP:
+            auto_skip = !auto_skip;
+            snprintf(m, sizeof(m), "PULAR DIALOGOS: %s (PERGUNTAS NAO)", auto_skip ? "LIGADO" : "DESLIGADO");
+            break;
         default:
             return;
     }
     if (m[0]) set_message(m);
-    l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d", cheat_hpmp,
-           cheat_exp, cheat_gil, speed_field, speed_world);
+    l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d; dialog skip %d",
+           cheat_hpmp, cheat_exp, cheat_gil, speed_field, speed_world, auto_skip);
     save_cheats();
 }
 
@@ -1046,7 +1137,7 @@ uint32_t port_menu_input(uint32_t buttons) {
         }
         // L + R held: the Start of the combo is not passed on
         if ((buttons & BTN_L) && (buttons & BTN_R)) buttons &= ~SCE_CTRL_START;
-        return buttons;
+        return buttons | dialog_skip_buttons();
     }
 
     const tab * t = &tabs[cur_tab];
@@ -1261,6 +1352,8 @@ void port_menu_draw(void) {
                 snprintf(line, sizeof(line), "VELOCIDADE NOS CAMPOS < %s >", factor_name(speed_field));
             else if (i == ITEM_WORLD_SPEED)
                 snprintf(line, sizeof(line), "VELOC. A PE NO MAPA-MUNDI < %s >", factor_name(speed_world));
+            else if (i == ITEM_AUTO_SKIP)
+                snprintf(line, sizeof(line), "PULAR DIALOGOS AUTOMATICO: %s", auto_skip ? "SIM" : "NAO");
             else if (i == ITEM_RECORD) {
                 if (recording >= 0) snprintf(line, sizeof(line), "GRAVANDO CENA %d: PARAR", recording + 1);
                 else snprintf(line, sizeof(line), "GRAVAR CENA (MARCADOR + PROFILER)");

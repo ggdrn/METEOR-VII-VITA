@@ -1538,3 +1538,24 @@ função multiplica a base, chama a original e devolve a base. Dentro de
 colisão e o resto continuam com o tamanho original. O hook é instalado na
 primeira vez que um fator diferente de 1 é escolhido e fica (com fator 1 a
 base não é mexida).
+
+## v0.6.43: pular diálogos automaticamente (aba GAMEPLAY)
+
+"PULAR DIALOGOS AUTOMATICO: SIM" faz o port apertar ✕ (o OK do jogo,
+[BOTOES-PS.md](BOTOES-PS.md)) sozinho enquanto uma janela de fala do campo
+está aberta: o primeiro toque mostra a página inteira, o seguinte vira a
+página ou fecha a janela, ~10 toques por segundo.
+
+- O laço das mensagens do campo, `0x630D50`, roda a cada quadro enquanto um
+  opcode MESSAGE (`0x618DBD`, `0x618F86`, `0x61900A`) mostra uma janela. Um
+  hook nele anota a janela (o byte em `[ESP + 4]`, lido pelo laço como
+  `[EBP + 8]`) e o momento. Enquanto uma janela foi vista nos últimos 150 ms,
+  o port soma ✕ aos botões: 3 leituras do pad apertado, 3 solto.
+- **Perguntas (ASK) não são puladas**: o ASK usa outro laço (`0x6310A1`), que
+  não tem hook; a escolha continua com o jogador.
+- Não aperta durante o fechamento da janela (estado 7 de `window_mode`,
+  `0xCFF5B8 + 0x30 * janela + 0x2C`), para nenhum toque chegar ao campo
+  depois (falar de novo com o NPC).
+- Uma janela cujo estado e ponteiro de texto (`0xCBF578 + 4 * janela`) não
+  mudam por 20 toques é deixada (janela que o jogador não fecha) até fechar.
+- Só nos campos. O hook é instalado na primeira vez que a opção é ligada.
