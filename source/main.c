@@ -164,7 +164,8 @@ int main() {
     l_info("JNI_OnLoad: %i", JNI_OnLoad(&jvm));
 
     // MainActivity.onCreate()
-    int lang = ff7_lang_from_system();
+    int lang = port_menu_language(); // port menu, Gameplay: a language of its own
+    if (lang < 0) lang = ff7_lang_from_system();
     l_info("setLang(%i)", lang);
     ff7_setLang(&jni, FF7_CLASS, lang);
 

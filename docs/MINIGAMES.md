@@ -1559,3 +1559,21 @@ página ou fecha a janela, ~10 toques por segundo.
 - Uma janela cujo estado e ponteiro de texto (`0xCBF578 + 4 * janela`) não
   mudam por 20 toques é deixada (janela que o jogador não fecha) até fechar.
 - Só nos campos. O hook é instalado na primeira vez que a opção é ligada.
+
+## v0.6.44: idioma dos diálogos e menu do port em inglês
+
+- O menu do port passou a ser todo em inglês (abas, itens, mensagens e os
+  nomes das matérias, com os nomes oficiais em inglês).
+- **GAMEPLAY > DIALOG LANGUAGE**: VITA SYSTEM (como antes: o idioma do
+  sistema do Vita), ENGLISH, FRENCH, GERMAN, SPANISH ou JAPANESE. O OBB traz
+  os dados de cinco idiomas (`data/lang-en`, `-fr`, `-de`, `-es`, `-ja`, e os
+  campos em `flevel`, `fflevel`, `gflevel`, `sflevel`, `jfleve.lgp`). O jogo
+  escolhe o idioma uma vez, em `setLang` (0 en, 1 fr, 2 de, 3 es, 4 ja,
+  chamado no início como o `MainActivity.onCreate` do Android), e carrega os
+  textos a partir dele, então a troca vale **na próxima vez que o jogo
+  abrir**; o menu marca com `*` um idioma escolhido que ainda não está em
+  uso. A escolha fica em `cheats.txt` (`language`, -1 = sistema), lido por
+  `port_menu_language()` antes do `setLang`.
+- Na cópia do OBB usada no desenvolvimento, `lang-en` contém textos em
+  português (por exemplo os nomes das matérias no `kernel2.bin`): ENGLISH usa
+  o que estiver nessa pasta.

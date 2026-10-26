@@ -11,6 +11,10 @@
 
 #include <stdint.h>
 
+/** Before setLang: the dialog language chosen in the menu (0 en, 1 fr, 2 de,
+ *  3 es, 4 ja), or -1 for the Vita's system language. */
+int port_menu_language(void);
+
 /** Main thread, once after the .so is loaded. */
 void port_menu_init(void);
 

@@ -178,30 +178,30 @@ typedef struct {
 // Entries of wm0.ev's system function 0 that board a vehicle (opcode 0x30C)
 static const vehicle vehicles[] = {
     { "BUGGY",     0x07, VA_WM_VEHICLES, 0x03, 0x10 }, // bits 0x3F8 + 0x3F9; Highwind off (same slot)
-    { "SUBMARINO", 0x36, VA_WM_SUB,      0x04, 0x00 }, // bit 0x1A92
+    { "SUBMARINE", 0x36, VA_WM_SUB,      0x04, 0x00 }, // bit 0x1A92
     { "HIGHWIND",  0x29, VA_WM_VEHICLES, 0x10, 0x03 }, // bit 0x3FC; buggy off (same slot)
 };
 #define NUM_VEHICLES ((int) (sizeof(vehicles) / sizeof(vehicles[0])))
 
 // From the MINIGAME opcodes of the game's scripts (field: return map)
 static const minigame games[] = {
-    { "G-BIKE (MOTO)",              0,   0, 507,  243,  176, 92 }, // games_2
-    { "CORRIDA DE CHOCOBO",         1,   0, 511, -372,   33, 81 }, // crcin_1
-    { "SNOWBOARD (GELEIRA)",        2,  64, 658, -201, 3116, 71 }, // snow -> hyou1
+    { "G-BIKE (MOTORCYCLE)",              0,   0, 507,  243,  176, 92 }, // games_2
+    { "CHOCOBO RACING",         1,   0, 511, -372,   33, 81 }, // crcin_1
+    { "SNOWBOARD (GLACIER)",        2,  64, 658, -201, 3116, 71 }, // snow -> hyou1
     { "FORT CONDOR",                3, 128, 356,    9,  114, 17 }, // convil_2
-    { "SUBMARINO",                  4,   0, 406, -101, -156,  8 }, // subin_1b
-    { "MONTANHA-RUSSA",             5,   0, 487,  411,  -12, 50 }, // jetin1
-    { "SNOWBOARD (FLIPERAMA)",      6,   0, 507,  -37,  273, 26 }, // games_2
+    { "SUBMARINE",                  4,   0, 406, -101, -156,  8 }, // subin_1b
+    { "ROLLER COASTER",             5,   0, 487,  411,  -12, 50 }, // jetin1
+    { "SNOWBOARD (ARCADE)",      6,   0, 507,  -37,  273, 26 }, // games_2
 };
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
 enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR, ITEM_MATERIA_PICK,
-       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP };
+       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE };
 
 // Tabs (L / R): the items of each, in order
 static const uint8_t tab_cheats[] = { ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR,
                                       ITEM_MATERIA_PICK, ITEM_SUMMONS, ITEM_CLOSE };
-static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_CLOSE };
+static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_CLOSE };
 static const uint8_t tab_debug[] = { 0, 1, 2, 3, 4, 5, 6, ITEM_RECORD, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP,
                                      ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_TITLE, ITEM_CLOSE };
 typedef struct {
@@ -220,36 +220,36 @@ static const tab tabs[] = {
 // Materia ids and names (kernel.bin types, kernel2.bin names of the game's data), by color
 typedef struct { uint8_t id; const char * name; } materia_name;
 static const materia_name mat_green[] = {
-    { 0x31, "FOGO" }, { 0x32, "GELO" }, { 0x33, "TERRA" }, { 0x34, "RELAMPAGO" }, { 0x35, "RESTAURAR" },
-    { 0x36, "CURAR" }, { 0x37, "REVIVER" }, { 0x38, "SELAR" }, { 0x39, "MISTIFICAR" }, { 0x3a, "TRANSFORMAR" },
-    { 0x3b, "SAIR" }, { 0x3c, "VENENO" }, { 0x3d, "GRAVIDADE" }, { 0x3e, "BARREIRA" }, { 0x40, "COMETA" },
-    { 0x41, "TEMPO" }, { 0x44, "DESTRUIR" }, { 0x45, "CONTER" }, { 0x46, "CURA TOTAL" }, { 0x47, "ESCUDO" },
-    { 0x48, "ULTIMA" }, { 0x49, "MAGIA MESTRE" },
+    { 0x31, "FIRE" }, { 0x32, "ICE" }, { 0x33, "EARTH" }, { 0x34, "LIGHTNING" }, { 0x35, "RESTORE" },
+    { 0x36, "HEAL" }, { 0x37, "REVIVE" }, { 0x38, "SEAL" }, { 0x39, "MYSTIFY" }, { 0x3a, "TRANSFORM" },
+    { 0x3b, "EXIT" }, { 0x3c, "POISON" }, { 0x3d, "GRAVITY" }, { 0x3e, "BARRIER" }, { 0x40, "COMET" },
+    { 0x41, "TIME" }, { 0x44, "DESTRUCT" }, { 0x45, "CONTAIN" }, { 0x46, "FULLCURE" }, { 0x47, "SHIELD" },
+    { 0x48, "ULTIMA" }, { 0x49, "MASTER MAGIC" },
 };
 static const materia_name mat_yellow[] = {
-    { 0x0e, "CORTAR TODOS" }, { 0x0f, "CORTE DUPLO" }, { 0x13, "W-MAGIA" }, { 0x14, "W-INVOCACAO" },
-    { 0x15, "W-ITEM" }, { 0x24, "ROUBAR" }, { 0x25, "SENSOR" }, { 0x27, "LANCAR" }, { 0x28, "MORFAR" },
-    { 0x29, "GOLPE MORTAL" }, { 0x2a, "MANIPULAR" }, { 0x2b, "MIMICA" }, { 0x2c, "HAB. INIMIGA" },
-    { 0x30, "COMANDO MESTRE" },
+    { 0x0e, "SLASH-ALL" }, { 0x0f, "DOUBLE CUT" }, { 0x13, "W-MAGIC" }, { 0x14, "W-SUMMON" },
+    { 0x15, "W-ITEM" }, { 0x24, "STEAL" }, { 0x25, "SENSE" }, { 0x27, "THROW" }, { 0x28, "MORPH" },
+    { 0x29, "DEATHBLOW" }, { 0x2a, "MANIPULATE" }, { 0x2b, "MIME" }, { 0x2c, "ENEMY SKILL" },
+    { 0x30, "MASTER COMMAND" },
 };
 static const materia_name mat_purple[] = {
-    { 0x00, "MP EXTRA" }, { 0x01, "HP EXTRA" }, { 0x02, "VELOCIDADE EXTRA" }, { 0x03, "MAGIA EXTRA" },
-    { 0x04, "SORTE EXTRA" }, { 0x05, "EXP EXTRA" }, { 0x06, "GIL EXTRA" }, { 0x07, "AFASTA INIMIGOS" },
-    { 0x08, "ATRAI INIMIGOS" }, { 0x09, "ATRAI CHOCOBOS" }, { 0x0a, "PREVENTIVO" }, { 0x0b, "LONGO ALCANCE" },
-    { 0x0c, "SUPER TODOS" }, { 0x0d, "CONTRA ATAQUE" }, { 0x10, "COBERTURA" }, { 0x11, "SUBAQUATICO" },
+    { 0x00, "MP PLUS" }, { 0x01, "HP PLUS" }, { 0x02, "SPEED PLUS" }, { 0x03, "MAGIC PLUS" },
+    { 0x04, "LUCK PLUS" }, { 0x05, "EXP PLUS" }, { 0x06, "GIL PLUS" }, { 0x07, "ENEMY AWAY" },
+    { 0x08, "ENEMY LURE" }, { 0x09, "CHOCOBO LURE" }, { 0x0a, "PRE-EMPTIVE" }, { 0x0b, "LONG RANGE" },
+    { 0x0c, "MEGA ALL" }, { 0x0d, "COUNTER ATTACK" }, { 0x10, "COVER" }, { 0x11, "UNDERWATER" },
     { 0x12, "HP<->MP" },
 };
 static const materia_name mat_blue[] = {
-    { 0x17, "TODOS" }, { 0x18, "CONFRONTO" }, { 0x19, "CONFRONTO MAGICO" }, { 0x1a, "MP TURBO" },
-    { 0x1b, "ABSORVER MP" }, { 0x1c, "ABSORVER HP" }, { 0x1d, "ELEMENTAL" }, { 0x1e, "EFEITO ADICIONAL" },
-    { 0x1f, "ATAQUE FURTIVO" }, { 0x20, "ATAQUE FINAL" }, { 0x21, "CORTE ADICIONAL" }, { 0x22, "ROUBO SIMULTANEO" },
-    { 0x23, "QUADRI MAGICA" },
+    { 0x17, "ALL" }, { 0x18, "COUNTER" }, { 0x19, "MAGIC COUNTER" }, { 0x1a, "MP TURBO" },
+    { 0x1b, "MP ABSORB" }, { 0x1c, "HP ABSORB" }, { 0x1d, "ELEMENTAL" }, { 0x1e, "ADDED EFFECT" },
+    { 0x1f, "SNEAK ATTACK" }, { 0x20, "FINAL ATTACK" }, { 0x21, "ADDED CUT" }, { 0x22, "STEAL AS WELL" },
+    { 0x23, "QUADRA MAGIC" },
 };
 static const materia_name mat_red[] = { // SUMMON_FIRST .. SUMMON_LAST
-    { 0x4a, "CHOCO/MOG" }, { 0x4b, "SHIVA" }, { 0x4c, "IFRIT" }, { 0x4d, "RAMUH" }, { 0x4e, "TITA" },
-    { 0x4f, "ODIN" }, { 0x50, "LEVIATA" }, { 0x51, "BAHAMUT" }, { 0x52, "KUJATA" }, { 0x53, "ALEXANDER" },
-    { 0x54, "FENIX" }, { 0x55, "NEO BAHAMUT" }, { 0x56, "HADES" }, { 0x57, "TYPHON" }, { 0x58, "BAHAMUT ZERO" },
-    { 0x59, "CAV. TABULA RED." }, { 0x5a, "INVOCACAO MESTRE" },
+    { 0x4a, "CHOCO/MOG" }, { 0x4b, "SHIVA" }, { 0x4c, "IFRIT" }, { 0x4d, "RAMUH" }, { 0x4e, "TITAN" },
+    { 0x4f, "ODIN" }, { 0x50, "LEVIATHAN" }, { 0x51, "BAHAMUT" }, { 0x52, "KUJATA" }, { 0x53, "ALEXANDER" },
+    { 0x54, "PHOENIX" }, { 0x55, "NEO BAHAMUT" }, { 0x56, "HADES" }, { 0x57, "TYPHON" }, { 0x58, "BAHAMUT ZERO" },
+    { 0x59, "KNIGHTS OF ROUND" }, { 0x5a, "MASTER SUMMON" },
 };
 typedef struct {
     const char * name;
@@ -258,11 +258,11 @@ typedef struct {
 } materia_color;
 #define MATERIA_COLOR(n, l) { n, l, (int) (sizeof(l) / sizeof(l[0])) }
 static const materia_color materia_colors[] = {
-    MATERIA_COLOR("VERDE (MAGIA)", mat_green),
-    MATERIA_COLOR("AMARELA (COMANDO)", mat_yellow),
-    MATERIA_COLOR("ROXA (INDEPENDENTE)", mat_purple),
-    MATERIA_COLOR("AZUL (SUPORTE)", mat_blue),
-    MATERIA_COLOR("VERMELHA (INVOCACAO)", mat_red),
+    MATERIA_COLOR("GREEN (MAGIC)", mat_green),
+    MATERIA_COLOR("YELLOW (COMMAND)", mat_yellow),
+    MATERIA_COLOR("PURPLE (INDEPENDENT)", mat_purple),
+    MATERIA_COLOR("BLUE (SUPPORT)", mat_blue),
+    MATERIA_COLOR("RED (SUMMON)", mat_red),
 };
 #define NUM_COLORS ((int) (sizeof(materia_colors) / sizeof(materia_colors[0])))
 #define NUM_SUMMONS ((int) (sizeof(mat_red) / sizeof(mat_red[0])))
@@ -311,6 +311,11 @@ static volatile int cheat_hpmp;
 static volatile int cheat_exp = 1, cheat_gil = 1;           // reward factors, 1..4
 static volatile int speed_field = 1, speed_world = 1;       // movement factors, 1..4
 static volatile int auto_skip;                              // skip the field's dialogs
+static int language = -1, language_loaded;                  // game text: -1 system, 0..4 setLang (next start)
+static int settings_loaded;
+// setLang's values (MainActivity.onCreate): the data folders lang-en, -fr, -de, -es, -ja
+static const char * const language_names[] = { "ENGLISH", "FRENCH", "GERMAN", "SPANISH", "JAPANESE" };
+#define NUM_LANGUAGES 5
 static int materia_max = 1;                                  // add at: 0 level 1 (AP 0), 1 mastered
 static int summon_cursor, color_cursor, materia_cursor;      // main thread
 static volatile int materia_request = -1;                    // id | AP << 8 to add
@@ -410,6 +415,8 @@ static void save_scenes(void) {
 static int clamp_factor(int v) { return v < 1 ? 1 : v > 4 ? 4 : v; }
 
 static void load_cheats(void) {
+    if (settings_loaded) return;
+    settings_loaded = 1;
     FILE * f = fopen(CHEATS_PATH, "r");
     if (!f) return;
     char key[32];
@@ -422,6 +429,7 @@ static void load_cheats(void) {
         else if (!strcmp(key, "speed_field")) speed_field = clamp_factor(v);
         else if (!strcmp(key, "speed_world")) speed_world = clamp_factor(v);
         else if (!strcmp(key, "auto_skip")) auto_skip = v != 0;
+        else if (!strcmp(key, "language")) language = v >= 0 && v < NUM_LANGUAGES ? v : -1;
     }
     fclose(f);
 }
@@ -432,8 +440,8 @@ static void save_cheats(void) {
         l_error("port menu: could not write %s", CHEATS_PATH);
         return;
     }
-    fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\nauto_skip %d\n", cheat_hpmp,
-            cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip);
+    fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\nauto_skip %d\nlanguage %d\n",
+            cheat_hpmp, cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip, language);
     fclose(f);
 }
 
@@ -462,6 +470,12 @@ void port_menu_init(void) {
     l_info("port menu: hold L + R and press Start (minigame shortcuts, profiler, %d saved scenes)", num_scenes);
     l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d", cheat_hpmp,
            cheat_exp, cheat_gil, speed_field, speed_world);
+}
+
+int port_menu_language(void) {
+    load_cheats();
+    language_loaded = language;
+    return language;
 }
 
 // ---------------------------------------------------------------- cheats (game thread)
@@ -970,7 +984,7 @@ static void change(int item, int dir) {
             return;
         case ITEM_HPMP:
             cheat_hpmp = !cheat_hpmp;
-            snprintf(m, sizeof(m), "HP E MP INFINITOS: %s", cheat_hpmp ? "LIGADO" : "DESLIGADO");
+            snprintf(m, sizeof(m), "INFINITE HP AND MP: %s", cheat_hpmp ? "ON" : "OFF");
             break;
         case ITEM_LEVEL:
             materia_max = !materia_max;
@@ -978,11 +992,11 @@ static void change(int item, int dir) {
             return;
         case ITEM_EXP:
             cheat_exp = step(cheat_exp - 1, 4, dir) + 1;
-            snprintf(m, sizeof(m), "EXP: %s (A PARTIR DA PROXIMA BATALHA)", factor_name(cheat_exp));
+            snprintf(m, sizeof(m), "EXP: %s (FROM THE NEXT BATTLE)", factor_name(cheat_exp));
             break;
         case ITEM_GIL:
             cheat_gil = step(cheat_gil - 1, 4, dir) + 1;
-            snprintf(m, sizeof(m), "GIL: %s (A PARTIR DA PROXIMA BATALHA)", factor_name(cheat_gil));
+            snprintf(m, sizeof(m), "GIL: %s (FROM THE NEXT BATTLE)", factor_name(cheat_gil));
             break;
         case ITEM_FIELD_SPEED:
             speed_field = step(speed_field - 1, 4, dir) + 1;
@@ -990,9 +1004,13 @@ static void change(int item, int dir) {
         case ITEM_WORLD_SPEED:
             speed_world = step(speed_world - 1, 4, dir) + 1;
             break;
+        case ITEM_LANGUAGE:
+            language = step(language + 1, NUM_LANGUAGES + 1, dir) - 1;
+            snprintf(m, sizeof(m), "DIALOG LANGUAGE: RESTART THE GAME TO APPLY");
+            break;
         case ITEM_AUTO_SKIP:
             auto_skip = !auto_skip;
-            snprintf(m, sizeof(m), "PULAR DIALOGOS: %s (PERGUNTAS NAO)", auto_skip ? "LIGADO" : "DESLIGADO");
+            snprintf(m, sizeof(m), "DIALOG SKIP: %s (NOT QUESTIONS)", auto_skip ? "ON" : "OFF");
             break;
         default:
             return;
@@ -1007,13 +1025,13 @@ static void activate(int item) {
     if (item < NUM_GAMES) {
         if (game_mode != MODE_FIELD) {
             char m[64];
-            snprintf(m, sizeof(m), "SO A PARTIR DE UM CAMPO (MODO %d)", game_mode);
+            snprintf(m, sizeof(m), "ONLY FROM A FIELD (MODE %d)", game_mode);
             set_message(m);
             return;
         }
         request = item;
         char m[64];
-        snprintf(m, sizeof(m), "INICIANDO %s", games[item].name);
+        snprintf(m, sizeof(m), "STARTING %s", games[item].name);
         set_message(m);
         open = 0;
         wait_release = 1;
@@ -1022,54 +1040,54 @@ static void activate(int item) {
             profiler_set_paused(1);
             l_info("port menu: scene %d recording stopped (profiler paused)", recording + 1);
             char m[64];
-            snprintf(m, sizeof(m), "CENA %d GRAVADA: ENVIE PROFILE.BIN E LOGS.TXT", recording + 1);
+            snprintf(m, sizeof(m), "SCENE %d SAVED: SEND PROFILE.BIN AND LOGS.TXT", recording + 1);
             set_message(m);
             recording = -1;
         } else if (num_scenes >= MAX_SCENES) {
-            set_message("LIMITE DE CENAS: EDITE CENAS.TXT");
+            set_message("SCENE LIMIT: EDIT CENAS.TXT");
         } else {
             record_request = 1;
-            set_message("GRAVANDO CENA: PROFILER LIGADO");
+            set_message("RECORDING SCENE: PROFILER ON");
             open = 0;
             wait_release = 1;
         }
     } else if (item == ITEM_GOTO) {
         if (!num_scenes) {
-            set_message("NENHUMA CENA GRAVADA");
+            set_message("NO SCENE RECORDED");
         } else if (game_mode != MODE_FIELD) {
-            set_message("SO A PARTIR DE UM CAMPO");
+            set_message("ONLY FROM A FIELD");
         } else {
             goto_request = scene_cursor;
             char m[64];
-            snprintf(m, sizeof(m), "INDO PARA A CENA %d", scene_cursor + 1);
+            snprintf(m, sizeof(m), "GOING TO SCENE %d", scene_cursor + 1);
             set_message(m);
             open = 0;
             wait_release = 1;
         }
     } else if (item == ITEM_WORLD) {
         if (game_mode != MODE_FIELD) {
-            set_message("SO A PARTIR DE UM CAMPO");
+            set_message("ONLY FROM A FIELD");
         } else {
             world_request = vehicle_cursor;
             char m[64];
-            snprintf(m, sizeof(m), "MAPA-MUNDI: %s (NAO SALVE DEPOIS)", vehicles[vehicle_cursor].name);
+            snprintf(m, sizeof(m), "WORLD MAP: %s (DO NOT SAVE AFTER)", vehicles[vehicle_cursor].name);
             set_message(m);
             open = 0;
             wait_release = 1;
         }
     } else if (item == ITEM_SUMMONS) {
         if (game_mode != MODE_FIELD && game_mode != 3) {
-            set_message("SO NUM CAMPO OU NO MAPA-MUNDI");
+            set_message("ONLY IN A FIELD OR ON THE WORLD MAP");
         } else {
             summons_request = 1;
-            set_message("INVOCACOES NO INVENTARIO (VER O LOG)");
+            set_message("SUMMONS IN THE INVENTORY (SEE THE LOG)");
         }
     } else if (item >= ITEM_AB_NATIVES && item <= ITEM_AB_TEXCACHE) {
         int k = item - ITEM_AB_NATIVES;
         ab_want[k] = !ab_want[k];
-        static const char * const what[3] = { "NATIVOS DOS MINI-GAMES", "LIMITE DE 30 FPS", "CACHE DE TEXTURAS" };
+        static const char * const what[3] = { "MINIGAME NATIVES", "30 FPS CAP", "TEXTURE CACHE" };
         char m[64];
-        snprintf(m, sizeof(m), "%s: %s", what[k], ab_want[k] ? "LIGADO" : "DESLIGADO");
+        snprintf(m, sizeof(m), "%s: %s", what[k], ab_want[k] ? "ON" : "OFF");
         set_message(m);
         l_info("port menu: A/B %s %s (mode %d)", what[k], ab_want[k] ? "on" : "off", game_mode);
     } else if (item == ITEM_AUTO) {
@@ -1077,36 +1095,36 @@ static void activate(int item) {
         l_info("port menu: automatic profiling %s", auto_profile ? "on" : "off");
     } else if (item == ITEM_TITLE) {
         if (game_mode != MODE_FIELD) {
-            set_message("SO A PARTIR DE UM CAMPO");
+            set_message("ONLY FROM A FIELD");
         } else if (!title_armed) {
             title_armed = 1;
-            set_message("APERTE DE NOVO: O JOGO NAO SALVO SE PERDE");
+            set_message("PRESS AGAIN: UNSAVED PROGRESS IS LOST");
         } else {
             title_armed = 0;
             title_request = 1;
-            set_message("VOLTANDO AO TITULO: ESCOLHA CONTINUAR");
+            set_message("BACK TO THE TITLE: CHOOSE CONTINUE");
             open = 0;
             wait_release = 1;
         }
     } else if (item == ITEM_PROFILER) {
         if (profiler_active()) {
             profiler_set_paused(1);
-            set_message("PROFILER PAUSADO");
+            set_message("PROFILER PAUSED");
         } else {
             profiler_start_now();
-            set_message("PROFILER LIGADO: PROFILE.BIN");
+            set_message("PROFILER ON: PROFILE.BIN");
             l_info("port menu: profiler on (manual, mode %d)", game_mode);
         }
     } else if (item == ITEM_SUMMON_PICK || item == ITEM_MATERIA_PICK) {
         const materia_name * mn = item == ITEM_SUMMON_PICK ? &mat_red[summon_cursor]
                                                            : &materia_colors[color_cursor].list[materia_cursor];
         if (game_mode != MODE_FIELD && game_mode != MODE_WORLD) {
-            set_message("SO NUM CAMPO OU NO MAPA-MUNDI");
+            set_message("ONLY IN A FIELD OR ON THE WORLD MAP");
         } else {
             materia_result = 0;
             materia_request = (int) ((uint32_t) mn->id | (materia_max ? AP_MASTER : 0) << 8);
             char m[64];
-            snprintf(m, sizeof(m), "%s (%s)...", mn->name, materia_max ? "MAXIMO" : "NIVEL 1");
+            snprintf(m, sizeof(m), "%s (%s)...", mn->name, materia_max ? "MAX" : "LEVEL 1");
             set_message(m);
         }
     } else if (item == ITEM_CLOSE) {
@@ -1297,8 +1315,8 @@ void port_menu_draw(void) {
     }
 
     // Result of a materia added by the game thread
-    static const char * const materia_results[] = { NULL, "MATERIA NO INVENTARIO", "INVENTARIO DE MATERIAS CHEIO",
-                                                    "SO NUM CAMPO OU NO MAPA-MUNDI" };
+    static const char * const materia_results[] = { NULL, "MATERIA IN THE INVENTORY", "MATERIA INVENTORY FULL",
+                                                    "ONLY IN A FIELD OR ON THE WORLD MAP" };
     int mr = materia_result;
     if (mr > 0 && mr <= 3) {
         materia_result = 0;
@@ -1316,7 +1334,7 @@ void port_menu_draw(void) {
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
         float y = y0 + 15;
-        text(x0 + 20, y, "MENU DO PORT", RGBA(255, 255, 255, 255));
+        text(x0 + 20, y, "PORT MENU", RGBA(255, 255, 255, 255));
         y += LINE_H + 2;
         // Tabs: L  CHEATS  GAMEPLAY  DEBUG  R
         float tx = x0 + 20;
@@ -1330,55 +1348,58 @@ void port_menu_draw(void) {
         }
         text(tx, y, "R", RGBA(170, 190, 230, 255));
         y += LINE_H;
-        snprintf(line, sizeof(line), "MODO %d   %.1f FPS   PROFILER %s", game_mode, fps,
-                 profiler_active() ? "LIGADO" : "DESLIGADO");
+        snprintf(line, sizeof(line), "MODE %d   %.1f FPS   PROFILER %s", game_mode, fps,
+                 profiler_active() ? "ON" : "OFF");
         text(x0 + 20, y, line, RGBA(170, 190, 230, 255));
         y += LINE_H + 6;
         for (int n = 0; n < t->count; n++, y += LINE_H) {
             int i = t->items[n];
             const char * label = line;
             if (i < NUM_GAMES) label = games[i].name;
-            else if (i == ITEM_HPMP) snprintf(line, sizeof(line), "HP E MP INFINITOS: %s", cheat_hpmp ? "SIM" : "NAO");
-            else if (i == ITEM_EXP) snprintf(line, sizeof(line), "EXP NAS BATALHAS < %s >", factor_name(cheat_exp));
-            else if (i == ITEM_GIL) snprintf(line, sizeof(line), "GIL NAS BATALHAS < %s >", factor_name(cheat_gil));
+            else if (i == ITEM_HPMP) snprintf(line, sizeof(line), "INFINITE HP AND MP: %s", cheat_hpmp ? "YES" : "NO");
+            else if (i == ITEM_EXP) snprintf(line, sizeof(line), "BATTLE EXP < %s >", factor_name(cheat_exp));
+            else if (i == ITEM_GIL) snprintf(line, sizeof(line), "BATTLE GIL < %s >", factor_name(cheat_gil));
             else if (i == ITEM_LEVEL)
-                snprintf(line, sizeof(line), "NIVEL DA MATERIA < %s >", materia_max ? "MAXIMO" : "1 (ZERADA)");
-            else if (i == ITEM_SUMMON_PICK) snprintf(line, sizeof(line), "INVOCACAO < %s >", mat_red[summon_cursor].name);
-            else if (i == ITEM_COLOR) snprintf(line, sizeof(line), "COR < %s >", materia_colors[color_cursor].name);
+                snprintf(line, sizeof(line), "MATERIA LEVEL < %s >", materia_max ? "MAX" : "1 (NO AP)");
+            else if (i == ITEM_SUMMON_PICK) snprintf(line, sizeof(line), "SUMMON < %s >", mat_red[summon_cursor].name);
+            else if (i == ITEM_COLOR) snprintf(line, sizeof(line), "COLOR < %s >", materia_colors[color_cursor].name);
             else if (i == ITEM_MATERIA_PICK)
                 snprintf(line, sizeof(line), "MATERIA < %s > %d/%d", materia_colors[color_cursor].list[materia_cursor].name,
                          materia_cursor + 1, materia_colors[color_cursor].count);
             else if (i == ITEM_FIELD_SPEED)
-                snprintf(line, sizeof(line), "VELOCIDADE NOS CAMPOS < %s >", factor_name(speed_field));
+                snprintf(line, sizeof(line), "FIELD SPEED < %s >", factor_name(speed_field));
             else if (i == ITEM_WORLD_SPEED)
-                snprintf(line, sizeof(line), "VELOC. A PE NO MAPA-MUNDI < %s >", factor_name(speed_world));
+                snprintf(line, sizeof(line), "WORLD MAP SPEED ON FOOT < %s >", factor_name(speed_world));
+            else if (i == ITEM_LANGUAGE)
+                snprintf(line, sizeof(line), "DIALOG LANGUAGE < %s >%s", language < 0 ? "VITA SYSTEM" : language_names[language],
+                         language != language_loaded ? " *" : "");
             else if (i == ITEM_AUTO_SKIP)
-                snprintf(line, sizeof(line), "PULAR DIALOGOS AUTOMATICO: %s", auto_skip ? "SIM" : "NAO");
+                snprintf(line, sizeof(line), "AUTO SKIP DIALOGS: %s", auto_skip ? "YES" : "NO");
             else if (i == ITEM_RECORD) {
-                if (recording >= 0) snprintf(line, sizeof(line), "GRAVANDO CENA %d: PARAR", recording + 1);
-                else snprintf(line, sizeof(line), "GRAVAR CENA (MARCADOR + PROFILER)");
+                if (recording >= 0) snprintf(line, sizeof(line), "RECORDING SCENE %d: STOP", recording + 1);
+                else snprintf(line, sizeof(line), "RECORD SCENE (MARKER + PROFILER)");
             } else if (i == ITEM_GOTO) {
-                if (!num_scenes) snprintf(line, sizeof(line), "IR PARA CENA: NENHUMA");
+                if (!num_scenes) snprintf(line, sizeof(line), "GO TO SCENE: NONE");
                 else if (scenes[scene_cursor].mode == MODE_FIELD)
-                    snprintf(line, sizeof(line), "IR PARA CENA < %d/%d > MAPA %d", scene_cursor + 1, num_scenes,
+                    snprintf(line, sizeof(line), "GO TO SCENE < %d/%d > MAP %d", scene_cursor + 1, num_scenes,
                              scenes[scene_cursor].map);
                 else
-                    snprintf(line, sizeof(line), "IR PARA CENA < %d/%d > MODO %d", scene_cursor + 1, num_scenes,
+                    snprintf(line, sizeof(line), "GO TO SCENE < %d/%d > MODE %d", scene_cursor + 1, num_scenes,
                              scenes[scene_cursor].mode);
             } else if (i == ITEM_WORLD) {
-                snprintf(line, sizeof(line), "MAPA-MUNDI < %s >", vehicles[vehicle_cursor].name);
+                snprintf(line, sizeof(line), "WORLD MAP < %s >", vehicles[vehicle_cursor].name);
             } else if (i == ITEM_SUMMONS) {
-                label = "MATERIAS DE INVOCACAO (TODAS, MASTER)";
+                label = "ALL SUMMON MATERIA (MASTERED)";
             } else if (i == ITEM_AB_NATIVES) {
-                snprintf(line, sizeof(line), "A/B NATIVOS DOS MINI-GAMES: %s", ab_want[0] ? "SIM" : "NAO");
+                snprintf(line, sizeof(line), "A/B MINIGAME NATIVES: %s", ab_want[0] ? "YES" : "NO");
             } else if (i == ITEM_AB_CAP) {
-                snprintf(line, sizeof(line), "A/B LIMITE DE 30 FPS: %s", ab_want[1] ? "SIM" : "NAO");
+                snprintf(line, sizeof(line), "A/B 30 FPS CAP: %s", ab_want[1] ? "YES" : "NO");
             } else if (i == ITEM_AB_TEXCACHE) {
-                snprintf(line, sizeof(line), "A/B CACHE DE TEXTURAS: %s", ab_want[2] ? "SIM" : "NAO");
-            } else if (i == ITEM_AUTO) snprintf(line, sizeof(line), "PERFIL AUTOMATICO NOS MINI-GAMES: %s", auto_profile ? "SIM" : "NAO");
-            else if (i == ITEM_PROFILER) snprintf(line, sizeof(line), "PROFILER AGORA: %s", profiler_active() ? "PAUSAR" : "INICIAR");
-            else if (i == ITEM_TITLE) label = title_armed ? "VOLTAR AO TITULO: CONFIRMAR" : "VOLTAR AO TITULO (CARREGAR SAVE)";
-            else label = "FECHAR";
+                snprintf(line, sizeof(line), "A/B TEXTURE CACHE: %s", ab_want[2] ? "YES" : "NO");
+            } else if (i == ITEM_AUTO) snprintf(line, sizeof(line), "AUTO PROFILE IN MINIGAMES: %s", auto_profile ? "YES" : "NO");
+            else if (i == ITEM_PROFILER) snprintf(line, sizeof(line), "PROFILER NOW: %s", profiler_active() ? "PAUSE" : "START");
+            else if (i == ITEM_TITLE) label = title_armed ? "BACK TO THE TITLE: CONFIRM" : "BACK TO THE TITLE (LOAD A SAVE)";
+            else label = "CLOSE";
             if (n == cursor) rect(x0 + 10, y - 6, x1 - 10, y + 7 * SCALE + 6, RGBA(60, 90, 170, 255));
             int needs_field = i < NUM_GAMES || i == ITEM_GOTO || i == ITEM_WORLD || i == ITEM_TITLE;
             int adds_materia = i == ITEM_SUMMONS || i == ITEM_SUMMON_PICK || i == ITEM_MATERIA_PICK;
@@ -1389,14 +1410,14 @@ void port_menu_draw(void) {
         }
         y += 6;
         if (cur_tab == 0) {
-            text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: MUDAR", RGBA(170, 190, 230, 255));
-            text(x0 + 20, y + LINE_H, "X EM INVOCACAO/MATERIA: ADICIONA", RGBA(170, 190, 230, 255));
+            text(x0 + 20, y, "X: OK  O: EXIT  LEFT/RIGHT: CHANGE", RGBA(170, 190, 230, 255));
+            text(x0 + 20, y + LINE_H, "X ON SUMMON/MATERIA: ADD IT", RGBA(170, 190, 230, 255));
         } else if (cur_tab == 1) {
-            text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: MUDAR", RGBA(170, 190, 230, 255));
+            text(x0 + 20, y, "X: OK  O: EXIT  LEFT/RIGHT: CHANGE", RGBA(170, 190, 230, 255));
         } else {
-            text(x0 + 20, y, "X: OK  O: SAIR  ESQ/DIR: CENA/VEICULO", RGBA(170, 190, 230, 255));
+            text(x0 + 20, y, "X: OK  O: EXIT  < >: SCENE/VEHICLE", RGBA(170, 190, 230, 255));
             if (game_mode != MODE_FIELD)
-                text(x0 + 20, y + LINE_H, "MINI-GAMES: SO A PARTIR DE UM CAMPO", RGBA(230, 190, 120, 255));
+                text(x0 + 20, y + LINE_H, "MINIGAMES: ONLY FROM A FIELD", RGBA(230, 190, 120, 255));
         }
     }
     if (show_message) {
