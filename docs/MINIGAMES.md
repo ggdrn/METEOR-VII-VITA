@@ -1521,3 +1521,20 @@ personagem:
   código recompilado (`movs r2, #30` em `func_0x0074ea48 + 0x276A`). O port
   troca esse imediato por 30 × fator (até 120; 240 por quadro cabe no byte).
   Os veículos não mudam.
+
+## v0.6.42: velocidade nos campos sem aumentar a colisão do jogador
+
+Na v0.6.41 a "caixa" do Cloud crescia junto com a velocidade e ele não
+passava por lugares estreitos. A base `[0xCC0D98]` não serve só para a
+velocidade:
+
+- `0x633C2F`, ao começar um campo, faz o raio de colisão do jogador
+  (`+0x72`) = base × 34 / 512 (e a velocidade `+0x76` = base × 2);
+- `0x644075` usa base / 4 somado à posição (a checagem à frente no walkmesh).
+
+Agora a base só fica multiplicada **enquanto `0x6342C6` roda**: um hook nessa
+função multiplica a base, chama a original e devolve a base. Dentro de
+`0x6342C6` a base só é lida nos quatro cálculos da velocidade, então a
+colisão e o resto continuam com o tamanho original. O hook é instalado na
+primeira vez que um fator diferente de 1 é escolhido e fica (com fator 1 a
+base não é mexida).

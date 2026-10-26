@@ -86,8 +86,10 @@
  *     kernel.bin (materia type, low nibble: 0/1/4 independent, 2/3/6/7/8
  *     command, 5 support, 9/A magic, B/C summon) and kernel2.bin (names).
  *   - Field speed x2..x4: the player's base speed [0xCC0D98] times the
- *     factor (scale_field_speed); the entity's own speed (+0x76) is rewritten
- *     from it every frame. Walking and running both get faster; nothing else.
+ *     factor, only while the model update 0x6342C6 runs (scale_field_speed),
+ *     which rewrites the entity's speed (+0x76) from it every frame. Walking
+ *     and running get faster; the collision size, also made from the base,
+ *     does not change.
  *   - World map speed x2..x4: the speed on foot, an immediate 30 in the
  *     recompiled code (scale_world_speed); vehicles are left as they are.
  *
@@ -106,6 +108,7 @@
 #include "ff7_framecap.h"
 #include "ff7_snowboard.h"
 #include "ff7_texture.h"
+#include "ff7_unhook.h"
 
 #include "utils/logger.h"
 #include "utils/profiler.h"
@@ -522,34 +525,45 @@ static void scale_rewards(int mode) {
 }
 
 /*
- * Field: the player's base speed [0xCC0D98] = base * factor. Every frame the
- * field's model update (0x6342C6, called from 0x63C17F) writes the player
- * entity's movement speed (+0x76) from it: x3 walking, x8 running, x2 / x12
- * in the other cases, depending on the key state and the byte [0xCC0DC2].
- * A value other than the one written is a new base (a new field); factor 1
- * puts the base back.
+ * Field: every frame the field's model update (0x6342C6, called from
+ * 0x63C17F) writes the player entity's movement speed (+0x76) from the base
+ * [0xCC0D98]: x3 walking, x8 running, x2 / x12 in the other cases (key state
+ * and the byte [0xCC0DC2]). The base also sizes the player when a field
+ * starts (0x633C2F: collision radius +0x72 = base * 34 / 512) and the
+ * walkmesh look-ahead (0x644075: base / 4), so it is only multiplied while
+ * 0x6342C6 runs: a hook on it scales the base, calls the original and puts
+ * the base back. Inside 0x6342C6 the base is read only for the speed. The
+ * hook is installed the first time a factor is chosen (game thread, between
+ * frames) and stays.
  */
-static void scale_field_speed(int mode) {
-    static int16_t base, written;
-    static int valid, logged;
-    if (mode != MODE_FIELD) return;
+#define MODELS_UPDATE_SYM "_Z15func_0x006342c6v"
+static so_hook models_hook;
+
+static void models_update_scaled(void) {
     uint8_t * p = x86_span(VA_FIELD_SPEED, 2);
-    if (!p) return;
-    int16_t v = (int16_t) get16(p);
-    if (!valid || v != written) {
-        if (v <= 0) return; // not set up yet
-        if (logged < 20 && (!valid || v != base || speed_field != 1)) { // a new field, or the game rewrote it
-            logged++;
-            l_info("port menu: field player base speed %d (was %d, written %d, factor %d)", v, valid ? base : -1,
-                   valid ? written : -1, speed_field);
-        }
-        base = v;
-    }
+    int16_t base = p ? (int16_t) get16(p) : 0;
     int32_t w = (int32_t) base * speed_field;
     if (w > 0x7fff) w = 0x7fff;
-    if (w != v) put16(p, (uint16_t) w);
-    written = (int16_t) w;
-    valid = 1;
+    int scaled = p && base > 0 && w != base;
+    if (scaled) put16(p, (uint16_t) w);
+    SO_CONTINUE_HELD(int, models_hook);
+    if (scaled && (int16_t) get16(p) == (int16_t) w) put16(p, (uint16_t) base);
+}
+
+static void scale_field_speed(void) {
+    static int installed, broken;
+    if (installed || broken || speed_field == 1) return;
+    uintptr_t fn = so_symbol(&so_mod, MODELS_UPDATE_SYM);
+    if (!fn) {
+        l_warn("port menu: %s not found, field speed left as is", MODELS_UPDATE_SYM);
+        broken = 1;
+        return;
+    }
+    profiler_hold();
+    models_hook = hook_addr(fn, (uintptr_t) &models_update_scaled);
+    profiler_release();
+    installed = 1;
+    l_info("port menu: field speed hook on %s (factor %d)", MODELS_UPDATE_SYM, speed_field);
 }
 
 /*
@@ -588,7 +602,7 @@ static void scale_world_speed(void) {
 static void apply_cheats(int mode) {
     if (cheat_hpmp) refill_hpmp(mode);
     scale_rewards(mode);
-    scale_field_speed(mode);
+    scale_field_speed();
     scale_world_speed();
 
     int m = materia_request;

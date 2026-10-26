@@ -21,7 +21,7 @@ set(VITA_VERSION "00.99") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "0.6.41")
+set(PORT_VERSION "0.6.42")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
