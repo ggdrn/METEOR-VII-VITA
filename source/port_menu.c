@@ -216,6 +216,39 @@ static const tab tabs[] = {
     { "DEBUG",    tab_debug,    (int) sizeof(tab_debug) },
 };
 #define NUM_TABS ((int) (sizeof(tabs) / sizeof(tabs[0])))
+
+// Two lines (38 characters at most) on the selected item, at the bottom of the menu
+static const char * help_text(int item, int line) {
+    static const char * const games_help[2] = { "STARTS THIS MINIGAME AS THE STORY DOES", "FROM A FIELD. ENDS WHERE IT IS PLAYED" };
+    static const struct { uint8_t item; const char * text[2]; } help[] = {
+        { ITEM_RECORD,       { "FOR PERFORMANCE REPORTS: SAVES THIS", "PLACE AND RECORDS PROFILE.BIN" } },
+        { ITEM_GOTO,         { "JUMPS TO A RECORDED PLACE. LEFT/RIGHT", "PICKS ONE. STORY AND PARTY UNCHANGED" } },
+        { ITEM_WORLD,        { "WORLD MAP ON THE BUGGY/SUBMARINE/", "HIGHWIND. EDITS THE SAVE: DO NOT SAVE" } },
+        { ITEM_SUMMONS,      { "ADDS ALL 17 SUMMONS. MASTERED. TO THE", "MATERIA INVENTORY (FIELD/WORLD MAP)" } },
+        { ITEM_AB_NATIVES,   { "NO: TURNS OFF THE FAST MINIGAME CODE", "TO CHECK A GLITCH. LEAVE YES TO PLAY" } },
+        { ITEM_AB_CAP,       { "NO: MINIGAMES RUN UNCAPPED (UNEVEN)", "TO CHECK A GLITCH. LEAVE YES TO PLAY" } },
+        { ITEM_AB_TEXCACHE,  { "NO: TEXTURES ARE CONVERTED EVERY TIME", "TO CHECK A GLITCH. LEAVE YES TO PLAY" } },
+        { ITEM_AUTO,         { "RECORDS PROFILE.BIN IN EVERY MINIGAME", "FOR PERFORMANCE REPORTS" } },
+        { ITEM_PROFILER,     { "STARTS OR PAUSES PROFILE.BIN BY HAND", "FOR PERFORMANCE REPORTS" } },
+        { ITEM_TITLE,        { "BACK TO THE TITLE TO LOAD A SAVE", "FROM A FIELD. UNSAVED PROGRESS IS LOST" } },
+        { ITEM_CLOSE,        { "CLOSES THE MENU", "(ALSO O OR L+R+START)" } },
+        { ITEM_HPMP,         { "HP AND MP STAY FULL. IN AND OUT OF", "BATTLE. A KNOCKED OUT MEMBER STAYS KO" } },
+        { ITEM_EXP,          { "MULTIPLIES THE EXP OF EACH ENEMY", "LEVEL UPS WORK AS USUAL" } },
+        { ITEM_GIL,          { "MULTIPLIES THE GIL OF EACH ENEMY", "" } },
+        { ITEM_LEVEL,        { "LEVEL OF THE MATERIA ADDED BELOW", "MAX ENEMY SKILL: EVERY SKILL LEARNED" } },
+        { ITEM_SUMMON_PICK,  { "X ADDS THIS SUMMON TO THE INVENTORY", "IN A FIELD OR ON THE WORLD MAP" } },
+        { ITEM_COLOR,        { "COLOR OF THE MATERIA LISTED BELOW", "" } },
+        { ITEM_MATERIA_PICK, { "X ADDS THIS MATERIA TO THE INVENTORY", "IN A FIELD OR ON THE WORLD MAP" } },
+        { ITEM_FIELD_SPEED,  { "WALKING AND RUNNING ARE FASTER IN", "FIELDS. NOTHING ELSE SPEEDS UP" } },
+        { ITEM_WORLD_SPEED,  { "FASTER ON FOOT ON THE WORLD MAP", "VEHICLES ARE UNCHANGED" } },
+        { ITEM_AUTO_SKIP,    { "PRESSES OK FOR YOU IN FIELD DIALOGS", "QUESTIONS ARE LEFT TO YOU" } },
+        { ITEM_LANGUAGE,     { "LANGUAGE OF THE GAME TEXT. APPLIES", "AT THE NEXT START (* = NOT YET IN USE)" } },
+    };
+    if (item < NUM_GAMES) return games_help[line];
+    for (unsigned i = 0; i < sizeof(help) / sizeof(help[0]); i++)
+        if (help[i].item == item) return help[i].text[line];
+    return "";
+}
 #define MAX_TAB_ITEMS ((int) sizeof(tab_debug))
 
 // Materia ids and names (kernel.bin types, kernel2.bin names of the game's data), by color
@@ -1210,6 +1243,8 @@ static const glyph font[] = {
     { '>', { 0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08 } }, { '+', { 0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00 } },
     { '%', { 0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03 } },
     { '<', { 0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02 } },
+    { '*', { 0x00, 0x04, 0x15, 0x0e, 0x15, 0x04, 0x00 } }, { '=', { 0x00, 0x00, 0x1f, 0x00, 0x1f, 0x00, 0x00 } },
+    { ',', { 0x00, 0x00, 0x00, 0x00, 0x0c, 0x04, 0x08 } }, { '!', { 0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04 } },
 };
 
 #define SCALE   3
@@ -1330,8 +1365,8 @@ void port_menu_draw(void) {
     char line[64];
     if (open) {
         const tab * t = &tabs[cur_tab];
-        const float x0 = 120, y0 = 16, x1 = 840; // 17 items + the tabs: the box ends at 530 of 544 lines
-        const float y1 = y0 + 30 + (MAX_TAB_ITEMS + 5) * LINE_H;
+        const float x0 = 120, y0 = 16, x1 = 840; // 16 items, tabs, help: the box ends at 530 of 544 lines
+        const float y1 = y0 + 30 + (MAX_TAB_ITEMS + 6) * LINE_H;
         rect(x0, y0, x1, y1, RGBA(8, 12, 32, 225));
         rect(x0, y0, x1, y0 + 3, RGBA(120, 150, 230, 255));
         float y = y0 + 15;
@@ -1410,16 +1445,13 @@ void port_menu_draw(void) {
             text(x0 + 30, y, label, color);
         }
         y += 6;
-        if (cur_tab == 0) {
-            text(x0 + 20, y, "X: OK  O: EXIT  LEFT/RIGHT: CHANGE", RGBA(170, 190, 230, 255));
-            text(x0 + 20, y + LINE_H, "X ON SUMMON/MATERIA: ADD IT", RGBA(170, 190, 230, 255));
-        } else if (cur_tab == 1) {
-            text(x0 + 20, y, "X: OK  O: EXIT  LEFT/RIGHT: CHANGE", RGBA(170, 190, 230, 255));
-        } else {
-            text(x0 + 20, y, "X: OK  O: EXIT  < >: SCENE/VEHICLE", RGBA(170, 190, 230, 255));
-            if (game_mode != MODE_FIELD)
-                text(x0 + 20, y + LINE_H, "MINIGAMES: ONLY FROM A FIELD", RGBA(230, 190, 120, 255));
-        }
+        // The selected item, explained; then the buttons
+        int item = t->items[cursor];
+        text(x0 + 20, y, help_text(item, 0), RGBA(230, 210, 150, 255));
+        text(x0 + 20, y + LINE_H, help_text(item, 1), RGBA(230, 210, 150, 255));
+        text(x0 + 20, y + 2 * LINE_H,
+             cur_tab == 2 ? "X: OK  O: EXIT  < >: SCENE/VEHICLE" : "X: OK  O: EXIT  LEFT/RIGHT: CHANGE",
+             RGBA(170, 190, 230, 255));
     }
     if (show_message) {
         int w = (int) strlen(message) * ADVANCE + 40;

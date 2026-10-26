@@ -1583,3 +1583,10 @@ página ou fecha a janela, ~10 toques por segundo.
 "BACK TO THE TITLE (LOAD A SAVE)" saiu da aba DEBUG e foi para a GAMEPLAY
 (antes de CLOSE). Funciona igual: só a partir de um campo, com um segundo
 aperto para confirmar.
+
+## v0.09.00: ajuda na tela e release
+
+O rodapé do menu do port agora explica, em duas linhas, o item selecionado
+(em todas as abas; os itens de DEBUG dizem para que servem e quando deixar
+ligado). A fonte ganhou `*`, `=`, `,` e `!`. Notas da release em
+[RELEASE-v0.09.00.md](RELEASE-v0.09.00.md) e [VITADB-v0.09.00.md](VITADB-v0.09.00.md).
