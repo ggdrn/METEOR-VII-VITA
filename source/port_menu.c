@@ -85,13 +85,11 @@
  *     Enemy Skill, every skill learned). Ids and colors from the game's
  *     kernel.bin (materia type, low nibble: 0/1/4 independent, 2/3/6/7/8
  *     command, 5 support, 9/A magic, B/C summon) and kernel2.bin (names).
- *   - Field speed x2..x4: the player entity's movement speed (field entity
- *     +0x76, as FFNx's field_event_data) times the factor. Scripts set it
- *     (MSPED) when a field loads: a value other than the one written is the
- *     new base. Walking and running both get faster.
- *   - World map speed x2..x4: the world map's movement multiplier [0xDFC480]
- *     (2, set when the world map starts, 0x74E1E9), which every vehicle's
- *     speed is multiplied by (30 on foot, 45 buggy, 120 Highwind).
+ *   - Field speed x2..x4: the player's base speed [0xCC0D98] times the
+ *     factor (scale_field_speed); the entity's own speed (+0x76) is rewritten
+ *     from it every frame. Walking and running both get faster; nothing else.
+ *   - World map speed x2..x4: the speed on foot, an immediate 30 in the
+ *     recompiled code (scale_world_speed); vehicles are left as they are.
  *
  * Drawing: one fixed-function vitaGL draw of colored rectangles (a 5x7
  * font drawn as runs of pixels), on the main thread with GL locked, right
@@ -117,6 +115,8 @@
 #include <string.h>
 
 #include <psp2/ctrl.h>
+#include <kubridge.h>
+#include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <so_util/so_util.h>
 #include <vitaGL.h>
@@ -143,7 +143,7 @@ extern so_module so_mod;
 #define ACTOR_SIZE 0x68
 #define VA_CHARS 0xdbfd8cu     // savemap 0x54: 9 character records of 0x84 bytes
 #define CHAR_SIZE 0x84
-#define VA_WM_SPEED 0xdfc480u  // int32: world map movement multiplier (2)
+#define VA_FIELD_SPEED 0xcc0d98u // int16: the player's base speed in a field
 #define MODE_BATTLE 2
 #define MODE_WORLD 3
 #define SCENES_PATH DATA_PATH "cenas.txt"
@@ -522,56 +522,74 @@ static void scale_rewards(int mode) {
 }
 
 /*
- * Field: the player entity's movement speed (+0x76) = base * factor. A value
- * other than the one written is a new base (MSPED, a new field); kept across
- * battles and menus, where the field stays loaded. Factor 1 puts the base back.
+ * Field: the player's base speed [0xCC0D98] = base * factor. Every frame the
+ * field's model update (0x6342C6, called from 0x63C17F) writes the player
+ * entity's movement speed (+0x76) from it: x3 walking, x8 running, x2 / x12
+ * in the other cases, depending on the key state and the byte [0xCC0DC2].
+ * A value other than the one written is a new base (a new field); factor 1
+ * puts the base back.
  */
 static void scale_field_speed(int mode) {
-    static uint32_t entity;
-    static uint16_t base, written;
-    static int valid;
+    static int16_t base, written;
+    static int valid, logged;
     if (mode != MODE_FIELD) return;
-    uint8_t * c = control_block(), * ents = x86(VA_ENTITIES);
-    if (!c || !ents) return;
-    uint32_t e = (uint32_t) get32(ents) + 0x88u * get16(c + 0x2a) + 0x76;
-    uint8_t * p = x86_span(e, 2);
+    uint8_t * p = x86_span(VA_FIELD_SPEED, 2);
     if (!p) return;
-    if (e != entity) {
-        entity = e;
-        valid = 0;
+    int16_t v = (int16_t) get16(p);
+    if (!valid || v != written) {
+        if (v <= 0) return; // not set up yet
+        if (logged < 20 && (!valid || v != base || speed_field != 1)) { // a new field, or the game rewrote it
+            logged++;
+            l_info("port menu: field player base speed %d (was %d, written %d, factor %d)", v, valid ? base : -1,
+                   valid ? written : -1, speed_field);
+        }
+        base = v;
     }
-    uint16_t v = get16(p);
-    if (!valid || v != written) base = v;
-    uint32_t w = (uint32_t) base * (uint32_t) speed_field;
+    int32_t w = (int32_t) base * speed_field;
     if (w > 0x7fff) w = 0x7fff;
     if (w != v) put16(p, (uint16_t) w);
-    written = (uint16_t) w;
+    written = (int16_t) w;
     valid = 1;
 }
 
-// World map: the movement multiplier [0xDFC480] = base (2) * factor, as above
-static void scale_world_speed(int mode) {
-    static int32_t base, written;
-    static int valid;
-    if (mode != MODE_WORLD) return;
-    uint8_t * p = x86_span(VA_WM_SPEED, 4);
-    if (!p) return;
-    int32_t v = get32(p);
-    if (!valid || v != written) {
-        if (v < 1 || v > 4) return; // not the game's value: leave it
-        base = v;
+/*
+ * World map: on foot, the player moves at 30 * [0xDFC480] a frame (0x74EA48:
+ * 60 chocobo, 45 buggy / submarine, 120 Highwind, 30 for every other model;
+ * stored in a byte, so 30 * 2 * 4 = 240 still fits). The 30 is an immediate
+ * of the recompiled code, "movs r2, #30" at func_0x0074ea48 + 0x276A: the
+ * port writes 30 * factor in its place. [0xDFC480] is left alone (it times
+ * the whole world map). Game thread, between frames: the function is not
+ * running.
+ */
+#define WM_WALK_SYM "_Z15func_0x0074ea48v"
+#define WM_WALK_OFF 0x276a
+#define WM_WALK_SPEED 30
+static void scale_world_speed(void) {
+    static uint8_t * imm;
+    static int applied = 1, broken;
+    if (broken || speed_world == applied) return;
+    if (!imm) {
+        uintptr_t fn = so_symbol(&so_mod, WM_WALK_SYM);
+        uint8_t * p = fn ? (uint8_t *) ((fn & ~1u) + WM_WALK_OFF) : NULL;
+        if (!p || p[0] != WM_WALK_SPEED || p[1] != 0x22) { // movs r2, #30
+            l_warn("port menu: world map walk speed not found (%s + 0x%X), left as is", WM_WALK_SYM, WM_WALK_OFF);
+            broken = 1;
+            return;
+        }
+        imm = p;
     }
-    int32_t w = base * speed_world;
-    if (w != v) put32(p, (uint32_t) w);
-    written = w;
-    valid = 1;
+    uint8_t v = (uint8_t) (WM_WALK_SPEED * speed_world);
+    sceClibMemcpy(imm, &v, 1);
+    kuKernelFlushCaches(imm, 2);
+    applied = speed_world;
+    l_info("port menu: world map walk speed %d (x%d)", v, applied);
 }
 
 static void apply_cheats(int mode) {
     if (cheat_hpmp) refill_hpmp(mode);
     scale_rewards(mode);
     scale_field_speed(mode);
-    scale_world_speed(mode);
+    scale_world_speed();
 
     int m = materia_request;
     if (m != -1) {
@@ -1228,7 +1246,7 @@ void port_menu_draw(void) {
             else if (i == ITEM_FIELD_SPEED)
                 snprintf(line, sizeof(line), "VELOCIDADE NOS CAMPOS < %s >", factor_name(speed_field));
             else if (i == ITEM_WORLD_SPEED)
-                snprintf(line, sizeof(line), "VELOCIDADE NO MAPA-MUNDI < %s >", factor_name(speed_world));
+                snprintf(line, sizeof(line), "VELOC. A PE NO MAPA-MUNDI < %s >", factor_name(speed_world));
             else if (i == ITEM_RECORD) {
                 if (recording >= 0) snprintf(line, sizeof(line), "GRAVANDO CENA %d: PARAR", recording + 1);
                 else snprintf(line, sizeof(line), "GRAVAR CENA (MARCADOR + PROFILER)");

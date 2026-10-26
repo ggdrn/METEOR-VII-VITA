@@ -1486,7 +1486,7 @@ quadros.
   suporte, 9/A magia, B/C invocação) e nomes (`kernel2.bin`) tirados dos dados
   do jogo. "Todas as invocações (master)" continua lá.
 
-**GAMEPLAY**
+**GAMEPLAY** (a v0.6.41 corrigiu as duas; ver abaixo)
 
 - **Velocidade nos campos 2x/3x/4x.** A velocidade de movimento da entidade do
   jogador (`+0x76`, como `field_event_data` do FFNx) vezes o fator. Os scripts
@@ -1497,3 +1497,27 @@ quadros.
   velocidade de cada veículo é multiplicada (30 a pé, 45 buggy, 120 Highwind).
   Ele também entra em outras contas do mapa-múndi, então outras coisas ali
   podem acelerar junto.
+
+## v0.6.41: velocidade do jogador nos campos e no mapa-múndi
+
+Na v0.6.40 as duas opções de velocidade não aumentavam o deslocamento do
+personagem:
+
+- **Campos.** A velocidade da entidade (`+0x76`) é **reescrita a cada
+  quadro** pela atualização de modelos do campo (`0x6342C6`, chamada por
+  `0x63C17F` logo depois do `_ex` dos porters em `0x63C75B`, que inverte o bit
+  de correr 0x40): `velocidade = base * 3` andando, `* 8` correndo (`* 2` ou
+  `* 12` nos outros casos, conforme o bit 0x40 e o byte `[0xCC0DC2]`), com a
+  base em `[0xCC0D98]` (int16). O valor que o port escrevia em `+0x76` era
+  trocado antes de ser usado. Agora o port multiplica a **base** `[0xCC0D98]`:
+  andar e correr ficam 2x/3x/4x mais rápidos, e mais nada muda. O array de
+  entidades é estático em `0xCC1670` (`[0xCC0B60]` aponta para ele), por isso
+  o código recompilado o acessa como `0xCC16E0 + 0x88 * id + 6` e as buscas
+  por `+0x76` não o achavam.
+- **Mapa-múndi.** `[0xDFC480]` (2) é o passo de tempo de tudo no mapa-múndi,
+  não só do jogador: multiplicá-lo acelerava o jogo inteiro. A velocidade a pé
+  é `30 * [0xDFC480]` em `0x74EA48` (60 chocobo, 45 buggy/submarino, 120
+  Highwind, 30 nos outros modelos; guardada num byte), e o 30 é um imediato do
+  código recompilado (`movs r2, #30` em `func_0x0074ea48 + 0x276A`). O port
+  troca esse imediato por 30 × fator (até 120; 240 por quadro cabe no byte).
+  Os veículos não mudam.
