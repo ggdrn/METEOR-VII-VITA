@@ -1,5 +1,5 @@
 /*
- * Port menu (Start + L + R): minigame shortcuts and profiler control
+ * Port menu (Start + L + R): cheats, gameplay options, minigame shortcuts and profiler control
  * (see port_menu.c).
  *
  * This software may be modified and distributed under the terms
@@ -10,6 +10,10 @@
 #define PORT_MENU_H
 
 #include <stdint.h>
+
+/** Before setLang: the dialog language chosen in the menu (0 en, 1 fr, 2 de,
+ *  3 es, 4 ja), or -1 for the Vita's system language. */
+int port_menu_language(void);
 
 /** Main thread, once after the .so is loaded. */
 void port_menu_init(void);

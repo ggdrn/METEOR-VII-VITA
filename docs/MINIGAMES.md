@@ -1457,3 +1457,136 @@ nos nomes de matéria do `kernel2.bin` do jogo.
 
 O menu passou de 17 para 18 itens (linhas de 23 para 22 px; a caixa termina
 na linha 530 de 544).
+
+## v0.6.40: menu do port em abas (cheats, gameplay, debug)
+
+Dentro do menu (L + R + Start), **L** e **R** trocam de aba. O que já existia
+foi para **DEBUG**. As escolhas de CHEATS e GAMEPLAY ficam salvas em
+`ux0:data/ffvii-vita/cheats.txt` e são aplicadas na thread do jogo, entre
+quadros.
+
+**CHEATS**
+
+- **HP e MP infinitos.** Na batalha, os atores do grupo (`0x9AB0DC`, 0x68
+  bytes cada; 0-2 grupo, 4-9 inimigos): HP `+0x2C` = máximo `+0x30`
+  (dwords), MP `+0x28` = máximo `+0x2A` (words), como a cura total do
+  próprio jogo (`0x5DB593`). Fora da batalha, os registros dos personagens no
+  save (`0xDBFD8C`, 0x84 bytes): HP `+0x2C` = `+0x38`, MP `+0x30` = `+0x3A`.
+  Personagem nocauteado (HP 0) continua nocauteado.
+- **EXP e gil 2x/3x/4x.** Quando um inimigo morre, `0x430DD0` soma o EXP
+  (`+0x5C`) e o gil (`+0x58`) do ator dele aos totais da batalha (`0x99E2C0`
+  EXP, `0x99E2C8` gil), que a tela de espólios (`0x6C6B30`) passa para o save.
+  O port multiplica uma vez os valores de cada inimigo assim que aparecem na
+  batalha; subida de nível e Gil Extra funcionam normalmente.
+- **Matérias.** Escolhe uma invocação, ou uma matéria por cor (verde,
+  amarela, roxa, azul, vermelha), e o nível (1 = AP 0, ou máximo = AP
+  0xFFFFFF; na Hab. Inimiga, todas as habilidades aprendidas). X põe uma no
+  primeiro espaço livre do inventário (`0xDC04B4`). IDs, cores (tipo no
+  `kernel.bin`, nibble baixo: 0/1/4 independente, 2/3/6/7/8 comando, 5
+  suporte, 9/A magia, B/C invocação) e nomes (`kernel2.bin`) tirados dos dados
+  do jogo. "Todas as invocações (master)" continua lá.
+
+**GAMEPLAY** (a v0.6.41 corrigiu as duas; ver abaixo)
+
+- **Velocidade nos campos 2x/3x/4x.** A velocidade de movimento da entidade do
+  jogador (`+0x76`, como `field_event_data` do FFNx) vezes o fator. Os scripts
+  (MSPED) definem a velocidade ao carregar um campo: um valor diferente do
+  escrito vira a nova base. Andar e correr ficam mais rápidos.
+- **Velocidade no mapa-múndi 2x/3x/4x.** O multiplicador de movimento do
+  mapa-múndi `[0xDFC480]` (o jogo põe 2 ao entrar, `0x74E1E9`), pelo qual a
+  velocidade de cada veículo é multiplicada (30 a pé, 45 buggy, 120 Highwind).
+  Ele também entra em outras contas do mapa-múndi, então outras coisas ali
+  podem acelerar junto.
+
+## v0.6.41: velocidade do jogador nos campos e no mapa-múndi
+
+Na v0.6.40 as duas opções de velocidade não aumentavam o deslocamento do
+personagem:
+
+- **Campos.** A velocidade da entidade (`+0x76`) é **reescrita a cada
+  quadro** pela atualização de modelos do campo (`0x6342C6`, chamada por
+  `0x63C17F` logo depois do `_ex` dos porters em `0x63C75B`, que inverte o bit
+  de correr 0x40): `velocidade = base * 3` andando, `* 8` correndo (`* 2` ou
+  `* 12` nos outros casos, conforme o bit 0x40 e o byte `[0xCC0DC2]`), com a
+  base em `[0xCC0D98]` (int16). O valor que o port escrevia em `+0x76` era
+  trocado antes de ser usado. Agora o port multiplica a **base** `[0xCC0D98]`:
+  andar e correr ficam 2x/3x/4x mais rápidos, e mais nada muda. O array de
+  entidades é estático em `0xCC1670` (`[0xCC0B60]` aponta para ele), por isso
+  o código recompilado o acessa como `0xCC16E0 + 0x88 * id + 6` e as buscas
+  por `+0x76` não o achavam.
+- **Mapa-múndi.** `[0xDFC480]` (2) é o passo de tempo de tudo no mapa-múndi,
+  não só do jogador: multiplicá-lo acelerava o jogo inteiro. A velocidade a pé
+  é `30 * [0xDFC480]` em `0x74EA48` (60 chocobo, 45 buggy/submarino, 120
+  Highwind, 30 nos outros modelos; guardada num byte), e o 30 é um imediato do
+  código recompilado (`movs r2, #30` em `func_0x0074ea48 + 0x276A`). O port
+  troca esse imediato por 30 × fator (até 120; 240 por quadro cabe no byte).
+  Os veículos não mudam.
+
+## v0.6.42: velocidade nos campos sem aumentar a colisão do jogador
+
+Na v0.6.41 a "caixa" do Cloud crescia junto com a velocidade e ele não
+passava por lugares estreitos. A base `[0xCC0D98]` não serve só para a
+velocidade:
+
+- `0x633C2F`, ao começar um campo, faz o raio de colisão do jogador
+  (`+0x72`) = base × 34 / 512 (e a velocidade `+0x76` = base × 2);
+- `0x644075` usa base / 4 somado à posição (a checagem à frente no walkmesh).
+
+Agora a base só fica multiplicada **enquanto `0x6342C6` roda**: um hook nessa
+função multiplica a base, chama a original e devolve a base. Dentro de
+`0x6342C6` a base só é lida nos quatro cálculos da velocidade, então a
+colisão e o resto continuam com o tamanho original. O hook é instalado na
+primeira vez que um fator diferente de 1 é escolhido e fica (com fator 1 a
+base não é mexida).
+
+## v0.6.43: pular diálogos automaticamente (aba GAMEPLAY)
+
+"PULAR DIALOGOS AUTOMATICO: SIM" faz o port apertar ✕ (o OK do jogo,
+[BOTOES-PS.md](BOTOES-PS.md)) sozinho enquanto uma janela de fala do campo
+está aberta: o primeiro toque mostra a página inteira, o seguinte vira a
+página ou fecha a janela, ~10 toques por segundo.
+
+- O laço das mensagens do campo, `0x630D50`, roda a cada quadro enquanto um
+  opcode MESSAGE (`0x618DBD`, `0x618F86`, `0x61900A`) mostra uma janela. Um
+  hook nele anota a janela (o byte em `[ESP + 4]`, lido pelo laço como
+  `[EBP + 8]`) e o momento. Enquanto uma janela foi vista nos últimos 150 ms,
+  o port soma ✕ aos botões: 3 leituras do pad apertado, 3 solto.
+- **Perguntas (ASK) não são puladas**: o ASK usa outro laço (`0x6310A1`), que
+  não tem hook; a escolha continua com o jogador.
+- Não aperta durante o fechamento da janela (estado 7 de `window_mode`,
+  `0xCFF5B8 + 0x30 * janela + 0x2C`), para nenhum toque chegar ao campo
+  depois (falar de novo com o NPC).
+- Uma janela cujo estado e ponteiro de texto (`0xCBF578 + 4 * janela`) não
+  mudam por 20 toques é deixada (janela que o jogador não fecha) até fechar.
+- Só nos campos. O hook é instalado na primeira vez que a opção é ligada.
+
+## v0.6.44: idioma dos diálogos e menu do port em inglês
+
+- O menu do port passou a ser todo em inglês (abas, itens, mensagens e os
+  nomes das matérias, com os nomes oficiais em inglês).
+- **GAMEPLAY > DIALOG LANGUAGE**: VITA SYSTEM (como antes: o idioma do
+  sistema do Vita), ENGLISH, FRENCH, GERMAN, SPANISH ou JAPANESE. O OBB traz
+  os dados de cinco idiomas (`data/lang-en`, `-fr`, `-de`, `-es`, `-ja`, e os
+  campos em `flevel`, `fflevel`, `gflevel`, `sflevel`, `jfleve.lgp`). O jogo
+  escolhe o idioma uma vez, em `setLang` (0 en, 1 fr, 2 de, 3 es, 4 ja,
+  chamado no início como o `MainActivity.onCreate` do Android), e carrega os
+  textos a partir dele, então a troca vale **na próxima vez que o jogo
+  abrir**; o menu marca com `*` um idioma escolhido que ainda não está em
+  uso. A escolha fica em `cheats.txt` (`language`, -1 = sistema), lido por
+  `port_menu_language()` antes do `setLang`.
+- Na cópia do OBB usada no desenvolvimento, `lang-en` contém textos em
+  português (por exemplo os nomes das matérias no `kernel2.bin`): ENGLISH usa
+  o que estiver nessa pasta.
+
+## v0.6.45: BACK TO THE TITLE na aba GAMEPLAY
+
+"BACK TO THE TITLE (LOAD A SAVE)" saiu da aba DEBUG e foi para a GAMEPLAY
+(antes de CLOSE). Funciona igual: só a partir de um campo, com um segundo
+aperto para confirmar.
+
+## v0.09.00: ajuda na tela e release
+
+O rodapé do menu do port agora explica, em duas linhas, o item selecionado
+(em todas as abas; os itens de DEBUG dizem para que servem e quando deixar
+ligado). A fonte ganhou `*`, `=`, `,` e `!`. Notas da release em
+[RELEASE-v0.09.00.md](RELEASE-v0.09.00.md) e [VITADB-v0.09.00.md](VITADB-v0.09.00.md).
