@@ -201,9 +201,10 @@ enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NAT
 // Tabs (L / R): the items of each, in order
 static const uint8_t tab_cheats[] = { ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR,
                                       ITEM_MATERIA_PICK, ITEM_SUMMONS, ITEM_CLOSE };
-static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_CLOSE };
+static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_TITLE,
+                                        ITEM_CLOSE };
 static const uint8_t tab_debug[] = { 0, 1, 2, 3, 4, 5, 6, ITEM_RECORD, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP,
-                                     ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_TITLE, ITEM_CLOSE };
+                                     ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_CLOSE };
 typedef struct {
     const char * name;
     const uint8_t * items;

@@ -1577,3 +1577,9 @@ página ou fecha a janela, ~10 toques por segundo.
 - Na cópia do OBB usada no desenvolvimento, `lang-en` contém textos em
   português (por exemplo os nomes das matérias no `kernel2.bin`): ENGLISH usa
   o que estiver nessa pasta.
+
+## v0.6.45: BACK TO THE TITLE na aba GAMEPLAY
+
+"BACK TO THE TITLE (LOAD A SAVE)" saiu da aba DEBUG e foi para a GAMEPLAY
+(antes de CLOSE). Funciona igual: só a partir de um campo, com um segundo
+aperto para confirmar.
