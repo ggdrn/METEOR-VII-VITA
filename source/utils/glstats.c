@@ -14,6 +14,7 @@
 #include "reimpl/gl_variants.h"
 #include "reimpl/gl_queue.h"
 #include "ff7_music.h"
+#include "ff7_wide.h"
 
 #include <unistd.h>
 #include <psp2/kernel/processmgr.h>
@@ -80,7 +81,7 @@ void glTexImage2D_stat(GLenum target, GLint level, GLint internalformat, GLsizei
 
 void glReadPixels_stat(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void * pixels) {
     SceUInt64 t0 = now_us();
-    glReadPixels_cached(x, y, width, height, format, type, pixels);
+    glReadPixels_cached(x + ff7_wide_read_offset(), y, width, height, format, type, pixels); // 16:9: central 640
     st.readpixels_us += now_us() - t0;
     if (!st.readpixels++) l_info("glReadPixels(%i, %i, %i, %i)", x, y, width, height);
 }

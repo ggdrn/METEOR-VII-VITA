@@ -48,6 +48,13 @@
  *
  * Creating DATA_PATH "field_zoom_off.txt" turns the zoom off.
  *
+ * 16:9 (ff7_wide.c): the game draws 848 pixels across (x -104 .. 744) into
+ * the same framebuffer. The texture coordinates of the frame quad then pick
+ * the part shown: the central 640 pixels, or in a field, battle or the world
+ * map as many as fill the screen at that zoom (791, 833 and 847), fewer in a
+ * field whose background is narrower (ff7_wide_field_width). The world map
+ * keeps its 480 lines. The stretch switch applies only to 4:3 pictures.
+ *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
  */
@@ -55,6 +62,7 @@
 #include "ff7_screen.h"
 #include "ff7_unhook.h"
 #include "ff7_bg.h"
+#include "ff7_wide.h"
 #include "reimpl/movie.h"
 
 #include "utils/logger.h"
@@ -95,14 +103,18 @@ extern so_module so_mod;
 #define MAX_VIEWPORTS    32
 #define GAME_MODE_VA     0xcbf9dc   // uint16_t: 1 field, 2 battle, 3 world map...
 #define MODE_BATTLE      2
+#define MODE_WORLD       3
 
 static so_hook quad_tex_hook, border_hook, viewport_hook;
 static uint8_t ** cur_vertex;
 static uintptr_t base;
-static int zoom_enabled, zoomed, stretch;
+static int zoom_enabled, zoomed, stretch, quad_installed;
+
+int ff7_screen_quad_installed(void) { return quad_installed; }
+int ff7_screen_zoom_enabled(void) { return zoom_enabled; }
 // Lines the picture fills, per mode: set by the game thread, read by the main thread
 static volatile uint32_t field_lines = FIELD_LINES;
-static uint32_t logged_lines;
+static uint32_t logged_lines, logged_shown;
 static volatile uint16_t * game_mode;
 static int logged_mode = -1;
 
@@ -147,38 +159,56 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
         logged_mode = mode;
         l_info("game mode: %d", mode);
     }
+    int wide = ff7_wide_rendering();
     int field = zoom_enabled && in_field();
     int movie = zoom_enabled && !field && movie_is_playing() && movie_video_height() == FIELD_LINES;
     int battle = zoom_enabled && !field && !movie && mode == MODE_BATTLE;
-    int on = field ? 1 : movie ? 2 : battle ? 3 : 0;
+    int world = wide && !field && !movie && !battle && mode == MODE_WORLD;
+    int on = field ? 1 : movie ? 2 : battle ? 3 : world ? 4 : 0;
     if (on != zoomed) {
         zoomed = on;
-        l_info("field zoom: %s", on == 1 ? "on (field)" : on == 2 ? "on (movie)" : on == 3 ? "on (battle)" : "off");
+        l_info("field zoom: %s", on == 1 ? "on (field)" : on == 2 ? "on (movie)" : on == 3 ? "on (battle)"
+                                 : on == 4 ? "on (world map, 16:9)" : "off");
     }
-    if (!on) {
+    if (!on && !wide) {
         zoom_left = zoom_right = 0;
         return r;
     }
 
     // The quad VIDEO_doQuad just wrote: x0..x1 by 0..screen height (y down)
-    uint32_t lines = field ? field_lines : movie ? FIELD_LINES : BATTLE_LINES;
-    if (lines != logged_lines) {
-        logged_lines = lines;
-        l_info("field zoom: %u of 480 lines fill the screen%s", lines, stretch ? ", stretched to the full width" : "");
-    }
+    uint32_t lines = field ? field_lines : movie ? FIELD_LINES : battle ? BATTLE_LINES : (uint32_t) FRAME_LINES;
     uint8_t * end = *cur_vertex;
     float x0 = vertex(end, 0)[0], x1 = vertex(end, 1)[0];
     const float k = FRAME_LINES / (float) lines;
     zoom_center = (x0 + x1) * 0.5f;
+    // Game pixels shown across: 640, or more in 16:9 (as many as fill the screen at this zoom)
+    float shown = 640.0f;
+    if (wide && (field || battle || world) && x1 > x0) {
+        float fit = 640.0f * zoom_center / ((zoom_center - x0) * k);
+        shown = field ? ff7_wide_field_width() : fit;
+        if (shown > fit) shown = fit;
+        if (shown > 640.0f + 2 * WIDE_EXTRA) shown = 640.0f + 2 * WIDE_EXTRA;
+        if (shown < 640.0f) shown = 640.0f;
+    }
+    if ((uint32_t) shown != logged_shown || lines != logged_lines) {
+        logged_shown = (uint32_t) shown;
+        logged_lines = lines;
+        l_info("field zoom: %u of 480 lines, %u game pixels across fill the screen%s", lines, logged_shown,
+               stretch && shown == 640.0f && on ? ", stretched to the full width" : "");
+    }
     // The quad is centered on the screen: the screen is 2 * center wide
-    float kx = k;
-    if (stretch && x1 > x0) kx = zoom_center / (zoom_center - x0); // edges at 0 and the screen width
+    float kx = k * shown / 640.0f;
+    if (stretch && on && shown == 640.0f && x1 > x0) kx = zoom_center / (zoom_center - x0); // edges at 0 and the screen width
     zoom_left = zoom_center - (zoom_center - x0) * kx;
     zoom_right = zoom_center + (x1 - zoom_center) * kx;
+    // 16:9: the framebuffer holds x -104 .. 744; texture coordinates of the part shown
+    float u0 = vertex(end, 0)[4], du = (vertex(end, 1)[4] - u0) / 640.0f;
+    float ul = u0 + du * (WIDE_EXTRA + 320.0f - shown * 0.5f), ur = u0 + du * (WIDE_EXTRA + 320.0f + shown * 0.5f);
     for (int i = 0; i < QUAD_VERTICES; i++) {
         float * v = vertex(end, i);
+        if (wide) v[4] = v[0] < zoom_center ? ul : ur; // u, before x moves
         v[0] = zoom_center + (v[0] - zoom_center) * kx;
-        v[1] *= k; // top stays at 0, the empty lines go below the screen
+        if (on) v[1] *= k; // top stays at 0, the empty lines go below the screen
     }
     return r;
 }
@@ -229,10 +259,6 @@ void ff7_screen_patch(void) {
     else
         l_warn("ff7_screen: gfx_setviewport not found, drawing areas aren't logged");
 
-    if (file_exists(OFF_SWITCH)) {
-        l_info("ff7_screen: %s found, field zoom off", OFF_SWITCH);
-        return;
-    }
     if (!quad_tex || !border || *(uint32_t *) (quad_tex & ~1) != QUAD_TEX_PROLOGUE
         || *(uint32_t *) (border & ~1) != BORDER_PROLOGUE
         || *(uintptr_t *) (base + CUR_VERTEX_GOT) != base + CUR_VERTEX) {
@@ -243,6 +269,12 @@ void ff7_screen_patch(void) {
     memmap = (const uint32_t *) so_symbol(&so_mod, "MEMMAP");
     quad_tex_hook = hook_addr(quad_tex, (uintptr_t) &quad_tex_hooked);
     border_hook = hook_addr(border, (uintptr_t) &border_hooked);
+    quad_installed = 1;
+    // Installed even with the zoom off: a 16:9 frame (ff7_wide.c) always needs its part chosen
+    if (file_exists(OFF_SWITCH)) {
+        l_info("ff7_screen: %s found, field zoom off", OFF_SWITCH);
+        return;
+    }
     zoom_enabled = 1;
     stretch = file_exists(STRETCH_SWITCH);
     l_info("ff7_screen: field zoom installed (%u of 480 lines fill the screen%s)", FIELD_LINES,

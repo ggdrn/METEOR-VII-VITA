@@ -13,7 +13,7 @@
  *   0x64085C (x, y)  cdecl: for the u16 [0xCFFDFC] tiles of the layer (u16
  *            indices 4 bytes apart at [0xCFF3FC], tiles of 0x105C bytes at
  *            [0xCFFE00]) whose int16 position lies inside the window left
- *            of / above (x, y), whose flag byte +0x34 allows them, and that
+ *            of / above (x, y) (16:9: wider by `wide` on each side), whose flag byte +0x34 allows them, and that
  *            are not the hidden layer ([0xCFF1D8] and u16 +0x30 ==
  *            u16 [0xD00088] + 1): marks +0x1040 = 1 and appends it with its
  *            screen position (position * [0xCFF1F0] plus the int16 offsets of
@@ -40,6 +40,7 @@ typedef struct fieldbg_env {
     uint8_t * const * memmap; // mk_address's page table, or NULL: call it
     uint32_t * ev_count;      // _check_event's call counter, or NULL: call it
     uint32_t counters[3];     // layers, tiles looked at, tiles appended
+    int32_t wide;             // 16:9: background units the window grows by on each side (0: as the x86 code)
 } fieldbg_env;
 
 enum { FB_EAX = 0, FB_ECX = 1, FB_EDX = 2, FB_ESP = 4 };
@@ -162,8 +163,8 @@ static inline int fieldbg_layer_run(fieldbg_env * e) {
         e->counters[1]++;
         if (ty <= y - 0x100) ecx = (uint32_t) (y - 0x100);
         else if (ty >= y) ecx = (uint32_t) ty;
-        else if (tx <= x - 0x150) ecx = tiles;
-        else if (tx >= x) ecx = (uint32_t) x;
+        else if (tx <= x - 0x150 - e->wide) ecx = tiles;
+        else if (tx >= x + e->wide) ecx = (uint32_t) x;
         else {
             uint32_t f34 = *fb_addr(e, t + 0x34);
             if (f34 && !(*fb_addr(e, t + 0x35) & *fb_addr(e, FB_ALLOWED + f34))) {

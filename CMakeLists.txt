@@ -194,6 +194,7 @@ set(SOURCES
     source/ff7_world.c
     source/ff7_music.c
     source/ff7_screen.c
+    source/ff7_wide.c
     ${CMAKE_BINARY_DIR}/ff7_memmap_sites.c
     source/ff7_stack.c
     ${CMAKE_BINARY_DIR}/ff7_stack_sites.c

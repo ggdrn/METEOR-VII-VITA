@@ -33,6 +33,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_bg.h"
+#include "ff7_wide.h"
 #include "ff7_anim.h"
 #include "ff7_selftest.h"
 
@@ -355,6 +356,7 @@ volatile uint64_t ff7_bg_last_us;
 
 static void bg_native(void) {
     ff7_bg_last_us = sceKernelGetProcessTimeWide();
+    ff7_wide_field_frame(); // 16:9: the field camera's half width follows the field
     if (disabled) {
         SO_CONTINUE(int, bg_hook);
         return;

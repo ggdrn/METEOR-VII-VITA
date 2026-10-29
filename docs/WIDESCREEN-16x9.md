@@ -1,7 +1,8 @@
 # Widescreen 16:9 nativo (sem esticar): estudo de viabilidade
 
 Estudo de 29/10/2026, feito sobre a v0.09.00 e a leitura da `libjni_ff7.so`
-(v1.0.29). Nada foi implementado ainda.
+(v1.0.29). As fases 0 a 3 foram implementadas em seguida (seção 8), ainda
+sem teste no Vita.
 
 **Conclusão:** é viável, mas não da mesma forma em todos os modos.
 A parte gráfica tem um ponto único de controle (o `glOrtho` que o jogo chama
@@ -205,3 +206,106 @@ O primeiro passo concreto é a **fase 0**: um build que não muda nada na
 imagem e responde, com números, as duas perguntas que decidem o resto (o
 jogo envia o que fica fora da tela? quantos cenários têm fundo largo o
 suficiente?).
+
+---
+
+## 8. Implementação (fases 0 a 3)
+
+Código em `source/ff7_wide.c`, com ganchos em `ff7_screen.c`,
+`ff7_fieldbg_core.h`, `ff7_bg.c`, `ff7_world.c`, `reimpl/gl_queue.c` e
+`utils/glstats.c`. **Ainda não testado no Vita.**
+
+### Como ligar
+
+Menu do port (L + R + Start) → aba **GAMEPLAY** → `SCREEN < 4:3 / 16:9 >`.
+Vale na hora (o jogo aplica na próxima área de desenho) e fica salvo em
+`cheats.txt` (`widescreen 1`). Desligado por padrão.
+
+### O que a leitura da `.so` mostrou (e mudou o plano)
+
+- O framebuffer fora da tela **já tem 1024×512** (`VIDEO_init`: largura =
+  escala << 10, altura = escala << 9); o jogo só usava 640×480 dele. Não foi
+  preciso recriá-lo: o desenho largo ocupa 848×480 dele.
+- `VIDEO_setOrthoMatrix` monta a matriz **e** o `glViewport` a partir do
+  mesmo retângulo. O gancho troca (0, 640) por (−104, 744) e refaz o viewport a
+  partir de x 0, com 848 pixels.
+- A cena 3D chega em pixels de tela (`C_006A8002` divide por w e manda x, y
+  em pixels). Por isso, diferente do FFNx, **não é preciso mexer na matriz
+  de projeção**: alargar o ortho já mostra mais cena sem distorcer.
+- O jogo não usa `glScissor`. O vídeo (`AVI_draw`) e a restauração do ortho
+  no `VIDEO_update` passam pelo mesmo gancho.
+- O FFNx (driver do FF7 de PC) tem widescreen para o mesmo `ff7.exe` 1.02, e
+  os endereços batem com os da `.so` (`0x6438F6`, `0x639252`, `0x75F263`…).
+  Ele serviu de **mapa** do que o jogo recorta. Nenhum código foi copiado (o
+  FFNx é GPL-3): cada ponto foi achado e conferido no ARM recompilado.
+
+### Fase 0: quadro largo e medição
+
+| Peça | Como |
+|---|---|
+| Quadro de 848×480 | gancho em `VIDEO_setOrthoMatrix` (`ff7_wide.c`) |
+| Parte mostrada | `ff7_screen.c` escolhe as coordenadas de textura do quad final: 640 centrais em menus, vídeos, transições e minigames; mais em campo, batalha e mapa-múndi |
+| `glReadPixels` (swirl da batalha) | lê os 640 centrais (`+104` em x) |
+| Medição | a cada 5 s: `widescreen: mode N, field W px; Q full-width quads widened/s; P% of sampled vertices beyond 0..640 px` |
+
+Com 16:9 ligado em menus e vídeos, a imagem tem que ficar **idêntica** à de
+4:3. Se não ficar, o problema está no quadro largo, não nos módulos.
+
+### Fase 1: batalha
+
+- Mostra 833 pixels de jogo (472 linhas, o mesmo zoom de antes).
+- Fades e flashes de tela cheia: a fila GL (`gq_glDrawArrays`) alarga, na
+  cópia dos vértices, todo quad de 4 ou 6 vértices com x exatamente 0 e 640,
+  uma cor só e sem textura (um texel só). Pega também o fade do campo e do
+  mapa-múndi, sem um gancho por função.
+- Nada mais foi alterado na batalha: o que aparecer nas laterais é o que o
+  jogo já desenha. A linha `P% of sampled vertices beyond` diz quanto é.
+
+### Fase 2: mapa-múndi
+
+- Mostra 847 pixels (480 linhas).
+- A projeção nativa de `0x75F263` (`ff7_world.c`) usa uma área de recorte
+  104 pixels mais larga de cada lado (as globais `0xE2C424`/`0xDE68F8` não
+  mudam: elas também dão o centro da tela). O autoteste continua comparando
+  com a área original.
+- Se a projeção nativa estiver desligada (`world_off.txt` ou páginas não
+  contíguas), o recorte volta a 640 e as laterais ficam vazias.
+
+### Fase 3: campo adaptativo
+
+- A cada quadro de campo (`bg_native`, thread do jogo), a meia largura da
+  câmera vira `min(198, (direita − esquerda) / 2)` do intervalo de câmera do
+  cenário (`[0xCFF454]` +0x0C/+0x10). Abaixo de 160 o campo fica em 4:3. As
+  24 constantes 160 de `0x6438F6` e `0x643628` são reescritas quando o valor
+  muda (log `widescreen: field camera half width N`).
+- A janela de tiles do fundo (`0x64085C`, nativo) cresce o mesmo tanto.
+- O recorte de modelos 3D (`0x639252`: −40 / +400) cresce 44 dos dois lados.
+- A parte mostrada é `4 × meia largura` pixels (até 791). Um cenário estreito
+  mostra menos e fica com bordas pretas menores.
+- Só funciona com o fundo nativo e o zoom de campo ligados
+  (`fieldbg_off.txt`, `natives_off.txt` ou `field_zoom_off.txt` deixam os
+  campos em 4:3).
+
+### Ainda não tratado (pela lista do FFNx)
+
+- Campo: camadas de parallax 3/4 (`0x641…`, cenários com fundo que rola em
+  velocidade própria), cursor da mão, rolagens de script que passam do
+  limite da câmera, posição máxima das janelas de diálogo.
+- Mapa-múndi: céu e nuvens (`0x754100`, `0x7547A6`) e o recorte de malhas em
+  `0x751EFC` (terreno pode faltar nas laterais).
+- Batalha: efeitos de tela cheia **com textura** de algumas invocações
+  (Bahamut ZERO, Ifrit, Neo Bahamut, Typhon…) e o swirl de entrada, que
+  continua com 640 pixels.
+- Minigames: ficam em 4:3 de propósito.
+
+### O que observar no teste
+
+1. Menus, vídeos e tela-título com 16:9 ligado: idênticos aos de 4:3.
+2. Campo largo (ex.: ruas do Setor 7): laterais com fundo, personagens
+   entrando pela borda sem "aparecer do nada", câmera parando na borda da
+   arte. Log: `field camera half width`.
+3. Campo estreito: bordas pretas, nada de fundo faltando.
+4. Batalha: cenário nas laterais, fades cobrindo a tela toda, janelas no
+   centro. Log: `% of sampled vertices beyond`.
+5. Mapa-múndi: terreno até a borda; céu e nuvens provavelmente cortados.
+6. Trocar 4:3 ↔ 16:9 no meio do jogo.

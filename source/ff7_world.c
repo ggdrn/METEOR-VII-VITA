@@ -49,6 +49,7 @@
 #pragma GCC optimize ("no-fast-math", "fp-contract=off")
 
 #include "ff7_world.h"
+#include "ff7_wide.h"
 #include "ff7_world_core.h"
 #include "ff7_world_tri.h"
 #include "ff7_anim.h"
@@ -176,12 +177,15 @@ static uint8_t * pages(void) {
 }
 
 // Everything 0x75F263 does to x86 memory, on a copy of the two pages if
-// `mem` is not the real one. Returns 1 if a w was 0.
-static int project(uint8_t * mem) {
+// `mem` is not the real one, with the clip area `wide` game pixels wider on
+// each side (16:9; 0 as the x86 code). Returns 1 if a w was 0.
+static int project(uint8_t * mem, int32_t wide) {
 #define AT(type, va) ((type) (mem + ((va) - VA_PAGES)))
     int32_t left = (int32_t) rd32(VA_LEFT), top = (int32_t) rd32(VA_TOP);
     int32_t right = (int32_t) (rd32(VA_WIDTH) + (uint32_t) left);
     int32_t bottom = (int32_t) (rd32(VA_HEIGHT) + (uint32_t) top);
+    left -= wide;
+    right += wide;
     float k;
     memcpy(&k, xaddr(VA_K), 4);
     return world_core_project(AT(const float *, VA_MATRIX), AT(const float (*)[3], VA_IN),
@@ -203,7 +207,7 @@ static void project_native(void) {
     if (selftest_left > 0) {
         selftest_left--;
         memcpy(snapshot, mem, sizeof(snapshot));
-        int zd = project(snapshot);
+        int zd = project(snapshot, 0); // the original is narrow
         uint8_t ze = fpu[FPU_ZE], top = fpu[FPU_TOP];
         uint32_t esp = regs[ESP];
         SO_CONTINUE(int, project_hook);
@@ -221,7 +225,7 @@ static void project_native(void) {
         return;
     }
 
-    if (project(mem)) fpu[FPU_ZE] = 1;
+    if (project(mem, ff7_wide_world_extra())) fpu[FPU_ZE] = 1; // 16:9: beyond the 640 pixels too
     regs[EAX] = 123; // the x86 loop's last index, count and next index
     regs[ECX] = 0;
     regs[EDX] = 126;
