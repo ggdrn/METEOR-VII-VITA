@@ -14,8 +14,6 @@ explains the selected item. Choices are saved in `cheats.txt`.
   (x2/x3/x4, nothing else speeds up); automatic dialog skip (questions are left to
   you); dialog language (English, French, German, Spanish, Japanese, applied at the
   next start); back to the title to load another save.
-- **Debug:** shortcuts to every 3D minigame and to the world map on the buggy,
-  submarine or Highwind; scene markers; profiler and A/B switches for reports.
 
 ## Performance
 

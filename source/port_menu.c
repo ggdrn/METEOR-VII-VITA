@@ -65,8 +65,9 @@
  * (port_menu_apply_ab: from the frame limiter's sleep, and from the
  * minigames' frame entry in ff7_framecap.c, since they never sleep).
  *
- * Tabs (v0.6.40): L and R switch between CHEATS, GAMEPLAY and DEBUG (all of
- * the above). The cheat and gameplay choices are saved in DATA_PATH
+ * Tabs (v0.6.40): L and R switch between CHEATS and GAMEPLAY. DEBUG (all of
+ * the above) is available only with DATA_PATH "debug_menu.txt" at startup.
+ * The cheat and gameplay choices are saved in DATA_PATH
  * "cheats.txt" and applied by the game thread between frames
  * (apply_cheats):
  *   - Infinite HP/MP. In a battle, the party's actors (0x68 bytes each at
@@ -115,6 +116,7 @@
 
 #include "utils/logger.h"
 #include "utils/profiler.h"
+#include "utils/utils.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -154,6 +156,7 @@ extern so_module so_mod;
 #define MODE_WORLD 3
 #define SCENES_PATH DATA_PATH "cenas.txt"
 #define CHEATS_PATH DATA_PATH "cheats.txt"
+#define DEBUG_MENU_PATH DATA_PATH "debug_menu.txt"
 #define MAX_SCENES 16
 
 typedef struct {
@@ -216,6 +219,8 @@ static const tab tabs[] = {
     { "DEBUG",    tab_debug,    (int) sizeof(tab_debug) },
 };
 #define NUM_TABS ((int) (sizeof(tabs) / sizeof(tabs[0])))
+// DEBUG is last: excluded from both drawing and navigation unless opted in.
+static int visible_tabs = NUM_TABS - 1;
 
 // Two lines (38 characters at most) on the selected item, at the bottom of the menu
 static const char * help_text(int item, int line) {
@@ -498,6 +503,8 @@ static int capture_scene(scene * sc, int mode) {
 }
 
 void port_menu_init(void) {
+    visible_tabs = file_exists(DEBUG_MENU_PATH) ? NUM_TABS : NUM_TABS - 1;
+    cur_tab = 0;
     memmap = (const uint32_t *) so_symbol(&so_mod, "MEMMAP");
     load_scenes();
     load_cheats();
@@ -1197,7 +1204,7 @@ uint32_t port_menu_input(uint32_t buttons) {
         open = 0;
         wait_release = 1;
     } else if (pressed & (BTN_L | BTN_R)) { // L / R: tab
-        cur_tab = step(cur_tab, NUM_TABS, pressed & BTN_L ? -1 : 1);
+        cur_tab = step(cur_tab, visible_tabs, pressed & BTN_L ? -1 : 1);
         cursor = 0;
         title_armed = 0;
     } else if (pressed & SCE_CTRL_UP) {
@@ -1372,11 +1379,11 @@ void port_menu_draw(void) {
         float y = y0 + 15;
         text(x0 + 20, y, "PORT MENU", RGBA(255, 255, 255, 255));
         y += LINE_H + 2;
-        // Tabs: L  CHEATS  GAMEPLAY  DEBUG  R
+        // Draw only tabs enabled at startup.
         float tx = x0 + 20;
         text(tx, y, "L", RGBA(170, 190, 230, 255));
         tx += 2 * ADVANCE;
-        for (int i = 0; i < NUM_TABS; i++) {
+        for (int i = 0; i < visible_tabs; i++) {
             float w = (float) strlen(tabs[i].name) * ADVANCE;
             if (i == cur_tab) rect(tx - 6, y - 5, tx + w, y + 7 * SCALE + 5, RGBA(60, 90, 170, 255));
             text(tx, y, tabs[i].name, i == cur_tab ? RGBA(255, 255, 255, 255) : RGBA(130, 140, 170, 255));
