@@ -22,6 +22,7 @@ with rendering provided by vitaGL.
   automatic dialog advance, language selection, EXP/gil multipliers, infinite
   HP/MP and materia selection.
 - Audio, movie presentation and minigame input fixes from earlier releases.
+- Developer tools are hidden from the standard port menu.
 
 ## Requirements
 
@@ -55,6 +56,8 @@ for details.
 Hold **L + R** and press **Start**. Use **L/R** to switch tabs, **Up/Down** to
 select an item, **Left/Right** to change it, **Cross** to confirm and **Circle**
 to close the menu.
+
+The standard menu contains **Cheats** and **Gameplay**.
 
 In **Gameplay**, choose **SCREEN** to toggle 4:3/16:9. Language choices are
 English, French, German, Spanish and Japanese; language changes apply after

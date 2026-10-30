@@ -11,6 +11,7 @@ FINAL FANTASY VII
 - Includes native rendering optimizations, GPU palette rendering, texture caching and minigame performance improvements.
 - Includes gameplay settings, optional cheats, dialog language selection and right-stick world map camera controls.
 - Includes previous fixes for PlayStation button prompts, menu audio, movie presentation and minigame inputs.
+- Developer tools are hidden from the standard port menu; the public tabs are Cheats and Gameplay.
 - Known limitations: silent snowboard music; some scenes may show background or geometry limitations in widescreen.
 
 # Author

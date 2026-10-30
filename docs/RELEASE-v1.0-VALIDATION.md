@@ -4,14 +4,20 @@
 
 - GitHub release text: `docs/RELEASE-v1.0.md`.
 - VitaDB submission text: `docs/VITADB-v1.0.md`.
-- Release tag to use when publishing: `v1.0`.
+- Release tag: `v1.0` (already published; see source status below).
 - VPK: `build/VPK/ff7_vita_v1.0.vpk`.
 - SHA-256 file: `build/VPK/ff7_vita_v1.0.vpk.sha256`.
-- VPK size: 3,101,380 bytes.
-- SHA-256: `f09c51f2b46b9fa32bf1719907070a6ac4c88d073d174ea52b97f050fba0ce97`.
+- VPK size: 3,101,494 bytes.
+- SHA-256: `02f55887c4303cbaf84e4ed4f3ced454267c3e8d209adfb75b2ac476584d28cb`.
 - Application version: `01.00`; title ID: `FFSQ00007`.
 
 ## Completed checks
+
+The v1.0 VPK was rebuilt after hiding DEBUG from the default menu. The
+developer marker is absent from the package. Both drawing and L/R navigation
+use the restricted tab count until the marker is present at startup.
+The widescreen regression results below are from the preceding build; its
+rendering code is unchanged in this rebuild.
 
 - Release build with self-tests, continuous profiling and spike profiling disabled.
 - VPK content allow-list and LiveArea image validation passed.
@@ -35,6 +41,7 @@ regression tests do not establish full-game compatibility or visual correctness
 in every field. Before publishing, check installation/update, startup, controls,
 4:3/16:9 presentation, battles, movies, audio and minigames on the Vita.
 
-The build includes the current local changes in this checkout. Commit the
-reviewed source and documentation before tagging the release so the published
-source matches the binary.
+The existing GitHub tag `v1.0` points to commit `a4d4cfa`, before the DEBUG
+visibility correction. This rebuild includes that correction and updated release
+text as local changes. The published tag was not moved. Publish the corrected
+source before distributing this replacement binary as the tagged release.
