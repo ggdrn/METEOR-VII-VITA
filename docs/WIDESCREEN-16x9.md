@@ -291,7 +291,7 @@ Com 16:9 ligado em menus e vídeos, a imagem tem que ficar **idêntica** à de
 - Campo: camadas de parallax 3/4 (`0x641…`, cenários com fundo que rola em
   velocidade própria), cursor da mão, rolagens de script que passam do
   limite da câmera, posição máxima das janelas de diálogo.
-- Mapa-múndi: céu e nuvens (`0x754100`, `0x7547A6`) e o recorte de malhas em
+- Mapa-múndi: nuvens (`0x7547A6`) e o recorte de malhas em
   `0x751EFC` (terreno pode faltar nas laterais).
 - Batalha: efeitos de tela cheia **com textura** de algumas invocações
   (Bahamut ZERO, Ifrit, Neo Bahamut, Typhon…) e o swirl de entrada, que
@@ -309,3 +309,136 @@ Com 16:9 ligado em menus e vídeos, a imagem tem que ficar **idêntica** à de
    centro. Log: `% of sampled vertices beyond`.
 5. Mapa-múndi: terreno até a borda; céu e nuvens provavelmente cortados.
 6. Trocar 4:3 ↔ 16:9 no meio do jogo.
+
+## 9. Correções após o teste da v0.09.01 (v0.09.02)
+
+O teste no Vita relatou campo e batalha pretos, com o mapa-múndi visível e
+uma linha azul no horizonte. O log mostra que a lógica e os envios de
+geometria continuaram ativos durante o problema.
+
+- **Projeção:** o argumento direito de `ortho_hooked` se chamava `r`.
+  `SO_CONTINUE` também declara `int r` e, no caminho que preserva uma matriz
+  diferente de 640×480, seu inicializador lia essa variável local ainda não
+  inicializada em vez do argumento. O gancho agora usa `right_bits`, mantendo
+  os seis argumentos originais nesse caminho. O teste de regressão reproduz
+  a largura corrompida na versão anterior e passa na corrigida. A confirmação
+  de que isso resolve todas as telas pretas depende do próximo teste no Vita.
+- **Horizonte:** a geometria do céu (`0x754100`) ainda usava um plano de
+  −180 a +180. As instruções ARM que constroem suas coordenadas horizontais
+  agora usam −240 e +240 em 16:9. A projeção, a altura e as cores do céu são
+  preservadas; ao voltar a 4:3, as duas instruções originais são restauradas.
+  O patch só é habilitado se os bytes originais conferirem. Nuvens continuam
+  como uma limitação separada.
+
+Validação local: `python3 scripts/test_wide.py` verifica o encaminhamento
+dos seis argumentos em matrizes de alturas diferentes, o viewport largo,
+o caminho 4:3 e os fades. Também executa no Unicorn as instruções ARM
+produzidas pelo código real de alternância para conferir −240/+240 e a
+restauração byte a byte de −180/+180 da `.so`. O build e o verificador do
+VPK passam. A imagem final ainda precisa de validação no hardware.
+
+## 10. Enquadramento e preenchimento após os prints da v0.09.02 (v0.09.03)
+
+Os prints mostram a cena e o HUD deslocados à esquerda, com uma faixa vazia
+à direita, e as nuvens presas ao retângulo central. O gancho da matriz só
+reconhecia a altura de 480 linhas e mantinha o indicador de quadro largo
+mesmo ao receber outra matriz. A composição final podia então amostrar o
+quadro como se ele tivesse 104 pixels de margem interna, sem essa margem
+ter sido desenhada pela matriz mais recente.
+
+- O reconhecimento agora inclui áreas verticais menores dentro das 480
+  linhas. A origem e a altura vertical do viewport são preservadas; somente
+  a faixa horizontal cresce. Matrizes incompatíveis limpam o indicador de
+  quadro largo. O log registra as primeiras 24 combinações de matriz/modo
+  para conferir as chamadas reais no próximo teste do Vita.
+- Somente os modos 1, 2 e 3 usam a matriz larga. Menus, save/load, resultados,
+  transições e minigames usam a matriz original. O compositor também exige
+  **modo 1** para aplicar o zoom do campo: a marca de tempo do último fundo
+  não pode mais ampliar o menu de save durante a troca de modo.
+- A cena de batalha usa a largura adicional; as coordenadas do HUD permanecem
+  em 0..640, com escala uniforme e centro em x=480 da tela do Vita. O ajuste
+  corrige a combinação de matriz e recorte que podia deslocar a imagem. Não
+  foi adicionada arte nova nem preenchimento artificial de buracos internos
+  de malhas de batalha; eventuais recortes de geometria ainda precisam de
+  confirmação visual no console.
+- Campos largos mostram a arte extra já selecionada pela câmera e pela
+  janela de tiles. Campos estreitos também ocupam a largura toda, ajustando
+  horizontalmente a imagem disponível, sem amostrar a área além dessa arte.
+  As limitações anteriores das camadas de parallax continuam valendo.
+- A rotina de nuvens `0x754493` mantém a conversão original e amplia os quatro
+  vértices TL que ela acabou de gerar, em torno de x=320, por 848/640. Altura,
+  UVs, cores e profundidade não mudam. Isso amplia horizontalmente os blocos
+  existentes de nuvens para a nova proporção. Nenhum dado de terreno ou HUD
+  passa por essa transformação. Falhas de alocação não alteram o bloco
+  anterior; a reutilização do buffer no quadro seguinte considera sua geração.
+
+Testes locais:
+
+- `scripts/test_wide.py`: projeções de alturas diferentes e restauração do
+  ortho, seleção de modos, nuvens (inclusive reutilização e falha do buffer),
+  fades e instruções ARM do céu.
+- `scripts/test_screen.py`: compositor real com um quad de 960×544; verifica
+  os extremos da tela, os UVs, o centro e a escala do HUD de batalha, saves e
+  demais menus com a marca de fundo ainda recente, e prioridade de FMVs.
+- `scripts/emu/test_wide_cloud.py`: executa a conversão original da `.so` no
+  Unicorn, simulando apenas a alocação e a consulta de capacidade do renderer;
+  confirma os quatro vértices de 32 bytes no endereço apontado por buffer+0x70.
+
+Compilação e verificação do VPK passam. Estas verificações não substituem o
+novo teste visual no Vita, especialmente para recortes de batalha e parallax.
+
+## 11. HUD, diálogos e segunda camada de fundo (v0.09.04)
+
+O teste da v0.09.03 confirmou o mapa-múndi. Seus ajustes de terreno, céu e
+nuvens foram preservados. O novo log identificou viewports locais da HUD
+(como x=320..322, y=388..390 durante a animação de abertura) que ainda eram
+colocados no framebuffer sem os 104 pixels de deslocamento usados pela cena.
+
+- Janelas locais conservam **matriz, largura, altura e recorte originais**;
+  apenas a origem horizontal do viewport recebe +104 enquanto a cena está
+  larga. Isso alinha comandos, submenus, mão e diálogos ao HUD original de
+  640 pixels, centralizado. O indicador do framebuffer largo continua válido
+  durante essas janelas. Menus fora dos modos 1/2/3 continuam em 4:3.
+- Foi removido o esticamento horizontal do composto final dos campos,
+  introduzido como fallback na v0.09.03: ele também afetava os diálogos.
+  Cenário e caixas usam escala uniforme. A janela de tiles da camada nativa
+  cresce 38 unidades por lado mesmo se a câmera tiver um intervalo estreito.
+- A segunda camada (`0x640C49`) ainda recortava em 4:3. Ela agora usa o mesmo
+  acréscimo de 38 unidades: o argumento x recebe +38 temporariamente, a origem
+  passa de 320 a 358 para compensar esse deslocamento, e a largura usada no
+  limite esquerdo passa de 336 a 412. As posições dos tiles não mudam; o
+  argumento do chamador e as instruções originais são restaurados quando
+  apropriado. As instruções são verificadas antes da instalação.
+- O viewport 3D da batalha (640×332) passa a permitir desenho até a linha
+  480 em widescreen, mantendo a relação de um pixel projetado por pixel do
+  framebuffer. Isso deixa passar geometria já enviada abaixo do recorte.
+  A detecção de fades exige agora que o quad comece no topo e cubra pelo
+  menos 400 linhas: um painel preto inferior da HUD conserva sua largura
+  original. Se o jogo não enviar geometria para a área inferior, ela fica
+  preta; não foi criado preenchimento artificial.
+- DEBUG voltou a ser uma aba normal, sem exigir `debug_menu.txt`.
+
+Validação: testes dos viewports locais e da preservação de seus seis
+argumentos em todos os modos; HUD inferior não classificado como fade;
+caixas de diálogo com escala uniforme; argumento da segunda camada
+restaurado após a chamada; decodificação das instruções produzidas pelo
+patch e restauração dos bytes originais. `scripts/emu/test_wide_field2.py`
+executa `0x640C49` original e modificado: novos tiles aparecem nas duas
+laterais e todas as posições originais permanecem iguais. Os testes de
+nuvens anteriores continuam passando. O resultado visual precisa do teste
+no Vita; ausência de arte e camadas de parallax específicas podem continuar
+exigindo tratamento por cenário.
+
+## 12. Transição de entrada da batalha (v0.09.05)
+
+Com 16:9 selecionado, o compositor apresenta o modo 23 (swirl) em toda a
+largura de 960 pixels, vindo tanto do campo quanto do mapa-múndi. O efeito
+continua sendo produzido em 640 pixels e é esticado horizontalmente apenas
+na apresentação final. A amostragem conserva esses 640 pixels: não tenta
+revelar laterais que o módulo de transição não desenha. Também reconhece o
+quadro ainda largo na troca de modo, amostrando nesse caso os 640 centrais.
+
+A opção 4:3 mantém a apresentação anterior. HUD, diálogos, menus e o renderer
+do mapa-múndi não recebem o esticamento da transição. O teste do compositor
+cobre as duas origens, os dois layouts do framebuffer na troca de modo e a
+opção widescreen desligada.

@@ -65,8 +65,7 @@
  * (port_menu_apply_ab: from the frame limiter's sleep, and from the
  * minigames' frame entry in ff7_framecap.c, since they never sleep).
  *
- * Tabs (v0.6.40): L and R switch between CHEATS and GAMEPLAY. DEBUG (all of
- * the above) is available only with DATA_PATH "debug_menu.txt" at startup.
+ * Tabs: L and R switch between CHEATS, GAMEPLAY and DEBUG.
  * The cheat and gameplay choices are saved in DATA_PATH
  * "cheats.txt" and applied by the game thread between frames
  * (apply_cheats):
@@ -159,7 +158,6 @@ extern so_module so_mod;
 #define MODE_WORLD 3
 #define SCENES_PATH DATA_PATH "cenas.txt"
 #define CHEATS_PATH DATA_PATH "cheats.txt"
-#define DEBUG_MENU_PATH DATA_PATH "debug_menu.txt"
 #define MAX_SCENES 16
 
 typedef struct {
@@ -222,8 +220,8 @@ static const tab tabs[] = {
     { "DEBUG",    tab_debug,    (int) sizeof(tab_debug) },
 };
 #define NUM_TABS ((int) (sizeof(tabs) / sizeof(tabs[0])))
-// DEBUG is last: excluded from both drawing and navigation unless opted in.
-static int visible_tabs = NUM_TABS - 1;
+// Keep DEBUG available for on-device rendering and minigame tests.
+static int visible_tabs = NUM_TABS;
 
 // Two lines (38 characters at most) on the selected item, at the bottom of the menu
 static const char * help_text(int item, int line) {
@@ -510,7 +508,7 @@ static int capture_scene(scene * sc, int mode) {
 }
 
 void port_menu_init(void) {
-    visible_tabs = file_exists(DEBUG_MENU_PATH) ? NUM_TABS : NUM_TABS - 1;
+    visible_tabs = NUM_TABS;
     cur_tab = 0;
     memmap = (const uint32_t *) so_symbol(&so_mod, "MEMMAP");
     load_scenes();

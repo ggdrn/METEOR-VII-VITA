@@ -51,9 +51,10 @@
  * 16:9 (ff7_wide.c): the game draws 848 pixels across (x -104 .. 744) into
  * the same framebuffer. The texture coordinates of the frame quad then pick
  * the part shown: the central 640 pixels, or in a field, battle or the world
- * map as many as fill the screen at that zoom (791, 833 and 847), fewer in a
- * field whose background is narrower (ff7_wide_field_width). The world map
- * keeps its 480 lines. The stretch switch applies only to 4:3 pictures.
+ * map as many as fill the screen at that zoom (791, 833 and 847). Field
+ * dialogue shares the scene's uniform pixel scale: a narrow background
+ * never stretches the final composite. The world map keeps its 480 lines.
+ * The stretch switch applies only to 4:3 pictures.
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
@@ -104,6 +105,8 @@ extern so_module so_mod;
 #define GAME_MODE_VA     0xcbf9dc   // uint16_t: 1 field, 2 battle, 3 world map...
 #define MODE_BATTLE      2
 #define MODE_WORLD       3
+#define MODE_FIELD       1
+#define MODE_SWIRL       23
 
 static so_hook quad_tex_hook, border_hook, viewport_hook;
 static uint8_t ** cur_vertex;
@@ -148,31 +151,31 @@ static inline float * vertex(uint8_t * end, int i) {
     return (float *) (end - (QUAD_VERTICES - i) * VERTEX_SIZE);
 }
 
-// Float arguments in core registers (softfp), passed on as raw bits:
-// SO_CONTINUE calls through an unprototyped pointer, which would widen floats
-static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
-    int r = SO_CONTINUE_HELD(int, quad_tex_hook, x, y, w, h);
-    if ((uintptr_t) __builtin_return_address(0) != base + RET_FRAME_QUAD) return r;
-
-    int mode = current_mode();
+// Choose the source rectangle independently from its placement on screen.
+static void frame_quad_adjust(int mode) {
     if (mode != logged_mode) {
         logged_mode = mode;
         l_info("game mode: %d", mode);
     }
     int wide = ff7_wide_rendering();
-    int field = zoom_enabled && in_field();
-    int movie = zoom_enabled && !field && movie_is_playing() && movie_video_height() == FIELD_LINES;
+    int playing = movie_is_playing();
+    int field = zoom_enabled && mode == MODE_FIELD && !playing && in_field();
+    int movie = zoom_enabled && playing && movie_video_height() == FIELD_LINES;
     int battle = zoom_enabled && !field && !movie && mode == MODE_BATTLE;
     int world = wide && !field && !movie && !battle && mode == MODE_WORLD;
-    int on = field ? 1 : movie ? 2 : battle ? 3 : world ? 4 : 0;
+    // The swirl module still draws a 640-pixel captured image. Present that
+    // whole image across the display; do not sample nonexistent side pixels.
+    int swirl = ff7_wide_get() && !playing && mode == MODE_SWIRL;
+    int on = field ? 1 : movie ? 2 : battle ? 3 : world ? 4 : swirl ? 5 : 0;
     if (on != zoomed) {
         zoomed = on;
         l_info("field zoom: %s", on == 1 ? "on (field)" : on == 2 ? "on (movie)" : on == 3 ? "on (battle)"
-                                 : on == 4 ? "on (world map, 16:9)" : "off");
+                                 : on == 4 ? "on (world map, 16:9)"
+                                 : on == 5 ? "on (battle swirl, stretched 16:9)" : "off");
     }
     if (!on && !wide) {
         zoom_left = zoom_right = 0;
-        return r;
+        return;
     }
 
     // The quad VIDEO_doQuad just wrote: x0..x1 by 0..screen height (y down)
@@ -183,21 +186,27 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     zoom_center = (x0 + x1) * 0.5f;
     // Game pixels shown across: 640, or more in 16:9 (as many as fill the screen at this zoom)
     float shown = 640.0f;
+    float display = shown;
+    if (swirl && x1 > x0) display = 640.0f * zoom_center / ((zoom_center - x0) * k);
     if (wide && (field || battle || world) && x1 > x0) {
         float fit = 640.0f * zoom_center / ((zoom_center - x0) * k);
-        shown = field ? ff7_wide_field_width() : fit;
+        shown = fit;
         if (shown > fit) shown = fit;
         if (shown > 640.0f + 2 * WIDE_EXTRA) shown = 640.0f + 2 * WIDE_EXTRA;
         if (shown < 640.0f) shown = 640.0f;
+        // One uniform pixel scale for scenery and dialogue. Missing artwork
+        // remains clear; never stretch the composited dialogue to fill it.
+        display = shown;
     }
     if ((uint32_t) shown != logged_shown || lines != logged_lines) {
         logged_shown = (uint32_t) shown;
         logged_lines = lines;
         l_info("field zoom: %u of 480 lines, %u game pixels across fill the screen%s", lines, logged_shown,
-               stretch && shown == 640.0f && on ? ", stretched to the full width" : "");
+               display > shown + 0.01f || (stretch && shown == 640.0f && on)
+                   ? ", stretched to the full width" : "");
     }
     // The quad is centered on the screen: the screen is 2 * center wide
-    float kx = k * shown / 640.0f;
+    float kx = k * display / 640.0f;
     if (stretch && on && shown == 640.0f && x1 > x0) kx = zoom_center / (zoom_center - x0); // edges at 0 and the screen width
     zoom_left = zoom_center - (zoom_center - x0) * kx;
     zoom_right = zoom_center + (x1 - zoom_center) * kx;
@@ -210,7 +219,14 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
         v[0] = zoom_center + (v[0] - zoom_center) * kx;
         if (on) v[1] *= k; // top stays at 0, the empty lines go below the screen
     }
-    return r;
+}
+
+// Float arguments stay as raw bits across the softfp hook.
+static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    int result = SO_CONTINUE_HELD(int, quad_tex_hook, x, y, w, h);
+    if ((uintptr_t) __builtin_return_address(0) == base + RET_FRAME_QUAD)
+        frame_quad_adjust(current_mode());
+    return result;
 }
 
 static int border_hooked(int r0, int g0, int b0, int r1, int g1, int b1) {
@@ -230,7 +246,7 @@ static int border_hooked(int r0, int g0, int b0, int r1, int g1, int b1) {
 }
 
 static int viewport_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t arg) {
-    int field = in_field();
+    int field = current_mode() == MODE_FIELD && !movie_is_playing() && in_field();
     // The field's own full-width area (smaller ones are windows and effects;
     // a full 480-line area right at a mode change must not stick)
     if (field && x == 0 && y == 0 && w == 640 && h >= MIN_FIELD_LINES && h < 480)
