@@ -24,6 +24,7 @@
 #include "ff7_anim.h"
 #include "ff7_so_inline.h"
 #include "ff7_switch.h"
+#include "ff7_wide.h"
 
 #include "utils/logger.h"
 #include "utils/utils.h"
@@ -36,7 +37,14 @@ extern so_module so_mod;
 
 static fieldbg_env env;
 
-static void layer_native(void) { fieldbg_layer_run(&env); }
+static int installed;
+
+int ff7_fieldbg_installed(void) { return installed; }
+
+static void layer_native(void) {
+    env.wide = ff7_wide_tile_extra();
+    fieldbg_layer_run(&env);
+}
 static void append_native(void) { fieldbg_append_run(&env); }
 
 void ff7_fieldbg_patch(void) {
@@ -71,6 +79,7 @@ void ff7_fieldbg_patch(void) {
         l_warn("ff7_fieldbg: mk_address/_check_event not as expected, calling them (slower)");
     }
     for (int i = 0; i < 2; i++) hook_addr(addr[i], (uintptr_t) fns[i].native);
+    installed = 1;
     l_info("ff7_fieldbg: native background tile lists (0x64085C, 0x6464BA) installed");
 }
 

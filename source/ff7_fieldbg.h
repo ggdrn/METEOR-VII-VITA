@@ -11,4 +11,7 @@
 void ff7_fieldbg_patch(void);
 void ff7_fieldbg_report(double seconds);
 
+/** 1 if the native tile lists run (16:9 widens their window). */
+int ff7_fieldbg_installed(void);
+
 #endif // FF7_FIELDBG_H

@@ -65,8 +65,9 @@
  * (port_menu_apply_ab: from the frame limiter's sleep, and from the
  * minigames' frame entry in ff7_framecap.c, since they never sleep).
  *
- * Tabs (v0.6.40): L and R switch between CHEATS, GAMEPLAY and DEBUG (all of
- * the above). The cheat and gameplay choices are saved in DATA_PATH
+ * Tabs: L and R switch between CHEATS and GAMEPLAY. Developer tools are
+ * available only with DATA_PATH "debug_menu.txt" present at startup.
+ * The cheat and gameplay choices are saved in DATA_PATH
  * "cheats.txt" and applied by the game thread between frames
  * (apply_cheats):
  *   - Infinite HP/MP. In a battle, the party's actors (0x68 bytes each at
@@ -94,6 +95,8 @@
  *     ASK (see dialog_skip_buttons).
  *   - World map speed x2..x4: the speed on foot, an immediate 30 in the
  *     recompiled code (scale_world_speed); vehicles are left as they are.
+ *   - Screen 4:3 / 16:9 (ff7_wide.c, docs/WIDESCREEN-16x9.md), applied by
+ *     the game thread at its next drawing area.
  *
  * Drawing: one fixed-function vitaGL draw of colored rectangles (a 5x7
  * font drawn as runs of pixels), on the main thread with GL locked, right
@@ -112,9 +115,11 @@
 #include "ff7_texture.h"
 #include "ff7_unhook.h"
 #include "ff7_anim.h"
+#include "ff7_wide.h"
 
 #include "utils/logger.h"
 #include "utils/profiler.h"
+#include "utils/utils.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -154,6 +159,7 @@ extern so_module so_mod;
 #define MODE_WORLD 3
 #define SCENES_PATH DATA_PATH "cenas.txt"
 #define CHEATS_PATH DATA_PATH "cheats.txt"
+#define DEBUG_MENU_PATH DATA_PATH "debug_menu.txt"
 #define MAX_SCENES 16
 
 typedef struct {
@@ -196,12 +202,12 @@ static const minigame games[] = {
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
 enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR, ITEM_MATERIA_PICK,
-       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE };
+       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_WIDESCREEN };
 
 // Tabs (L / R): the items of each, in order
 static const uint8_t tab_cheats[] = { ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR,
                                       ITEM_MATERIA_PICK, ITEM_SUMMONS, ITEM_CLOSE };
-static const uint8_t tab_gameplay[] = { ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_TITLE,
+static const uint8_t tab_gameplay[] = { ITEM_WIDESCREEN, ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_TITLE,
                                         ITEM_CLOSE };
 static const uint8_t tab_debug[] = { 0, 1, 2, 3, 4, 5, 6, ITEM_RECORD, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP,
                                      ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_CLOSE };
@@ -216,6 +222,8 @@ static const tab tabs[] = {
     { "DEBUG",    tab_debug,    (int) sizeof(tab_debug) },
 };
 #define NUM_TABS ((int) (sizeof(tabs) / sizeof(tabs[0])))
+// DEBUG remains in the code, but is absent from public drawing/navigation.
+static int visible_tabs = NUM_TABS - 1;
 
 // Two lines (38 characters at most) on the selected item, at the bottom of the menu
 static const char * help_text(int item, int line) {
@@ -243,6 +251,7 @@ static const char * help_text(int item, int line) {
         { ITEM_WORLD_SPEED,  { "FASTER ON FOOT ON THE WORLD MAP", "VEHICLES ARE UNCHANGED" } },
         { ITEM_AUTO_SKIP,    { "PRESSES OK FOR YOU IN FIELD DIALOGS", "QUESTIONS ARE LEFT TO YOU" } },
         { ITEM_LANGUAGE,     { "LANGUAGE OF THE GAME TEXT. APPLIES", "AT THE NEXT START (* = NOT YET IN USE)" } },
+        { ITEM_WIDESCREEN,   { "16:9 SHOWS MORE OF FIELDS, BATTLES AND", "WORLD MAP. MENUS/MOVIES STAY 4:3" } },
     };
     if (item < NUM_GAMES) return games_help[line];
     for (unsigned i = 0; i < sizeof(help) / sizeof(help[0]); i++)
@@ -345,6 +354,7 @@ static volatile int cheat_hpmp;
 static volatile int cheat_exp = 1, cheat_gil = 1;           // reward factors, 1..4
 static volatile int speed_field = 1, speed_world = 1;       // movement factors, 1..4
 static volatile int auto_skip;                              // skip the field's dialogs
+static volatile int widescreen;                             // 16:9 picture (ff7_wide.c)
 static int language = -1, language_loaded;                  // game text: -1 system, 0..4 setLang (next start)
 static int settings_loaded;
 // setLang's values (MainActivity.onCreate): the data folders lang-en, -fr, -de, -es, -ja
@@ -463,6 +473,7 @@ static void load_cheats(void) {
         else if (!strcmp(key, "speed_field")) speed_field = clamp_factor(v);
         else if (!strcmp(key, "speed_world")) speed_world = clamp_factor(v);
         else if (!strcmp(key, "auto_skip")) auto_skip = v != 0;
+        else if (!strcmp(key, "widescreen")) widescreen = v != 0;
         else if (!strcmp(key, "language")) language = v >= 0 && v < NUM_LANGUAGES ? v : -1;
     }
     fclose(f);
@@ -474,8 +485,9 @@ static void save_cheats(void) {
         l_error("port menu: could not write %s", CHEATS_PATH);
         return;
     }
-    fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\nauto_skip %d\nlanguage %d\n",
-            cheat_hpmp, cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip, language);
+    fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\nauto_skip %d\nlanguage %d\n"
+               "widescreen %d\n",
+            cheat_hpmp, cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip, language, widescreen);
     fclose(f);
 }
 
@@ -498,9 +510,12 @@ static int capture_scene(scene * sc, int mode) {
 }
 
 void port_menu_init(void) {
+    visible_tabs = file_exists(DEBUG_MENU_PATH) ? NUM_TABS : NUM_TABS - 1;
+    cur_tab = 0;
     memmap = (const uint32_t *) so_symbol(&so_mod, "MEMMAP");
     load_scenes();
     load_cheats();
+    ff7_wide_set(widescreen);
     l_info("port menu: hold L + R and press Start (minigame shortcuts, profiler, %d saved scenes)", num_scenes);
     l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d", cheat_hpmp,
            cheat_exp, cheat_gil, speed_field, speed_world);
@@ -1042,6 +1057,11 @@ static void change(int item, int dir) {
             language = step(language + 1, NUM_LANGUAGES + 1, dir) - 1;
             snprintf(m, sizeof(m), "DIALOG LANGUAGE: RESTART THE GAME TO APPLY");
             break;
+        case ITEM_WIDESCREEN:
+            widescreen = !widescreen;
+            ff7_wide_set(widescreen);
+            snprintf(m, sizeof(m), "SCREEN: %s", widescreen ? "16:9 (FIELDS, BATTLES, WORLD MAP)" : "4:3");
+            break;
         case ITEM_AUTO_SKIP:
             auto_skip = !auto_skip;
             snprintf(m, sizeof(m), "DIALOG SKIP: %s (NOT QUESTIONS)", auto_skip ? "ON" : "OFF");
@@ -1197,7 +1217,7 @@ uint32_t port_menu_input(uint32_t buttons) {
         open = 0;
         wait_release = 1;
     } else if (pressed & (BTN_L | BTN_R)) { // L / R: tab
-        cur_tab = step(cur_tab, NUM_TABS, pressed & BTN_L ? -1 : 1);
+        cur_tab = step(cur_tab, visible_tabs, pressed & BTN_L ? -1 : 1);
         cursor = 0;
         title_armed = 0;
     } else if (pressed & SCE_CTRL_UP) {
@@ -1372,11 +1392,11 @@ void port_menu_draw(void) {
         float y = y0 + 15;
         text(x0 + 20, y, "PORT MENU", RGBA(255, 255, 255, 255));
         y += LINE_H + 2;
-        // Tabs: L  CHEATS  GAMEPLAY  DEBUG  R
+        // Draw only tabs enabled at startup.
         float tx = x0 + 20;
         text(tx, y, "L", RGBA(170, 190, 230, 255));
         tx += 2 * ADVANCE;
-        for (int i = 0; i < NUM_TABS; i++) {
+        for (int i = 0; i < visible_tabs; i++) {
             float w = (float) strlen(tabs[i].name) * ADVANCE;
             if (i == cur_tab) rect(tx - 6, y - 5, tx + w, y + 7 * SCALE + 5, RGBA(60, 90, 170, 255));
             text(tx, y, tabs[i].name, i == cur_tab ? RGBA(255, 255, 255, 255) : RGBA(130, 140, 170, 255));
@@ -1411,6 +1431,8 @@ void port_menu_draw(void) {
                          language != language_loaded ? " *" : "");
             else if (i == ITEM_AUTO_SKIP)
                 snprintf(line, sizeof(line), "AUTO SKIP DIALOGS: %s", auto_skip ? "YES" : "NO");
+            else if (i == ITEM_WIDESCREEN)
+                snprintf(line, sizeof(line), "SCREEN < %s >", widescreen ? "16:9" : "4:3");
             else if (i == ITEM_RECORD) {
                 if (recording >= 0) snprintf(line, sizeof(line), "RECORDING SCENE %d: STOP", recording + 1);
                 else snprintf(line, sizeof(line), "RECORD SCENE (MARKER + PROFILER)");

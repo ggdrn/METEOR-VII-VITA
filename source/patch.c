@@ -57,6 +57,7 @@ extern "C"
 #include "ff7_world.h"
 #include "ff7_music.h"
 #include "ff7_screen.h"
+#include "ff7_wide.h"
 #include "ff7_stack.h"
 #include "ff7_buttons.h"
 #include "ff7_selftest.h"
@@ -128,6 +129,7 @@ void so_patch(void) {
 	ff7_music_patch();
 	ff7_dsound_patch();
 	ff7_screen_patch();
+	ff7_wide_patch(); // after ff7_screen_patch and ff7_fieldbg_patch
 	ff7_stack_patch();
 	ff7_buttons_patch();
 	ff7_memmap_patch(); // last: its site checks must see the other hooks

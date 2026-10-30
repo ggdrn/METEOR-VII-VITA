@@ -46,6 +46,7 @@
 
 #include "reimpl/gl_variants.h"
 #include "ff7_interp.h"
+#include "ff7_wide.h"
 #include "utils/cpu.h"
 #include "utils/glstats.h"
 #include "utils/glutil.h"
@@ -476,6 +477,16 @@ void gq_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             at->off = pos;
             pos += len[k];
         }
+    }
+    if (ff7_wide_rendering()) { // 16:9: full-screen fades and flashes cover the wide frame
+        uint8_t * a[4] = { NULL, NULL, NULL, NULL };
+        uint32_t as[4] = { 0, 0, 0, 0 };
+        for (int k = 0; k < n; k++)
+            if (d->attr[k].index < 4) {
+                a[d->attr[k].index] = (uint8_t *) d + d->attr[k].off;
+                as[d->attr[k].index] = d->attr[k].stride;
+            }
+        ff7_wide_draw(mode, d->count, a[0], as[0], a[2], as[2], a[3], as[3]);
     }
     st.draws++;
     st.bytes += data;
