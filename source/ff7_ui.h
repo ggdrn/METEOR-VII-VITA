@@ -17,4 +17,12 @@ void ff7_ui_patch(void);
  */
 unsigned ff7_ui_touch_buttons(void);
 
+/** Native Android flag: 1 ON, 0 OFF, -1 if the .so layout is unsupported. */
+int ff7_ui_encounters_get(void);
+void ff7_ui_encounters_set(int on);
+
+/** Visibility only; removing the touch target does not change encounters. */
+int ff7_ui_encounters_button_get(void);
+void ff7_ui_encounters_button_set(int show);
+
 #endif // FF7_UI_H

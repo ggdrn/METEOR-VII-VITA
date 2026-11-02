@@ -7,6 +7,11 @@ directly on the CPU, with the Android system calls redirected to their Vita equi
 > **No game data is distributed.** You need to have bought the game on
 > Google Play and copy the files from your own installation. See [docs/DATA.md](docs/DATA.md).
 
+Version 1.1.0 adds **Gameplay > RANDOM ENCOUNTERS** (ON/OFF) and
+**ENCOUNTERS BUTTON** (SHOW/HIDE). Open the port menu with **L + R + Start**.
+Both choices are saved; hiding the touch button leaves the encounter setting
+unchanged. See [release notes](docs/RELEASE-v1.1.0.md).
+
 Status and roadmap: [PLANO.md](PLANO.md).
 
 ## Build

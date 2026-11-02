@@ -116,6 +116,7 @@
 #include "ff7_unhook.h"
 #include "ff7_anim.h"
 #include "ff7_wide.h"
+#include "ff7_ui.h"
 
 #include "utils/logger.h"
 #include "utils/profiler.h"
@@ -202,13 +203,13 @@ static const minigame games[] = {
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
 enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR, ITEM_MATERIA_PICK,
-       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_WIDESCREEN };
+       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_WIDESCREEN, ITEM_ENCOUNTERS, ITEM_ENCOUNTERS_BUTTON };
 
 // Tabs (L / R): the items of each, in order
 static const uint8_t tab_cheats[] = { ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR,
                                       ITEM_MATERIA_PICK, ITEM_SUMMONS, ITEM_CLOSE };
-static const uint8_t tab_gameplay[] = { ITEM_WIDESCREEN, ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_TITLE,
-                                        ITEM_CLOSE };
+static const uint8_t tab_gameplay[] = { ITEM_WIDESCREEN, ITEM_ENCOUNTERS, ITEM_ENCOUNTERS_BUTTON,
+                                        ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_TITLE, ITEM_CLOSE };
 static const uint8_t tab_debug[] = { 0, 1, 2, 3, 4, 5, 6, ITEM_RECORD, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP,
                                      ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_CLOSE };
 typedef struct {
@@ -251,6 +252,8 @@ static const char * help_text(int item, int line) {
         { ITEM_WORLD_SPEED,  { "FASTER ON FOOT ON THE WORLD MAP", "VEHICLES ARE UNCHANGED" } },
         { ITEM_AUTO_SKIP,    { "PRESSES OK FOR YOU IN FIELD DIALOGS", "QUESTIONS ARE LEFT TO YOU" } },
         { ITEM_LANGUAGE,     { "LANGUAGE OF THE GAME TEXT. APPLIES", "AT THE NEXT START (* = NOT YET IN USE)" } },
+        { ITEM_ENCOUNTERS,   { "TURNS RANDOM BATTLES ON OR OFF", "SAME SETTING AS THE TOUCH BUTTON" } },
+        { ITEM_ENCOUNTERS_BUTTON, { "SHOWS OR HIDES THE TOUCH BUTTON", "DOES NOT CHANGE RANDOM ENCOUNTERS" } },
         { ITEM_WIDESCREEN,   { "16:9 SHOWS MORE OF FIELDS, BATTLES AND", "WORLD MAP. MENUS/MOVIES STAY 4:3" } },
     };
     if (item < NUM_GAMES) return games_help[line];
@@ -357,6 +360,7 @@ static volatile int auto_skip;                              // skip the field's 
 static volatile int widescreen;                             // 16:9 picture (ff7_wide.c)
 static int language = -1, language_loaded;                  // game text: -1 system, 0..4 setLang (next start)
 static int settings_loaded;
+static int encounters_saved = 1, encounters_button_saved = 1;
 // setLang's values (MainActivity.onCreate): the data folders lang-en, -fr, -de, -es, -ja
 static const char * const language_names[] = { "ENGLISH", "FRENCH", "GERMAN", "SPANISH", "JAPANESE" };
 #define NUM_LANGUAGES 5
@@ -473,21 +477,24 @@ static void load_cheats(void) {
         else if (!strcmp(key, "speed_field")) speed_field = clamp_factor(v);
         else if (!strcmp(key, "speed_world")) speed_world = clamp_factor(v);
         else if (!strcmp(key, "auto_skip")) auto_skip = v != 0;
+        else if (!strcmp(key, "encounters")) encounters_saved = v != 0;
+        else if (!strcmp(key, "encounters_button")) encounters_button_saved = v != 0;
         else if (!strcmp(key, "widescreen")) widescreen = v != 0;
         else if (!strcmp(key, "language")) language = v >= 0 && v < NUM_LANGUAGES ? v : -1;
     }
     fclose(f);
 }
 
-static void save_cheats(void) {
+void port_menu_save_settings(void) {
     FILE * f = fopen(CHEATS_PATH, "w");
     if (!f) {
         l_error("port menu: could not write %s", CHEATS_PATH);
         return;
     }
     fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\nauto_skip %d\nlanguage %d\n"
-               "widescreen %d\n",
-            cheat_hpmp, cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip, language, widescreen);
+               "widescreen %d\nencounters %d\nencounters_button %d\n",
+            cheat_hpmp, cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip, language, widescreen,
+            ff7_ui_encounters_get() < 0 ? encounters_saved : ff7_ui_encounters_get(), ff7_ui_encounters_button_get());
     fclose(f);
 }
 
@@ -516,6 +523,8 @@ void port_menu_init(void) {
     load_scenes();
     load_cheats();
     ff7_wide_set(widescreen);
+    ff7_ui_encounters_set(encounters_saved);
+    ff7_ui_encounters_button_set(encounters_button_saved);
     l_info("port menu: hold L + R and press Start (minigame shortcuts, profiler, %d saved scenes)", num_scenes);
     l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d", cheat_hpmp,
            cheat_exp, cheat_gil, speed_field, speed_world);
@@ -1037,7 +1046,7 @@ static void change(int item, int dir) {
             break;
         case ITEM_LEVEL:
             materia_max = !materia_max;
-            save_cheats();
+            port_menu_save_settings();
             return;
         case ITEM_EXP:
             cheat_exp = step(cheat_exp - 1, 4, dir) + 1;
@@ -1057,6 +1066,18 @@ static void change(int item, int dir) {
             language = step(language + 1, NUM_LANGUAGES + 1, dir) - 1;
             snprintf(m, sizeof(m), "DIALOG LANGUAGE: RESTART THE GAME TO APPLY");
             break;
+        case ITEM_ENCOUNTERS:
+            if (ff7_ui_encounters_get() < 0) {
+                set_message("ENCOUNTERS CONTROL UNAVAILABLE");
+                return;
+            }
+            ff7_ui_encounters_set(!ff7_ui_encounters_get());
+            snprintf(m, sizeof(m), "RANDOM ENCOUNTERS: %s", ff7_ui_encounters_get() ? "ON" : "OFF");
+            break;
+        case ITEM_ENCOUNTERS_BUTTON:
+            ff7_ui_encounters_button_set(!ff7_ui_encounters_button_get());
+            snprintf(m, sizeof(m), "ENCOUNTERS BUTTON: %s", ff7_ui_encounters_button_get() ? "SHOW" : "HIDE");
+            break;
         case ITEM_WIDESCREEN:
             widescreen = !widescreen;
             ff7_wide_set(widescreen);
@@ -1072,7 +1093,7 @@ static void change(int item, int dir) {
     if (m[0]) set_message(m);
     l_info("port menu: cheats: infinite HP/MP %d, EXP x%d, gil x%d; speed: field x%d, world map x%d; dialog skip %d",
            cheat_hpmp, cheat_exp, cheat_gil, speed_field, speed_world, auto_skip);
-    save_cheats();
+    port_menu_save_settings();
 }
 
 static void activate(int item) {
@@ -1431,6 +1452,11 @@ void port_menu_draw(void) {
                          language != language_loaded ? " *" : "");
             else if (i == ITEM_AUTO_SKIP)
                 snprintf(line, sizeof(line), "AUTO SKIP DIALOGS: %s", auto_skip ? "YES" : "NO");
+            else if (i == ITEM_ENCOUNTERS)
+                snprintf(line, sizeof(line), "RANDOM ENCOUNTERS < %s >", ff7_ui_encounters_get() < 0 ? "N/A" :
+                         ff7_ui_encounters_get() ? "ON" : "OFF");
+            else if (i == ITEM_ENCOUNTERS_BUTTON)
+                snprintf(line, sizeof(line), "ENCOUNTERS BUTTON < %s >", ff7_ui_encounters_button_get() ? "SHOW" : "HIDE");
             else if (i == ITEM_WIDESCREEN)
                 snprintf(line, sizeof(line), "SCREEN < %s >", widescreen ? "16:9" : "4:3");
             else if (i == ITEM_RECORD) {
