@@ -18,6 +18,9 @@ int port_menu_language(void);
 /** Main thread, once after the .so is loaded. */
 void port_menu_init(void);
 
+/** Main thread: persist menu settings, including a native encounter toggle made by touch. */
+void port_menu_save_settings(void);
+
 /** Main thread, every pad poll: returns the buttons to pass on to the game
  *  (none while the menu is open; the Start of the combo is held back). */
 uint32_t port_menu_input(uint32_t buttons);

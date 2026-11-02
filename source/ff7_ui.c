@@ -13,7 +13,8 @@
  * The toggle next to "Encounters ON/OFF" switches the touch d-pad between
  * analog and digital; with no d-pad it does nothing, so it goes as well
  * (recognized by the flag it toggles, TOUCH_MODE_FLAG). The Encounters
- * toggle, triggered buttons, swipers and the screen itself are untouched.
+ * toggle can be hidden independently of its value from the port menu.
+ * Triggered buttons, swipers and the screen itself are untouched.
  * The on-screen L2 / R2 (keys 0x47 / 0x4F, Home / End) are kept aside and put
  * back into the layout while the game is in the submarine (mode 10): its
  * layout is the field's (one list for both), so this is decided every frame
@@ -33,6 +34,7 @@
  */
 
 #include "ff7_ui.h"
+#include "port_menu.h"
 
 #include "ff7_unhook.h"
 #include "utils/logger.h"
@@ -49,6 +51,7 @@ extern so_module so_mod;
 #define TOUCH_LOG_LIMIT 40
 #define MAX_LAYOUT 32
 #define MAX_FILTERED 128
+#define NO_ENCOUNTERS_FLAG 0x14604fc // 0: encounters ON, 1: OFF (UI_frame_refresh clears the encounter rate)
 #define TOUCH_MODE_FLAG 0x1460508 // byte toggled by the d-pad mode button (UI_current - 0x38)
 
 enum { CLS_OTHER = -1, CLS_DPAD = 1, CLS_BUTTON_MAPPED = 8, CLS_TOGGLE = 9 };
@@ -77,6 +80,19 @@ static void *** ui_current;     // &UI_current (UIObject **)
 static so_hook touch_began_hook, display_hook;
 static int touches_logged;
 static uint8_t * touch_mode_flag;
+static volatile uint8_t * no_encounters_flag;
+static volatile int encounters_button = 1;
+
+int ff7_ui_encounters_get(void) {
+    return no_encounters_flag ? !*no_encounters_flag : -1;
+}
+
+void ff7_ui_encounters_set(int on) {
+    if (no_encounters_flag) *no_encounters_flag = !on;
+}
+
+int ff7_ui_encounters_button_get(void) { return encounters_button; }
+void ff7_ui_encounters_button_set(int show) { encounters_button = show != 0; }
 
 typedef void (* touch_fn)(int id, float x, float y);
 typedef int (* contains_fn)(void * self, float x, float y);
@@ -99,6 +115,8 @@ static struct {
     void ** list;
     void * extra[MAX_EXTRA]; // L2 / R2 buttons taken out, shown in the submarine
     int num_extra;
+    void * encounters[MAX_LAYOUT]; // reversible removal, separate from submarine controls
+    int num_encounters;
 } filtered[MAX_FILTERED];
 static int num_filtered;
 
@@ -171,6 +189,9 @@ static int filter_layout(void ** list) {
 
     int out = 0, removed = 0;
     for (int i = 0; list[i] && i < MAX_LAYOUT; i++) {
+        if (class_of(list[i]) == CLS_TOGGLE && no_encounters_flag &&
+            *(uint8_t **) ((uint8_t *) list[i] + 0x40) == no_encounters_flag)
+            filtered[f].encounters[filtered[f].num_encounters++] = list[i];
         if (is_virtual_gamepad(list[i])) {
             if (is_extra(list[i]) && filtered[f].num_extra < MAX_EXTRA)
                 filtered[f].extra[filtered[f].num_extra++] = list[i];
@@ -244,9 +265,31 @@ static void sync_extras(int f) {
     }
 }
 
+// Remove the object from both drawing and hit testing. Keep it for instant restoration.
+static void sync_encounters(int f) {
+    if (f < 0) return;
+    void ** list = filtered[f].list;
+    for (int e = 0; e < filtered[f].num_encounters; e++) {
+        uint8_t * obj = filtered[f].encounters[e];
+        int at = -1, n = 0;
+        for (; n < MAX_LAYOUT && list[n]; n++)
+            if (list[n] == obj) at = n;
+        if (encounters_button && at < 0 && n < MAX_LAYOUT - 1) {
+            list[n] = obj;
+            list[n + 1] = NULL;
+        } else if (!encounters_button && at >= 0) {
+            for (int i = at; i < n; i++) list[i] = list[i + 1];
+            *(int32_t *) (obj + 24) = 0;
+            obj[0x3c] = obj[0x44] = 0; // discard a held touch, without changing the value
+        }
+    }
+}
+
 // UI_display(UIObject ** list): draws a layout every frame
 static void ui_display(void ** list) {
-    sync_extras(filter_layout(list));
+    int f = filter_layout(list);
+    sync_encounters(f);
+    sync_extras(f);
     SO_CONTINUE_HELD(int, display_hook, list);
 }
 
@@ -277,7 +320,8 @@ static void log_toggles(void ** list, const char * when) {
 // UI_onTouchBegan(int id, float x, float y), x/y in surface pixels
 static void ui_touch_began(int id, float x, float y) {
     void ** list = ui_current ? *ui_current : NULL;
-    filter_layout(list);
+    sync_encounters(filter_layout(list));
+    int before = ff7_ui_encounters_get();
     int log = touches_logged < TOUCH_LOG_LIMIT;
     if (log) {
         touches_logged++;
@@ -296,6 +340,7 @@ static void ui_touch_began(int id, float x, float y) {
         log_toggles(list, "before");
     }
     call_original_touch_began(id, x, y);
+    if (ff7_ui_encounters_get() != before) port_menu_save_settings();
     if (log) log_toggles(list, "after ");
 }
 
@@ -333,6 +378,10 @@ void ff7_ui_patch(void) {
         touch_mode_flag = (uint8_t *) (so_mod.text_base + TOUCH_MODE_FLAG);
     else
         l_warn("ff7_ui: unexpected .so layout, the d-pad mode button stays");
+    if (touch_mode_flag)
+        no_encounters_flag = (uint8_t *) (so_mod.text_base + NO_ENCOUNTERS_FLAG);
+    else
+        l_warn("ff7_ui: encounters control unavailable (unexpected .so layout)");
 
     uintptr_t began = so_symbol(&so_mod, "UI_onTouchBegan");
     uintptr_t display = so_symbol(&so_mod, "_Z10UI_displayPP8UIObject");
