@@ -252,7 +252,7 @@ static const char * help_text(int item, int line) {
         { ITEM_WORLD_SPEED,  { "FASTER ON FOOT ON THE WORLD MAP", "VEHICLES ARE UNCHANGED" } },
         { ITEM_AUTO_SKIP,    { "PRESSES OK FOR YOU IN FIELD DIALOGS", "QUESTIONS ARE LEFT TO YOU" } },
         { ITEM_LANGUAGE,     { "LANGUAGE OF THE GAME TEXT. APPLIES", "AT THE NEXT START (* = NOT YET IN USE)" } },
-        { ITEM_ENCOUNTERS,   { "TURNS RANDOM BATTLES ON OR OFF", "SAME SETTING AS THE TOUCH BUTTON" } },
+        { ITEM_ENCOUNTERS,   { "RANDOM BATTLE RATE: OFF, 1X, 2X, 4X", "TOUCH BUTTON TOGGLES OFF / LAST RATE" } },
         { ITEM_ENCOUNTERS_BUTTON, { "SHOWS OR HIDES THE TOUCH BUTTON", "DOES NOT CHANGE RANDOM ENCOUNTERS" } },
         { ITEM_WIDESCREEN,   { "16:9 SHOWS MORE OF FIELDS, BATTLES AND", "WORLD MAP. MENUS/MOVIES STAY 4:3" } },
     };
@@ -477,7 +477,7 @@ static void load_cheats(void) {
         else if (!strcmp(key, "speed_field")) speed_field = clamp_factor(v);
         else if (!strcmp(key, "speed_world")) speed_world = clamp_factor(v);
         else if (!strcmp(key, "auto_skip")) auto_skip = v != 0;
-        else if (!strcmp(key, "encounters")) encounters_saved = v != 0;
+        else if (!strcmp(key, "encounters")) encounters_saved = (v == 0 || v == 1 || v == 2 || v == 4) ? v : 1;
         else if (!strcmp(key, "encounters_button")) encounters_button_saved = v != 0;
         else if (!strcmp(key, "widescreen")) widescreen = v != 0;
         else if (!strcmp(key, "language")) language = v >= 0 && v < NUM_LANGUAGES ? v : -1;
@@ -1014,6 +1014,16 @@ int port_menu_is_open(void) {
 
 static int step(int v, int n, int dir) { return (v + (dir < 0 ? n - 1 : 1)) % n; }
 
+static const char * encounter_rate_name(int rate) {
+    switch (rate) {
+        case 0: return "0 (OFF)";
+        case 1: return "1 (NORMAL)";
+        case 2: return "2X";
+        case 4: return "4X";
+        default: return "N/A";
+    }
+}
+
 static const char * factor_name(int f) {
     static const char * const names[] = { "NORMAL", "2X", "3X", "4X" };
     return names[clamp_factor(f) - 1];
@@ -1071,8 +1081,14 @@ static void change(int item, int dir) {
                 set_message("ENCOUNTERS CONTROL UNAVAILABLE");
                 return;
             }
-            ff7_ui_encounters_set(!ff7_ui_encounters_get());
-            snprintf(m, sizeof(m), "RANDOM ENCOUNTERS: %s", ff7_ui_encounters_get() ? "ON" : "OFF");
+            {
+                static const int rates[] = { 0, 1, 2, 4 };
+                int current = ff7_ui_encounters_get();
+                int index = current == 4 ? 3 : current;
+                int count = ff7_ui_encounters_rate_supported() ? 4 : 2;
+                ff7_ui_encounters_set(rates[step(index, count, dir)]);
+            }
+            snprintf(m, sizeof(m), "ENCOUNTER RATE: %s", encounter_rate_name(ff7_ui_encounters_get()));
             break;
         case ITEM_ENCOUNTERS_BUTTON:
             ff7_ui_encounters_button_set(!ff7_ui_encounters_button_get());
@@ -1453,8 +1469,7 @@ void port_menu_draw(void) {
             else if (i == ITEM_AUTO_SKIP)
                 snprintf(line, sizeof(line), "AUTO SKIP DIALOGS: %s", auto_skip ? "YES" : "NO");
             else if (i == ITEM_ENCOUNTERS)
-                snprintf(line, sizeof(line), "RANDOM ENCOUNTERS < %s >", ff7_ui_encounters_get() < 0 ? "N/A" :
-                         ff7_ui_encounters_get() ? "ON" : "OFF");
+                snprintf(line, sizeof(line), "ENCOUNTER RATE < %s >", encounter_rate_name(ff7_ui_encounters_get()));
             else if (i == ITEM_ENCOUNTERS_BUTTON)
                 snprintf(line, sizeof(line), "ENCOUNTERS BUTTON < %s >", ff7_ui_encounters_button_get() ? "SHOW" : "HIDE");
             else if (i == ITEM_WIDESCREEN)

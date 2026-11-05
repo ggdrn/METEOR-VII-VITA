@@ -17,7 +17,7 @@ stubs = r'''
 #define l_info(...) ((void)0)
 #define l_warn(...) ((void)0)
 #define l_error(...) ((void)0)
-#define SO_CONTINUE_HELD(...) ((void)0)
+#define SO_CONTINUE_HELD(type, h, ...) fake_original(&(h))
 #define sceClibMemcpy memcpy
 typedef struct { uintptr_t addr, thumb_addr; unsigned char orig_instr[8], patch_instr[8]; } so_hook;
 typedef struct { uintptr_t text_base; } so_module;
@@ -27,6 +27,8 @@ static void profiler_hold(void) {}
 static void profiler_release(void) {}
 static uintptr_t so_symbol(so_module *m, const char *s) { return 0; }
 static so_hook hook_addr(uintptr_t a, uintptr_t b) { return (so_hook){0}; }
+static void fake_original(so_hook *h);
+static volatile uint32_t * ff7_x86_regs(void) { return NULL; }
 void port_menu_save_settings(void);
 #define CHEATS_PATH "cheats.txt"
 #define NUM_LANGUAGES 5
@@ -35,6 +37,19 @@ static int speed_field=1, speed_world=1, auto_skip, widescreen, language=-1;
 static int encounters_saved=1, encounters_button_saved=1;
 '''
 tests = r'''
+static int expected_field_rate, original_calls;
+static void fake_original(so_hook *h) {
+    original_calls++;
+    if (h == &field_encounter_hook) {
+        assert(encounter_memmap[0xdbc][0xad9] == expected_field_rate);
+        // Adjacent preemptive and battle-type probabilities must stay intact.
+        assert(encounter_memmap[0xdbc][0xad8] == 16);
+        assert(encounter_memmap[0xdbc][0xada] == 7);
+    } else if (h == &world_rate_hook) {
+        unsigned rate = encounter_memmap[0xdbc][0xad9];
+        encounter_regs[0] = rate * (rate > 16 ? 2 : 1);
+    }
+}
 typedef union { uintptr_t align; uint8_t bytes[96]; } object;
 static void init(object *o, int cls, uint8_t *flag) {
     memset(o, 0, sizeof(*o));
@@ -59,6 +74,39 @@ int main(void) {
     assert(ff7_ui_encounters_get() == -1);
     ff7_ui_encounters_set(0); // unsupported binary: safe no-op
     no_encounters_flag=&native; touch_mode_flag=&dpad_mode;
+    ff7_ui_encounters_set(2); // only ON/OFF if rate hooks are unavailable
+    assert(ff7_ui_encounters_get()==1);
+    encounter_rate_ready=1;
+    static uint8_t page[4096];
+    static uint8_t *pages[0xdbd];
+    static uint32_t regs[8];
+    pages[0xdbc]=page; encounter_memmap=pages; encounter_regs=regs;
+    page[0xad8]=16; page[0xada]=7;
+    const int rates[]={0,1,2,4};
+    const int base_rates[]={0,1,8,16,24,32,64,128,255};
+    for (unsigned b=0;b<sizeof(base_rates)/sizeof(base_rates[0]);b++) {
+        unsigned base=base_rates[b];
+        page[0xad9]=base;
+        for (unsigned i=0;i<4;i++) {
+            int rate=rates[i];
+            ff7_ui_encounters_set(rate);
+            assert(ff7_ui_encounters_get()==rate);
+            unsigned scaled=base*rate;
+            expected_field_rate=scaled>255?255:scaled;
+            for (int repeat=0;repeat<3;repeat++) {
+                field_encounter();
+                assert(page[0xad9]==base); // no accumulation or save contamination
+                world_encounter_rate();
+                assert(regs[0]==base*(base>16?2:1)*rate);
+                assert(page[0xad9]==base);
+            }
+        }
+    }
+    assert(original_calls==216);
+    ff7_ui_encounters_set(2);
+    ff7_ui_encounters_set(3); ff7_ui_encounters_set(-1); ff7_ui_encounters_set(100);
+    assert(ff7_ui_encounters_get()==2);
+    ff7_ui_encounters_set(1);
     vptrs[CLS_TOGGLE]=9; vptrs[CLS_DPAD]=1; vptrs[CLS_BUTTON_MAPPED]=8;
     vptrs[2]=2;
     object encounter, mode, other, dpad, screen, l2;
@@ -123,7 +171,21 @@ int main(void) {
     ui_touch_began(2, 0, 0); assert(native==1 && touch_list[0]==&touch_obj);
     settings_loaded=0; load_cheats();
     assert(encounters_saved==0 && encounters_button_saved==1);
-    puts("encounters: UI visibility, touch cleanup, shared layouts, native state and settings round-trip OK");
+    // Each supported multiplier survives a settings round-trip and touch OFF/ON.
+    for (int i=1;i<4;i++) {
+        ff7_ui_encounters_set(rates[i]);
+        port_menu_save_settings(); settings_loaded=0; load_cheats();
+        assert(encounters_saved==rates[i]);
+        ff7_ui_encounters_set(1); ff7_ui_encounters_set(encounters_saved);
+        assert(ff7_ui_encounters_get()==rates[i]);
+        ui_touch_began(3,0,0); assert(ff7_ui_encounters_get()==0);
+        ui_touch_began(4,0,0); assert(ff7_ui_encounters_get()==rates[i]);
+        settings_loaded=0; load_cheats(); assert(encounters_saved==rates[i]);
+    }
+    FILE *invalid=fopen(CHEATS_PATH,"w"); assert(invalid);
+    fputs("encounters 3\n",invalid); fclose(invalid);
+    settings_loaded=0; load_cheats(); assert(encounters_saved==1);
+    puts("encounters: UI visibility, touch cleanup, shared layouts, native state, field/world multipliers and settings round-trip OK");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='ff7-encounters-') as td:

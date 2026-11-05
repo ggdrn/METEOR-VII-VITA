@@ -17,9 +17,13 @@ void ff7_ui_patch(void);
  */
 unsigned ff7_ui_touch_buttons(void);
 
-/** Native Android flag: 1 ON, 0 OFF, -1 if the .so layout is unsupported. */
+/** Rate: 0 OFF, 1 NORMAL, 2, 4; -1 if the .so layout is unsupported. */
 int ff7_ui_encounters_get(void);
-void ff7_ui_encounters_set(int on);
+void ff7_ui_encounters_set(int rate);
+/** Whether both the field and world-map multiplier hooks are available. */
+int ff7_ui_encounters_rate_supported(void);
+/** Main-thread heartbeat diagnostics: selected factor and actual hook calls/rates. */
+void ff7_ui_encounters_report(void);
 
 /** Visibility only; removing the touch target does not change encounters. */
 int ff7_ui_encounters_button_get(void);

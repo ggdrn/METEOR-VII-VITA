@@ -34,6 +34,7 @@
  */
 
 #include "ff7_ui.h"
+#include "ff7_anim.h"
 #include "port_menu.h"
 
 #include "ff7_unhook.h"
@@ -82,13 +83,85 @@ static int touches_logged;
 static uint8_t * touch_mode_flag;
 static volatile uint8_t * no_encounters_flag;
 static volatile int encounters_button = 1;
+// The Android touch button remains ON/OFF; turning it back on resumes this rate.
+static volatile int encounter_multiplier = 1;
+static int encounter_rate_ready;
+static so_hook field_encounter_hook, world_rate_hook;
+static uint8_t * const * encounter_memmap;
+static volatile uint32_t * encounter_regs;
+static volatile uint32_t field_encounter_calls, world_encounter_calls;
+static volatile unsigned field_rate_before, field_rate_after, world_rate_before, world_rate_after;
+
+int ff7_ui_encounters_rate_supported(void) { return encounter_rate_ready; }
 
 int ff7_ui_encounters_get(void) {
-    return no_encounters_flag ? !*no_encounters_flag : -1;
+    return no_encounters_flag ? (*no_encounters_flag ? 0 : encounter_multiplier) : -1;
 }
 
-void ff7_ui_encounters_set(int on) {
-    if (no_encounters_flag) *no_encounters_flag = !on;
+void ff7_ui_encounters_set(int rate) {
+    if (!no_encounters_flag || (rate != 0 && rate != 1 && rate != 2 && rate != 4)) return;
+    if (rate > 1 && !encounter_rate_ready) return;
+    if (rate) encounter_multiplier = rate;
+    *no_encounters_flag = rate == 0;
+    l_info("encounters: selected %dx (touch resume %dx)", rate, encounter_multiplier);
+}
+
+// The field's random encounter check uses byte 0xDBCAD9 as a probability
+// multiplier (16 = normal). Scope the change to the check so materia/menu
+// recalculation and UI_frame_refresh always see the original value.
+static void field_encounter(void) {
+    uint8_t * page = encounter_memmap[0xdbc];
+    uint8_t * rate = page ? page + 0xad9 : NULL;
+    uint8_t saved = rate ? *rate : 0;
+    field_encounter_calls++;
+    field_rate_before = saved;
+    int factor = ff7_ui_encounters_get();
+    if (rate && factor >= 0) {
+        unsigned scaled = saved * (unsigned) factor;
+        *rate = scaled > 255 ? 255 : scaled;
+    }
+    field_rate_after = rate ? *rate : 0;
+    SO_CONTINUE_HELD(int, field_encounter_hook);
+    if (rate) *rate = saved;
+}
+
+// World-map 0x767C55 returns its effective rate in emulated EAX. Scale AFTER
+// its native Enemy Lure/Away calculation (values above 16 are doubled there).
+static void world_encounter_rate(void) {
+    SO_CONTINUE_HELD(int, world_rate_hook);
+    world_encounter_calls++;
+    world_rate_before = encounter_regs[0];
+    int factor = ff7_ui_encounters_get();
+    if (factor >= 0) encounter_regs[0] *= (unsigned) factor;
+    world_rate_after = encounter_regs[0];
+}
+
+void ff7_ui_encounters_report(void) {
+    static uint32_t previous_field, previous_world;
+    uint32_t field = field_encounter_calls, world = world_encounter_calls;
+    l_info("encounters: selected %dx, checks since report: field %u (rate %u -> %u), world %u (rate %u -> %u)",
+           ff7_ui_encounters_get(), field - previous_field, field_rate_before, field_rate_after,
+           world - previous_world, world_rate_before, world_rate_after);
+    previous_field = field;
+    previous_world = world;
+}
+
+static void patch_encounter_rate(void) {
+    uintptr_t field = so_symbol(&so_mod, "_Z15func_0x0060b2c6v");
+    uintptr_t world = so_symbol(&so_mod, "_Z15func_0x00767c55v");
+    encounter_memmap = (uint8_t * const *) so_symbol(&so_mod, "MEMMAP");
+    encounter_regs = ff7_x86_regs();
+    // Android 1.0.29: check both entries before installing either hook.
+    if (!no_encounters_flag || !field || !world || !encounter_memmap || !encounter_regs ||
+        *(const uint32_t *)(field & ~(uintptr_t)1) != 0x4ff8e92d ||
+        *(const uint16_t *)(world & ~(uintptr_t)1) != 0xb570) {
+        l_warn("ff7_ui: encounter multipliers unavailable (unexpected .so)");
+        return;
+    }
+    field_encounter_hook = hook_addr(field, (uintptr_t) &field_encounter);
+    world_rate_hook = hook_addr(world, (uintptr_t) &world_encounter_rate);
+    encounter_rate_ready = 1;
+    l_info("ff7_ui: field and world encounter rate multipliers enabled");
 }
 
 int ff7_ui_encounters_button_get(void) { return encounters_button; }
@@ -382,6 +455,8 @@ void ff7_ui_patch(void) {
         no_encounters_flag = (uint8_t *) (so_mod.text_base + NO_ENCOUNTERS_FLAG);
     else
         l_warn("ff7_ui: encounters control unavailable (unexpected .so layout)");
+
+    patch_encounter_rate();
 
     uintptr_t began = so_symbol(&so_mod, "UI_onTouchBegan");
     uintptr_t display = so_symbol(&so_mod, "_Z10UI_displayPP8UIObject");

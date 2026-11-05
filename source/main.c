@@ -277,6 +277,7 @@ int main() {
             perf_report(frames * 1000000.0 / (double) (now - heartbeat_us), cpu_last_pct("game"));
             profiler_report(); // no-op unless started (at boot or from the port menu)
             ff7_texture_report((now - heartbeat_us) / 1000000.0);
+            ff7_ui_encounters_report();
             ff7_anim_report((now - heartbeat_us) / 1000000.0);
             ff7_lzss_report((now - heartbeat_us) / 1000000.0);
             ff7_swirl_report((now - heartbeat_us) / 1000000.0);
