@@ -17,11 +17,11 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 set(VITA_APP_NAME "FINAL FANTASY VII")
 set(VITA_TITLEID "FFSQ00007")
 set(VITA_VPKNAME "ff7_vita")
-set(VITA_VERSION "01.10") # SFO APP_VER (must be ##.##)
+set(VITA_VERSION "01.20") # SFO APP_VER (must be ##.##)
 
 # Port version: bump the last field on every build handed out for testing
 # (v0.00.01, v0.00.02, ... it may go past 100). The VPK lands in build/VPK/.
-set(PORT_VERSION "1.1.0")
+set(PORT_VERSION "1.2.0")
 add_definitions(-DPORT_VERSION="v${PORT_VERSION}")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
