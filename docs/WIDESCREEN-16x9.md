@@ -218,6 +218,11 @@ Código em `source/ff7_wide.c`, com ganchos em `ff7_screen.c`,
 ### Como ligar
 
 Menu do port (L + R + Start) → aba **GAMEPLAY** → `SCREEN < 4:3 / 16:9 >`.
+
+Desde a v1.3.0, `SIDE BORDERS < GRADIENT / BLACK >` troca as bordas laterais
+do compositor final. `BLACK` vale para toda apresentação 4:3, inclusive menus
+e vídeos mostrados em 4:3 quando `SCREEN` está em 16:9. A escolha é salva como
+`borders_black 0/1` em `cheats.txt`; o padrão permanece `GRADIENT`.
 Vale na hora (o jogo aplica na próxima área de desenho) e fica salvo em
 `cheats.txt` (`widescreen 1`). Desligado por padrão.
 

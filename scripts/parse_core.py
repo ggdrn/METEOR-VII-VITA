@@ -13,11 +13,14 @@ notes={}
 for i in range(e_phnum):
     t,off,va,pa,fs,ms,fl,al=struct.unpack_from('<8I',d,e_phoff+32*i)
     if t==4:
-        p=off
-        while p<off+fs:
-            nsz,dsz,typ=struct.unpack_from('<3I',d,p); name=d[p+12:p+12+nsz].rstrip(b'\0').decode()
-            notes[name]=d[p+12+((nsz+3)&~3):p+12+((nsz+3)&~3)+dsz]
-            p+=12+((nsz+3)&~3)+((dsz+3)&~3)
+        p=off; end=min(off+fs,len(d))
+        while p+12<=end:
+            nsz,dsz,typ=struct.unpack_from('<3I',d,p)
+            desc=p+12+((nsz+3)&~3); nxt=desc+((dsz+3)&~3)
+            if desc>end or nxt>end: break # .psp2dmp.tmp may be incomplete
+            name=d[p+12:p+12+nsz].rstrip(b'\0').decode(errors='replace')
+            notes[name]=d[desc:desc+dsz]
+            p=nxt
 ti=notes['THREAD_INFO']
 unk,num=struct.unpack_from('<II',ti,0); p=8
 threads={}
@@ -36,5 +39,6 @@ for i in range(num):
     size=struct.unpack_from('<I',tr,p)[0]; e=tr[p:p+size]
     uid=struct.unpack_from('<I',e,4)[0]
     regs=struct.unpack_from('<17I',e,8)
-    print('%08x %-28s pc %08x lr %08x sp %08x cpsr %08x' % (uid, threads.get(uid,'?'), regs[15], regs[14], regs[13], regs[16]))
+    print('%08x %-28s pc %08x lr %08x sp %08x cpsr %08x r0-r3 %08x %08x %08x %08x' %
+          (uid, threads.get(uid,'?'), regs[15], regs[14], regs[13], regs[16], *regs[:4]))
     p+=size

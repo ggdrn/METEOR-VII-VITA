@@ -112,9 +112,19 @@ static so_hook quad_tex_hook, border_hook, viewport_hook;
 static uint8_t ** cur_vertex;
 static uintptr_t base;
 static int zoom_enabled, zoomed, stretch, quad_installed;
+static volatile int borders_black;
 
 int ff7_screen_quad_installed(void) { return quad_installed; }
 int ff7_screen_zoom_enabled(void) { return zoom_enabled; }
+void ff7_screen_borders_set(int black) {
+    black = black != 0;
+    if (borders_black == black) return;
+    borders_black = black;
+    l_info("ff7_screen: side borders %s", black ? "solid black" : "gradient");
+}
+int ff7_screen_borders_get(void) { return borders_black; }
+
+static inline int border_color(int component) { return borders_black ? 0 : component; }
 // Lines the picture fills, per mode: set by the game thread, read by the main thread
 static volatile uint32_t field_lines = FIELD_LINES;
 static uint32_t logged_lines, logged_shown;
@@ -230,9 +240,12 @@ static int quad_tex_hooked(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
 }
 
 static int border_hooked(int r0, int g0, int b0, int r1, int g1, int b1) {
-    int r = SO_CONTINUE_HELD(int, border_hook, r0, g0, b0, r1, g1, b1);
     uintptr_t ret = (uintptr_t) __builtin_return_address(0);
-    if (!zoomed || zoom_left == zoom_right || (ret != base + RET_BORDER_LEFT && ret != base + RET_BORDER_RIGHT))
+    int side = ret == base + RET_BORDER_LEFT || ret == base + RET_BORDER_RIGHT;
+    int r = side ? SO_CONTINUE_HELD(int, border_hook, border_color(r0), border_color(g0), border_color(b0),
+                                    border_color(r1), border_color(g1), border_color(b1))
+                 : SO_CONTINUE_HELD(int, border_hook, r0, g0, b0, r1, g1, b1);
+    if (!zoomed || zoom_left == zoom_right || !side)
         return r;
 
     // Pull the inner edge of the border out to the zoomed frame's edge

@@ -10,8 +10,8 @@
  * each circle is only touched if its outline is found where expected.
  *
  * Text: dialogs and world map help say "(A)", "(B)", "(X)", "(Y)" as plain
- * text in the menu font, after a color code ({FE}{D6}(A){FE}{D9}). The font
- * has no symbols, so (ff7_buttons_core.h):
+ * text in the menu font, with or without a preceding color code. The font has
+ * no symbols, so (ff7_buttons_core.h):
  *  - font: when usfont_a_h/_l.tex goes through convert_image_data, the cells
  *    of characters 0x96-0x99 (unused math symbols) are redrawn with the
  *    four symbols, in the font's own indices (checked by hashing the
@@ -20,7 +20,7 @@
  *    from window.bin) get the symbols' advance;
  *  - strings: field files, right after the LZSS decompressor (0x6305C0)
  *    unpacks them, and the world map "mes" table (loaded by 0x74E1E9 into
- *    0xE36120) have {FE}{Dx}(A) replaced by {FE}{Dy}<symbol>, in place,
+ *    0xE36120) have colored and uncolored button labels replaced in place,
  *    with the symbol's color. Only once the font has the symbols.
  *
  * DATA_PATH "psbuttons_off.txt" keeps everything original.
@@ -31,6 +31,8 @@
 
 #include "ff7_buttons.h"
 #include "ff7_buttons_core.h"
+#include "ff7_anim.h"
+#include "ff7_unhook.h"
 
 #include "utils/logger.h"
 #include "utils/utils.h"
@@ -46,11 +48,15 @@ extern so_module so_mod;
 
 #define SYM_MK_ADDRESS "mk_address"
 #define SYM_WM_INIT    "_Z15func_0x0074e1e9v"
+#define SYM_FIELD_TEXT "_Z15func_0x006e706dv"
 #define WM_INIT_OFFSET 0x763ae4
+#define FIELD_TEXT_OFFSET 0x411468
+#define FIELD_TEXT_PROLOGUE 0x4ff0e92du
 
 #define WIDTH_TABLE_PTR 0xdb958c // u32: x86 address of the font width table
 #define WM_MES          0xe36120 // world map messages: u16 count, u16 offsets[], strings
 #define WM_MES_SIZE     0x1000   // as loaded by 0x74E1E9
+#define MAX_X86_PTR     0x10000000u
 
 // FNV-1a of the cells of 0x96..0x99 in the original fonts (v1.0.29, every menu_*.lgp)
 #define FONT_HASH_H 0x47852591u // usfont_a_h.tex
@@ -66,9 +72,14 @@ static int enabled;      // atlas and text (no psbuttons_off.txt)
 static int text_enabled; // text: needs mk_address
 static mk_address_fn mk_address;
 static so_hook wm_init_hook;
+static so_hook field_text_hook;
+static volatile uint32_t * x86_regs;
 static uint32_t painted_hash; // cells hash once the symbols are drawn
-static int font_ready;        // the font has the symbols: strings may use them
+static volatile int font_ready; // set by the texture thread, read by the game thread
 static unsigned fields_patched, labels_patched;
+static unsigned lzss_seen;
+
+enum { X86_ESP = 4 };
 
 // Translation cache for one stream of x86 addresses (pages need not be contiguous)
 typedef struct {
@@ -134,6 +145,7 @@ void ff7_buttons_font(const void * th) {
             memcpy(xptr(&c, image + (y0 + y) * 256 + x0), cell[y], PSB_CELL);
     }
     painted_hash = cells_hash(image);
+    __sync_synchronize();
     font_ready = 1;
     l_info("ff7_buttons: PlayStation symbols drawn in the %s font", h == FONT_HASH_H ? "_h" : "_l");
 }
@@ -182,24 +194,124 @@ static int patch_table(uint32_t table, uint32_t size) {
     return n;
 }
 
-void ff7_buttons_lzss(uint32_t dst) {
-    if (!text_enabled || !font_ready) return;
+/*
+ * Final field-text path. func_0x006e706d's fourth x86 argument is the text
+ * pointer (at ESP + 16 before its prologue); the function starts parsing it
+ * immediately. The source is changed only for the duration of that synchronous
+ * call, on the game thread, then restored. This avoids racing field transitions
+ * or leaving modified bytes in allocations the game later frees/reuses.
+ */
+static void field_text_render(void) {
+    static uint8_t original[MAX_STRING], replacement[MAX_STRING]; // game thread; hook is held
+    uint32_t ptr = 0, len = 0;
+    int n = 0;
+    if (text_enabled && font_ready && x86_regs) {
+        xcache c = { 0xffffffff, NULL };
+        uint32_t esp = x86_regs[X86_ESP];
+        ptr = rd32(&c, esp + 16);
+        if (ptr && ptr < MAX_X86_PTR) {
+            while (len < MAX_STRING) {
+                original[len] = replacement[len] = *xptr(&c, ptr + len);
+                if (original[len++] == FF7_END) break;
+            }
+            if (len == MAX_STRING && original[len - 1] != FF7_END) len = 0;
+            if (len) n = psb_replace(replacement, len);
+            if (n > 0) {
+                for (uint32_t i = 0; i < len; i++) *xptr(&c, ptr + i) = replacement[i];
+                patch_widths();
+                labels_patched += n;
+                l_info("ff7_buttons: renderer text at %08x: %d button labels -> PlayStation symbols",
+                       ptr, n);
+            }
+        }
+    }
+    SO_CONTINUE_HELD(int, field_text_hook);
+    if (n > 0) {
+        xcache c = { 0xffffffff, NULL };
+        for (uint32_t i = 0; i < len; i++) *xptr(&c, ptr + i) = original[i];
+    }
+}
+
+void ff7_buttons_lzss(uint32_t dst, uint32_t written) {
+    unsigned call = ++lzss_seen;
+    if (!text_enabled) {
+        l_info("ff7_buttons: LZSS #%u skipped: text patch disabled", call);
+        return;
+    }
+    if (!font_ready) {
+        l_info("ff7_buttons: LZSS #%u skipped: PlayStation font not ready (%u bytes at %08x)",
+               call, written, dst);
+        return;
+    }
+    __sync_synchronize();
+
+    if (written < FIELD_SECTION0 + 12) return;
     xcache c = { 0xffffffff, NULL };
+    uint32_t h0 = rd16(&c, dst);
+    uint32_t h2 = rd32(&c, dst + 2);
+    uint32_t h6 = rd32(&c, dst + 6);
+    l_info("ff7_buttons: LZSS #%u: %u bytes at %08x, header %04x/%08x/%08x",
+           call, written, dst, h0, h2, h6);
+
     // Field file: u16 0, u32 9 sections, u32 offsets (the first at 0x2a);
     // section 0 = u32 size + script: u16 version, u8, u8, u16 strings table offset
-    if (rd16(&c, dst) != 0 || rd32(&c, dst + 2) != FIELD_SECTIONS || rd32(&c, dst + 6) != FIELD_SECTION0)
+    if (h0 != 0 || h2 != FIELD_SECTIONS || h6 != FIELD_SECTION0) {
+        // Some callers may leave a short length/padding prefix before the
+        // field. Report an exact header nearby; do not patch it until a real
+        // device log confirms the layout.
+        uint32_t limit = written < 256 ? written : 256;
+        uint32_t found = limit;
+        for (uint32_t off = 1; off + 10 <= limit; off++) {
+            if (rd16(&c, dst + off) == 0
+                && rd32(&c, dst + off + 2) == FIELD_SECTIONS
+                && rd32(&c, dst + off + 6) == FIELD_SECTION0) {
+                found = off;
+                break;
+            }
+        }
+        if (found < limit)
+            l_info("ff7_buttons: LZSS #%u rejected: field header found at +%u", call, found);
+        else
+            l_info("ff7_buttons: LZSS #%u rejected: no field header in first %u bytes", call, limit);
         return;
-    uint32_t size = rd32(&c, dst + FIELD_SECTION0);
+    }
+
+    // The stored length can cover only the script, with the dialog table
+    // immediately following it (stock Android). The next section's offset
+    // bounds BOTH. Mods may include dialogs in the stored length instead.
+    uint32_t next = rd32(&c, dst + 10);
+    if (next > written || next < FIELD_SECTION0 + 12) {
+        l_warn("ff7_buttons: LZSS #%u rejected: invalid section boundary %u/%u",
+               call, next, written);
+        return;
+    }
+    uint32_t stored_size = rd32(&c, dst + FIELD_SECTION0);
+    uint32_t size = next - FIELD_SECTION0 - 4;
     uint32_t script = dst + FIELD_SECTION0 + 4;
-    if (size < 8 || size > 0x100000 || rd16(&c, script) != 0x0502) return;
+    uint32_t version = rd16(&c, script);
+    if (stored_size < 8 || stored_size > size || size > 0x100000) {
+        l_warn("ff7_buttons: LZSS #%u rejected: script size %u outside section %u",
+               call, stored_size, size);
+        return;
+    }
+    if (version != 0x0502) {
+        l_info("ff7_buttons: LZSS #%u rejected: script version %04x (section size %u)",
+               call, version, size);
+        return;
+    }
     uint32_t strings = rd16(&c, script + 4);
-    if (strings >= size) return;
+    if (strings < 8 || strings >= size) {
+        l_info("ff7_buttons: LZSS #%u: no dialog table within section (%u/%u)",
+               call, strings, size);
+        return;
+    }
 
     patch_widths();
     int n = patch_table(script + strings, size - strings);
     fields_patched++;
     labels_patched += n;
-    if (n) l_info("ff7_buttons: field text: %d button labels -> PlayStation symbols", n);
+    l_info("ff7_buttons: LZSS #%u field text: %d button labels -> PlayStation symbols "
+           "(section %u, strings +%u)", call, n, size, strings);
 }
 
 static void wm_init(void) {
@@ -223,6 +335,15 @@ void ff7_buttons_patch(void) {
         return;
     }
     text_enabled = 1;
+    x86_regs = ff7_x86_regs();
+    uintptr_t text = so_symbol(&so_mod, SYM_FIELD_TEXT);
+    if (text && x86_regs && (text & ~1u) == so_mod.text_base + FIELD_TEXT_OFFSET
+        && *(uint32_t *) (text & ~1u) == FIELD_TEXT_PROLOGUE) {
+        field_text_hook = hook_addr(text, (uintptr_t) &field_text_render);
+        l_info("ff7_buttons: final field-text renderer hook installed");
+    } else {
+        l_warn("ff7_buttons: unexpected field-text renderer, final text hook disabled");
+    }
     uintptr_t wm = so_symbol(&so_mod, SYM_WM_INIT);
     if (wm && (wm & ~1) == so_mod.text_base + WM_INIT_OFFSET)
         wm_init_hook = hook_addr(wm, (uintptr_t) &wm_init);

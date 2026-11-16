@@ -38,9 +38,10 @@ Há dois lugares diferentes:
    as letras são apagadas e os símbolos desenhados por cima.
 2. **Texto** (falas, ajuda do mapa-múndi): os rótulos são **texto comum** na
    fonte de menu, quase sempre precedidos de um código de cor, imitando as
-   cores do controle de Xbox: `{FE}{D6}(A){FE}{D9}`. Não há ícone nem opcode
-   de botão (os opcodes 0xF6–0xF9 do texto de PSX não aparecem em nenhum
-   campo). Ocorrências na v1.0.29 (com a tradução pt-BR do usuário):
+   cores do controle de Xbox: `{FE}{D6}(A){FE}{D9}`. A tradução pt-BR usa
+   principalmente esse formato; os dados originais de outros idiomas também
+   podem usar os opcodes de botão do PSX `F6`–`F9` (○ △ □ ✕), que o Android
+   mostra como B/Y/X/A. Ocorrências na v1.0.29 com a tradução pt-BR do usuário:
    - `field/flevel.lgp`: 192 rótulos em 702 campos (190 com cor antes);
    - `wm/world_us.lgp`, arquivo `mes`: 8 rótulos (ajuda do buggy, Tiny
      Bronco, chocobo, submarino);
@@ -68,20 +69,31 @@ bytes (ponteiro em `0xDB958C`, preenchida a partir do `window.bin`): bits 0–4
    letras). Assim o símbolo pega qualquer cor de texto.
 2. **Larguras**: as entradas de `0x96`–`0x99` passam de 7/7/9/8 para 10
    (20 px). Só são alteradas se ainda tiverem o valor original.
-3. **Texto**: `{FE}{Dx}(A)` vira `{FE}{D3}✕` (e assim por diante), dentro da
+3. **Texto**: `{FE}{Dx}(B)` vira `{FE}{D3}✕` (e assim por diante), dentro da
    própria string, que encurta 2 bytes; os bytes liberados no fim viram `FF`.
-   É feito na origem, antes de qualquer janela usar o texto:
+   Desde a v1.2.1, o formato sem cor `(A)` também vira `{FE}{D4}○` no mesmo
+   espaço de 3 bytes. Isso cobre os textos ingleses e traduções que não usam o
+   código de cor antes do rótulo. Desde a v1.3.1, `F6`–`F9` são convertidos
+   diretamente nos glifos do Vita; isso cobre os campos originais sem depender
+   de uma tradução.
+   É feito tanto na origem quanto no texto efetivamente entregue à janela:
    - campos: logo depois de o descompressor LZSS (`0x6305C0`, nativo em
      `ff7_lzss.c`) descompactar um arquivo de campo (reconhecido pelo
      cabeçalho: `u16 0`, 9 seções, primeira em `0x2A`, script versão `0x0502`);
-     a tabela de strings da seção 0 é percorrida;
+     a tabela de strings da seção 0 é percorrida quando estiver embutida;
+   - desde a v1.3.5, a entrada do parser final de texto de campo (`0x6E706D`)
+     é interceptada. O quarto argumento x86 é o ponteiro exato que será
+     desenhado; isso cobre qualquer idioma e tutoriais/minigames que copiam o
+     texto. A alteração ocorre sincronamente na thread do jogo e os bytes
+     originais são restaurados assim que o parser termina, sem deixar escritas
+     nos blocos que uma transição de campo pode liberar/reutilizar;
    - mapa-múndi: gancho em `func_0x0074e1e9` (inicialização do mapa), que
      carrega `mes` em `0xE36120`; depois do original, a tabela é percorrida.
 
    A troca só acontece depois que a fonte recebeu os símbolos (ela é
    convertida no menu inicial, antes do primeiro campo). Se a fonte não for a
    esperada, o texto fica como no original — nunca aparece ∂ no lugar de (A).
-   Rótulos sem código de cor antes (2 textos de debug) não são trocados.
+   Textos de debug armazenados no executável não são percorridos por estes hooks.
 
 Outros nomes de botão (`[LB]`, `[RB]`, `[BACK]`, `[START]`, `[RS]`) continuam
 como texto; trocar `[BACK]` por `[SELECT]` aumentaria a string, o que a troca
@@ -94,7 +106,7 @@ Com a função ligada, o `logs.txt` mostra:
 ```
 ff7_buttons: PlayStation button symbols on (ux0:data/ffvii-vita/psbuttons_off.txt disables them)
 ff7_buttons: PlayStation symbols drawn in the _h font
-ff7_buttons: field text: 1 button labels -> PlayStation symbols
+ff7_buttons: renderer text at 02XXXXXX: 1 button labels -> PlayStation symbols
 ff7_buttons: world map text: 8 button labels -> PlayStation symbols
 ff7_buttons: button_jp_en.png: 7 PlayStation glyphs drawn
 ```
@@ -109,3 +121,29 @@ no Mac, com a memória x86 emulada em páginas de 4 KB espalhadas, contra o OBB
 v1.0.29: as 192 trocas em 12.952 strings de campo, a fonte pintada (só as 4
 células mudam) e nenhuma mudança fora da tabela de strings. Falta conferir
 no Vita (falas do Setor 1, ajuda do buggy no mapa-múndi).
+
+## Correção v1.3.6 — dados originais de Android
+
+O log da v1.3.5 dizia `strings offset equals section size` e pulava todos os
+campos. A comparação com o OBB original mostrou que o tamanho armazenado em
+`0x2A` pode cobrir só o script: a tabela de diálogos começa imediatamente
+após ele e termina antes da próxima seção. O limite passa a ser o segundo
+offset do cabeçalho, validado contra a quantidade de bytes descompactados.
+Isso também aceita mods que incluem os diálogos no tamanho armazenado.
+
+Os prompts originais analisados usam texto com **colchetes**, por exemplo
+`{FE}{D5}[A]{FE}{D9}`, não os parênteses da tradução. Eles seguem o mapeamento
+Android: `[A]` → ✕ azul, `[B]` → ○ vermelho, `[X]` → □ roxo, `[Y]` → △ verde.
+A troca ocupa os mesmos três bytes e preserva o reset de cor seguinte.
+O mapeamento antigo dos parênteses permanece para a tradução. Letras soltas,
+`[SAVE]`, `[L1]` e `[R1]` não são substituídos.
+
+O binário também contém um renderer japonês `_ex`, mas os formatos acima
+foram confirmados diretamente nas tabelas do OBB original. Não é necessário
+alterar esse renderer para corrigir estes prompts.
+
+Teste de regressão: `python3 scripts/test_buttons_fields.py original.obb mod.obb`.
+Ele executa as funções de patch extraídas do C real com páginas x86 separadas,
+cobre os dois formatos de tamanho, rejeita limites inválidos e verifica que
+nenhum byte fora da tabela de diálogos muda. Os testes não substituem a
+validação visual no Vita.

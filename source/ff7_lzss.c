@@ -178,7 +178,9 @@ static void lzss_native(void) {
 
     if (disabled) {
         SO_CONTINUE(int, lzss_hook);
-        ff7_buttons_lzss(dst);
+        // The original routine does not expose its output size. Diagnostics
+        // still record the call and header, but bounded scans are disabled.
+        ff7_buttons_lzss(dst, 0);
         return;
     }
 
@@ -203,7 +205,7 @@ static void lzss_native(void) {
                    selftest_left == 0 ? " (selftest finished)" : "");
         }
         free(o.host);
-        ff7_buttons_lzss(dst);
+        ff7_buttons_lzss(dst, r.written);
         return;
     }
 
@@ -213,7 +215,7 @@ static void lzss_native(void) {
     regs[EAX] = r.eax;
     regs[ECX] = r.ecx;
     regs[EDX] = r.edx;
-    ff7_buttons_lzss(dst); // field text: PlayStation symbols
+    ff7_buttons_lzss(dst, r.written); // field text: PlayStation symbols
     check_event();
     regs[ESP] = esp + 4; // ret
     time_us += sceKernelGetProcessTimeWide() - t0;

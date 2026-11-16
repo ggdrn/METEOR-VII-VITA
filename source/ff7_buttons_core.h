@@ -9,9 +9,15 @@
  * from the renderer, so a symbol drawn with these indices takes every color.
  * Characters 0x96-0x99 (math symbols no FF7 text uses) get the four symbols.
  *
- * Text: the Xbox labels are plain text, always after a color code:
- * {FE}{Dx}(A). They become {FE}{Dy}<symbol>, two bytes shorter, with the
- * PlayStation color of the symbol.
+ * Text: stock Android uses [A]/[B]/[X]/[Y], with A confirming and B
+ * cancelling. Translations use the legacy mapping described below.
+ * Most translations put the labels after a
+ * color code ({FE}{Dx}(A)); some, including English strings, use an uncolored
+ * (A), while other strings use a single colored letter ({FE}{Dx}A{FE}{D9}).
+ * Parenthesized colored labels become {FE}{Dy}<symbol>, two bytes shorter;
+ * uncolored labels become {FE}{Dy}<symbol> without changing length. Isolated
+ * colored letters keep their delimiters and replace the letter in place. All
+ * forms get the PlayStation color of the symbol.
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
@@ -37,8 +43,24 @@ enum { PSB_CROSS, PSB_CIRCLE, PSB_SQUARE, PSB_TRIANGLE };
 // FF7 text encoding: character = ASCII - 0x20
 #define FF7_LPAREN 0x08
 #define FF7_RPAREN 0x09
+#define FF7_LBRACKET 0x3B
+#define FF7_RBRACKET 0x3D
 #define FF7_COLOR  0xFE // followed by 0xD2..0xD9
 #define FF7_END    0xFF
+
+// Original PlayStation field-text opcodes. The Android/PC renderer displays
+// these as Xbox-position letters; replace them with our regular font glyphs.
+#define FF7_BUTTON_CIRCLE   0xF6
+#define FF7_BUTTON_TRIANGLE 0xF7
+#define FF7_BUTTON_SQUARE   0xF8
+#define FF7_BUTTON_CROSS    0xF9
+
+static const uint8_t psb_opcode_glyph[4] = {
+    PSB_FIRST_CHAR + PSB_CROSS,    // original Circle/OK -> Vita Cross/OK
+    PSB_FIRST_CHAR + PSB_TRIANGLE,
+    PSB_FIRST_CHAR + PSB_SQUARE,
+    PSB_FIRST_CHAR + PSB_CIRCLE,   // original Cross/Cancel -> Vita Circle/Cancel
+};
 
 /*
  * Label letter -> symbol, and the color code it gets (D3 blue, D4 red, D5
@@ -131,7 +153,8 @@ static inline uint32_t psb_fnv(uint32_t h, uint8_t b) {
 
 /**
  * Replaces the labels in one string, in place. `s` holds the string and its
- * FF7_END terminator within `len` bytes. Each replacement shortens it by two;
+ * FF7_END terminator within `len` bytes. Colored parenthesized labels shrink
+ * by two bytes; other supported forms preserve length;
  * the freed bytes at the end become FF7_END. Returns the labels replaced, or
  * -1 if there is no terminator (not a string).
  */
@@ -140,18 +163,74 @@ static inline int psb_replace(uint8_t * s, uint32_t len) {
     while (end < len && s[end] != FF7_END) end++;
     if (end == len) return -1;
     int n = 0;
-    for (uint32_t i = 0; i + 5 <= end; i++) {
-        if (s[i] != FF7_COLOR || s[i + 1] < 0xD2 || s[i + 1] > 0xD9) continue;
-        if (s[i + 2] != FF7_LPAREN || s[i + 4] != FF7_RPAREN) continue;
-        int k = 0;
-        while (k < PSB_COUNT && psb_map[k].letter != s[i + 3]) k++;
-        if (k == PSB_COUNT) continue;
-        s[i + 1] = psb_map[k].color;
-        s[i + 2] = psb_map[k].glyph;
-        for (uint32_t j = i + 3; j + 2 <= end; j++) s[j] = s[j + 2];
-        s[end - 1] = s[end] = FF7_END;
-        end -= 2;
-        n++;
+    for (uint32_t i = 0; i < end; i++) {
+        // Stock-language field data uses the original PSX button opcodes.
+        // They are one byte each, so conversion is safe and length preserving.
+        if (s[i] >= FF7_BUTTON_CIRCLE && s[i] <= FF7_BUTTON_CROSS) {
+            s[i] = psb_opcode_glyph[s[i] - FF7_BUTTON_CIRCLE];
+            n++;
+            continue;
+        }
+
+        // Stock Android labels use square brackets and Android's physical
+        // mapping (A confirms, B cancels), unlike the translated (B)/(A).
+        // Three bytes fit a color prefix plus glyph without resizing text.
+        // Never change ordinary A/B/X/Y letters.
+        if (i + 2 < end && s[i] == FF7_LBRACKET && s[i + 2] == FF7_RBRACKET) {
+            int k = 0;
+            while (k < PSB_COUNT && psb_map[k].letter != s[i + 1]) k++;
+            if (k < PSB_COUNT) {
+                if (k < 2) k ^= 1;
+                s[i] = FF7_COLOR;
+                s[i + 1] = psb_map[k].color;
+                s[i + 2] = psb_map[k].glyph;
+                i += 2;
+                n++;
+                continue;
+            }
+        }
+
+        // Colored form: {FE}{Dx}(A) -> {FE}{Dy}<symbol>, two bytes shorter.
+        if (i + 4 < end && s[i] == FF7_COLOR && s[i + 1] >= 0xD2 && s[i + 1] <= 0xD9
+            && s[i + 2] == FF7_LPAREN && s[i + 4] == FF7_RPAREN) {
+            int k = 0;
+            while (k < PSB_COUNT && psb_map[k].letter != s[i + 3]) k++;
+            if (k == PSB_COUNT) continue;
+            s[i + 1] = psb_map[k].color;
+            s[i + 2] = psb_map[k].glyph;
+            for (uint32_t j = i + 3; j + 2 <= end; j++) s[j] = s[j + 2];
+            s[end - 1] = s[end] = FF7_END;
+            end -= 2;
+            n++;
+            continue;
+        }
+
+        // Isolated colored form: {FE}{Dx}A{FE}{Dy}. The following color
+        // opcode delimits the one-letter label, so ordinary words are safe.
+        if (i + 4 < end && s[i] == FF7_COLOR && s[i + 1] >= 0xD2 && s[i + 1] <= 0xD9
+            && s[i + 3] == FF7_COLOR && s[i + 4] >= 0xD2 && s[i + 4] <= 0xD9) {
+            int k = 0;
+            while (k < PSB_COUNT && psb_map[k].letter != s[i + 2]) k++;
+            if (k == PSB_COUNT) continue;
+            s[i + 1] = psb_map[k].color;
+            s[i + 2] = psb_map[k].glyph;
+            i += 2;
+            n++;
+            continue;
+        }
+
+        // Uncolored form: (A) is exactly three bytes, so the color opcode and
+        // glyph fit in place. This is what makes the patch language agnostic.
+        if (i + 2 < end && s[i] == FF7_LPAREN && s[i + 2] == FF7_RPAREN) {
+            int k = 0;
+            while (k < PSB_COUNT && psb_map[k].letter != s[i + 1]) k++;
+            if (k == PSB_COUNT) continue;
+            s[i] = FF7_COLOR;
+            s[i + 1] = psb_map[k].color;
+            s[i + 2] = psb_map[k].glyph;
+            i += 2;
+            n++;
+        }
     }
     return n;
 }

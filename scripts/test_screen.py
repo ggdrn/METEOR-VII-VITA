@@ -57,6 +57,9 @@ static void fullscreen(int mode,float lines,float shown) {
     eq(zoom_left,0); eq(zoom_right,960); eq(zoom_center,480);
 }
 int main(void) {
+    borders_black=0; assert(border_color(77)==77);
+    ff7_screen_borders_set(1); assert(ff7_screen_borders_get()==1 && border_color(77)==0);
+    ff7_screen_borders_set(0); assert(ff7_screen_borders_get()==0 && border_color(77)==77);
     wide_fixture=1;
     fullscreen(1,448,448.0f*960/544); // available field art fills the display
     // Field dialogue must have the same physical scale in both axes,

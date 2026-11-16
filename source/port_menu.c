@@ -97,6 +97,8 @@
  *     recompiled code (scale_world_speed); vehicles are left as they are.
  *   - Screen 4:3 / 16:9 (ff7_wide.c, docs/WIDESCREEN-16x9.md), applied by
  *     the game thread at its next drawing area.
+ *   - Side borders gradient / black (ff7_screen.c), applied immediately to
+ *     every 4:3 presentation, including menus while 16:9 is selected.
  *
  * Drawing: one fixed-function vitaGL draw of colored rectangles (a 5x7
  * font drawn as runs of pixels), on the main thread with GL locked, right
@@ -116,6 +118,7 @@
 #include "ff7_unhook.h"
 #include "ff7_anim.h"
 #include "ff7_wide.h"
+#include "ff7_screen.h"
 #include "ff7_ui.h"
 
 #include "utils/logger.h"
@@ -203,12 +206,13 @@ static const minigame games[] = {
 #define NUM_GAMES ((int) (sizeof(games) / sizeof(games[0])))
 enum { ITEM_RECORD = NUM_GAMES, ITEM_GOTO, ITEM_WORLD, ITEM_SUMMONS, ITEM_AB_NATIVES, ITEM_AB_CAP, ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER,
        ITEM_TITLE, ITEM_CLOSE, ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR, ITEM_MATERIA_PICK,
-       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_WIDESCREEN, ITEM_ENCOUNTERS, ITEM_ENCOUNTERS_BUTTON };
+       ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_WIDESCREEN, ITEM_BORDERS,
+       ITEM_ENCOUNTERS, ITEM_ENCOUNTERS_BUTTON };
 
 // Tabs (L / R): the items of each, in order
 static const uint8_t tab_cheats[] = { ITEM_HPMP, ITEM_EXP, ITEM_GIL, ITEM_LEVEL, ITEM_SUMMON_PICK, ITEM_COLOR,
                                       ITEM_MATERIA_PICK, ITEM_SUMMONS, ITEM_CLOSE };
-static const uint8_t tab_gameplay[] = { ITEM_WIDESCREEN, ITEM_ENCOUNTERS, ITEM_ENCOUNTERS_BUTTON,
+static const uint8_t tab_gameplay[] = { ITEM_WIDESCREEN, ITEM_BORDERS, ITEM_ENCOUNTERS, ITEM_ENCOUNTERS_BUTTON,
                                         ITEM_FIELD_SPEED, ITEM_WORLD_SPEED, ITEM_AUTO_SKIP, ITEM_LANGUAGE, ITEM_TITLE, ITEM_CLOSE };
 static const uint8_t tab_debug[] = { 0, 1, 2, 3, 4, 5, 6, ITEM_RECORD, ITEM_GOTO, ITEM_WORLD, ITEM_AB_NATIVES, ITEM_AB_CAP,
                                      ITEM_AB_TEXCACHE, ITEM_AUTO, ITEM_PROFILER, ITEM_CLOSE };
@@ -255,6 +259,7 @@ static const char * help_text(int item, int line) {
         { ITEM_ENCOUNTERS,   { "RANDOM BATTLE RATE: OFF, 1X, 2X, 4X", "TOUCH BUTTON TOGGLES OFF / LAST RATE" } },
         { ITEM_ENCOUNTERS_BUTTON, { "SHOWS OR HIDES THE TOUCH BUTTON", "DOES NOT CHANGE RANDOM ENCOUNTERS" } },
         { ITEM_WIDESCREEN,   { "16:9 SHOWS MORE OF FIELDS, BATTLES AND", "WORLD MAP. MENUS/MOVIES STAY 4:3" } },
+        { ITEM_BORDERS,      { "BLACK REPLACES THE GRADIENT ON BOTH", "SIDES OF EVERY 4:3 SCREEN" } },
     };
     if (item < NUM_GAMES) return games_help[line];
     for (unsigned i = 0; i < sizeof(help) / sizeof(help[0]); i++)
@@ -358,6 +363,7 @@ static volatile int cheat_exp = 1, cheat_gil = 1;           // reward factors, 1
 static volatile int speed_field = 1, speed_world = 1;       // movement factors, 1..4
 static volatile int auto_skip;                              // skip the field's dialogs
 static volatile int widescreen;                             // 16:9 picture (ff7_wide.c)
+static int borders_black;                                   // solid black side bars (ff7_screen.c)
 static int language = -1, language_loaded;                  // game text: -1 system, 0..4 setLang (next start)
 static int settings_loaded;
 static int encounters_saved = 1, encounters_button_saved = 1;
@@ -480,6 +486,7 @@ static void load_cheats(void) {
         else if (!strcmp(key, "encounters")) encounters_saved = (v == 0 || v == 1 || v == 2 || v == 4) ? v : 1;
         else if (!strcmp(key, "encounters_button")) encounters_button_saved = v != 0;
         else if (!strcmp(key, "widescreen")) widescreen = v != 0;
+        else if (!strcmp(key, "borders_black")) borders_black = v != 0;
         else if (!strcmp(key, "language")) language = v >= 0 && v < NUM_LANGUAGES ? v : -1;
     }
     fclose(f);
@@ -492,8 +499,9 @@ void port_menu_save_settings(void) {
         return;
     }
     fprintf(f, "hpmp %d\nexp %d\ngil %d\nmateria_max %d\nspeed_field %d\nspeed_world %d\nauto_skip %d\nlanguage %d\n"
-               "widescreen %d\nencounters %d\nencounters_button %d\n",
+               "widescreen %d\nborders_black %d\nencounters %d\nencounters_button %d\n",
             cheat_hpmp, cheat_exp, cheat_gil, materia_max, speed_field, speed_world, auto_skip, language, widescreen,
+            borders_black,
             ff7_ui_encounters_get() < 0 ? encounters_saved : ff7_ui_encounters_get(), ff7_ui_encounters_button_get());
     fclose(f);
 }
@@ -523,6 +531,7 @@ void port_menu_init(void) {
     load_scenes();
     load_cheats();
     ff7_wide_set(widescreen);
+    ff7_screen_borders_set(borders_black);
     ff7_ui_encounters_set(encounters_saved);
     ff7_ui_encounters_button_set(encounters_button_saved);
     l_info("port menu: hold L + R and press Start (minigame shortcuts, profiler, %d saved scenes)", num_scenes);
@@ -1099,6 +1108,11 @@ static void change(int item, int dir) {
             ff7_wide_set(widescreen);
             snprintf(m, sizeof(m), "SCREEN: %s", widescreen ? "16:9 (FIELDS, BATTLES, WORLD MAP)" : "4:3");
             break;
+        case ITEM_BORDERS:
+            borders_black = !borders_black;
+            ff7_screen_borders_set(borders_black);
+            snprintf(m, sizeof(m), "SIDE BORDERS: %s", borders_black ? "BLACK" : "GRADIENT");
+            break;
         case ITEM_AUTO_SKIP:
             auto_skip = !auto_skip;
             snprintf(m, sizeof(m), "DIALOG SKIP: %s (NOT QUESTIONS)", auto_skip ? "ON" : "OFF");
@@ -1474,6 +1488,8 @@ void port_menu_draw(void) {
                 snprintf(line, sizeof(line), "ENCOUNTERS BUTTON < %s >", ff7_ui_encounters_button_get() ? "SHOW" : "HIDE");
             else if (i == ITEM_WIDESCREEN)
                 snprintf(line, sizeof(line), "SCREEN < %s >", widescreen ? "16:9" : "4:3");
+            else if (i == ITEM_BORDERS)
+                snprintf(line, sizeof(line), "SIDE BORDERS < %s >", borders_black ? "BLACK" : "GRADIENT");
             else if (i == ITEM_RECORD) {
                 if (recording >= 0) snprintf(line, sizeof(line), "RECORDING SCENE %d: STOP", recording + 1);
                 else snprintf(line, sizeof(line), "RECORD SCENE (MARKER + PROFILER)");

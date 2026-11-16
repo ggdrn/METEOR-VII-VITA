@@ -33,7 +33,7 @@ void port_menu_save_settings(void);
 #define CHEATS_PATH "cheats.txt"
 #define NUM_LANGUAGES 5
 static int settings_loaded, cheat_hpmp, cheat_exp=1, cheat_gil=1, materia_max=1;
-static int speed_field=1, speed_world=1, auto_skip, widescreen, language=-1;
+static int speed_field=1, speed_world=1, auto_skip, widescreen, borders_black, language=-1;
 static int encounters_saved=1, encounters_button_saved=1;
 '''
 tests = r'''
@@ -145,12 +145,13 @@ int main(void) {
     FILE *fp=fopen(CHEATS_PATH,"w"); assert(fp);
     fputs("exp 3\nwidescreen 1\nlanguage 2\n",fp); fclose(fp);
     load_cheats();
-    assert(encounters_saved==1 && encounters_button_saved==1);
+    assert(encounters_saved==1 && encounters_button_saved==1 && borders_black==0);
     assert(cheat_exp==3 && widescreen==1 && language==2);
+    borders_black=1;
     ff7_ui_encounters_button_set(0); port_menu_save_settings();
     settings_loaded=0; load_cheats();
     assert(encounters_saved==0 && encounters_button_saved==0);
-    assert(cheat_exp==3 && widescreen==1 && language==2);
+    assert(cheat_exp==3 && widescreen==1 && language==2 && borders_black==1);
     // A touch changes the same native byte; saving must capture the live value.
     native=0; port_menu_save_settings(); settings_loaded=0; load_cheats();
     assert(encounters_saved==1 && encounters_button_saved==0);

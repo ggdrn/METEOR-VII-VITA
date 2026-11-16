@@ -19,7 +19,7 @@ int ff7_buttons_patch_atlas(const char * path, uint32_t * argb, int w, int h);
 /** Before convert_image_data(th): draws the symbols into the menu font. */
 void ff7_buttons_font(const void * th);
 
-/** After the LZSS decompressor wrote to x86 address `dst`: field text labels. */
-void ff7_buttons_lzss(uint32_t dst);
+/** After LZSS wrote `written` bytes to x86 address `dst`: field text labels. */
+void ff7_buttons_lzss(uint32_t dst, uint32_t written);
 
 #endif // FF7_BUTTONS_H

@@ -18,4 +18,10 @@ int ff7_screen_quad_installed(void);
 /** 1 if fields and battles are zoomed (only then can a field show 16:9). */
 int ff7_screen_zoom_enabled(void);
 
+/** Select the side-border appearance used by VIDEO_update (0 gradient, 1 black). */
+void ff7_screen_borders_set(int black);
+
+/** Current side-border choice. */
+int ff7_screen_borders_get(void);
+
 #endif // FF7_SCREEN_H
